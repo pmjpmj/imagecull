@@ -3,7 +3,9 @@
 //! Rendering is a pure function of an [`Event`] and a verbosity, so every
 //! presentation decision is assertable without a terminal: a test folds the
 //! events of interest through [`render`] and reads the strings. [`Terminal`] is
-//! the reporter that does nothing but write them.
+//! the reporter that does nothing but write them; `groups` draws its own frame
+//! lines, but writes them through the same [`write`], so both commands treat a
+//! closed pipe the same way.
 //!
 //! Three ways to watch the same run: `--quiet` says only what the run did, the
 //! default writes a line per frame and then the summary, and `--verbose` writes
@@ -115,7 +117,11 @@ impl Reporter for Terminal {
 
 /// Write `text` to `stream` and flush it, so a line appears when it is drawn
 /// rather than when the buffer fills.
-fn write(stream: Stream, text: &str) {
+///
+/// Shared with `groups`, which prints a line per frame through the same rules:
+/// a closed pipe is the reader's decision, and every command's run does not
+/// become a failed run because `head` stopped reading.
+pub(crate) fn write(stream: Stream, text: &str) {
     if text.is_empty() {
         return;
     }

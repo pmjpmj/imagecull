@@ -25,6 +25,7 @@ Artifacts:
 ```
 imagecull groups <DIR> [--out FILE] [--recursive] [--limit N]
                        [--group-gap SECS] [--group-similarity COSINE]
+                       [--jobs N] [--quiet]
 ```
 
 Scans the folder, reads each file's largest embedded preview and its metadata
@@ -113,6 +114,77 @@ exists to inform, which is the claim that matters.
 The same folder drawn at 1600×1067 (below the working size, so the fit is a no-op
 and only one decode happens) measures **22 ms per frame**, which is the fastest
 end of the range. The spec budgeted ~50 ms/frame; 22–69 ms brackets it.
+
+Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
+is the determinism claim: every column is a function of the files and the two
+thresholds.
+
+### Frames are read a few at a time (2026-11-02, after this slice landed)
+
+Everything the pass costs is local CPU and every frame's reading is a pure
+function of one path, so `group::run` now reads `--jobs` frames at once (`-j`,
+every core when unset) and assembles the plan in the scan's order whatever order
+the workers finished in. `score` is left alone: its wall time is the server's,
+not the client's (SPEC §14).
+
+Same 3000×2000 folder, 40 frames, release build, M-series:
+
+| `--jobs` | wall | ms/frame |
+|---|---|---|
+| 1 (the old serial path) | 2.82 s | 70.5 |
+| 2 | 1.43 s | 35.9 |
+| 4 | 0.73 s | 18.2 |
+| 8 | 0.38 s | 9.4 |
+| 12 | 0.33 s | 8.2 |
+
+7.4× at 8 jobs, so the decode is scaling and not a shared lock. The summary now
+qualifies `ms/frame` with how many frames were in flight, because the number is
+wall clock: it is the shoot's price, not one frame's.
+
+A degree of parallelism is a scheduling decision, so the bytes must not move:
+`reading_frames_at_a_time_changes_the_cost_and_nothing_else` asserts that 1, 2, 3
+and 8 jobs give the same CSV, the same hash and the same groups over a folder
+with a pan, a gap and one unreadable file in it. `assign` also stopped scanning
+the timed list once per frame (O(n²) → linear), which is invisible at 400 frames
+and not at 20,000.
+
+### What a pass says while it runs
+
+A 400-frame shoot is half a minute of a terminal showing nothing, so each frame
+gets a line as it is read — the same treatment `score` gives each frame as it is
+judged, and the same rule: newline-terminated, no terminal detection, so a
+redirected log is the log a terminal received.
+
+```
+reading 40 frames · 8 at a time
+ 1/40  DSC_0001.NEF  ok
+ 2/40  DSC_0002.NEF  ok
+...
+40/40  DSC_0040.NEF  ok
+
+groups: 12 groups in 40 frames (mean 3.3, largest 12) · 4s measured, 104 ms/frame ·
+  8 frames at a time · grouping hash 74a69240 · wrote groups.csv
+```
+
+- **In the pass's order, not the workers'.** A worker claims an index and sends
+  its reading back; the pass's own thread buffers whatever arrived early and
+  says each frame exactly once, in index order. So the lines are the same at any
+  degree: 1, 2, 3 and 6 jobs produce the same event stream, and only the
+  announced degree differs.
+- **The pass's order, not the plan's.** Groups come from capture times, which
+  are not known until every frame has been read; a line that waited for them
+  would arrive after the run. The line therefore carries the position in the
+  folder, the name and the status — the plan's group order is in the CSV and the
+  report, which come after.
+- **It costs nothing measurable.** 40 frames at 3000×2000, release: 0.29 s with
+  the 41 progress lines and 0.29 s under `--quiet`, which prints only the
+  summary.
+- **`--quiet` is the script's escape hatch**, as it is for `score`: the summary
+  and nothing else. A test at 8 jobs and a terminal at 1 both take it.
+- **A closed pipe is not a failed run.** The report went through `print!`, which
+  panics on EPIPE; piping into `head` killed the process mid-shoot. Both the
+  lines and the report now go through `progress::write`, which ignores the
+  error the way the sidecar printing writer already did.
 
 Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
 is the determinism claim: every column is a function of the files and the two

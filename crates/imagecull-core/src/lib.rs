@@ -27,7 +27,9 @@
 //! ([`group`]) that puts a shoot's frames into the moments they were taken in,
 //! and the [`measure`]s taken from their own pixels — acutance, shake, roll,
 //! clipping and the camera's focus report. Neither consults a model, and neither
-//! changes a score.
+//! changes a score. The pass reports as it runs through the same kind of seam as
+//! [`progress`] ([`group::Watcher`]), so a front end can draw its frames without
+//! the core knowing what a screen is.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,

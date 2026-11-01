@@ -138,5 +138,7 @@ _Avoid_: cache hit, skip
 The one-line record a run prints as each frame is judged: where the frame sits
 in the run, its answer, what the request cost, and when the run will finish.
 One per frame and ended by a newline, so a redirected log reads the same as a
-terminal.
-_Avoid_: progress line, status line, log line
+terminal. The model-free pass prints one too, as each frame is measured: where
+it sits, its name, and its status, in the pass's own order, because the frame's
+group is not known until the last frame has been read.
+_Avoid_: progress line, status line, log line, spinner

@@ -36,7 +36,11 @@
 //! every group rank computed under the old hash is invalid, exactly as changing
 //! rubric wording invalidates scores.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
@@ -49,6 +53,7 @@ use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::measure::{self, AfPoint, Measures};
 use crate::preprocess;
 use crate::preview;
+use crate::progress;
 use crate::rubric::hex;
 use crate::sidecar::{self, Failure};
 
@@ -346,10 +351,15 @@ pub struct Grouping {
 /// names. Which group they land in does not depend on that: equal times are
 /// inside any gap, and the serial, settings and scene gates are blind to names.
 pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
-    let timed: Vec<usize> = (0..facts.len())
-        .filter(|&index| facts[index].captured.is_some() && facts[index].signature.is_some())
+    // A frame is timed when it can be placed in a moment at all: no capture
+    // time or no signature and there is nothing to compare, so it is its own
+    // group. The mask is read once per frame in the loop below, which is what
+    // keeps the undated tail linear on a shoot of thousands.
+    let timed: Vec<bool> = facts
+        .iter()
+        .map(|frame| frame.captured.is_some() && frame.signature.is_some())
         .collect();
-    let mut ordered = timed.clone();
+    let mut ordered: Vec<usize> = (0..facts.len()).filter(|&index| timed[index]).collect();
     ordered.sort_by_key(|&index| (facts[index].captured, index));
 
     let mut groups: Vec<Grouping> = Vec::new();
@@ -365,8 +375,8 @@ pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
         });
     }
 
-    for index in 0..facts.len() {
-        if !timed.contains(&index) {
+    for (index, &timed) in timed.iter().enumerate() {
+        if !timed {
             groups.push(Grouping {
                 members: vec![index],
             });
@@ -430,6 +440,13 @@ pub struct Options {
     pub scan: ScanOptions,
     /// How close two frames must be.
     pub thresholds: Thresholds,
+    /// How many frames to read at once: `None` is one per core the machine has.
+    ///
+    /// A scheduling decision, not a semantic one. A reading is a pure function
+    /// of one path, so the degree changes how long the pass takes and nothing it
+    /// says — the same frames under the same thresholds give the same plan, the
+    /// same CSV and the same [`grouping_hash`] at any degree.
+    pub jobs: Option<usize>,
 }
 
 /// One frame of the plan: where it is, which group it is in, and what the pixels
@@ -453,10 +470,15 @@ pub struct Planned {
 impl Planned {
     /// The `status` cell: `ok`, or the kind that cost the frame its measures.
     pub fn status(&self) -> &'static str {
-        self.failure
-            .as_ref()
-            .map_or(sidecar::OK, |failure| failure.kind.as_str())
+        status_of(self.failure.as_ref())
     }
+}
+
+/// The `status` cell a failure produces: `ok` when there is none. One function
+/// because the progress line and the CSV row must never spell a frame's outcome
+/// two ways.
+fn status_of(failure: Option<&Failure>) -> &'static str {
+    failure.map_or(sidecar::OK, |failure| failure.kind.as_str())
 }
 
 /// What one pass over a shoot folder found.
@@ -473,7 +495,13 @@ pub struct Plan {
     pub counts: ScanCounts,
     /// How long the whole pass took: the measured cost, which is evidence, not
     /// an estimate.
+    ///
+    /// Wall clock, so with more than one job it is the shoot's price rather
+    /// than one frame's, and [`Plan::jobs`] is what makes the per-frame figure
+    /// readable as the price it is.
     pub elapsed: Duration,
+    /// How many frames were read at once.
+    pub jobs: usize,
 }
 
 impl Plan {
@@ -514,23 +542,117 @@ pub struct GroupRow<'a> {
     pub frames: &'a [Planned],
 }
 
+/// What a pass says while it runs, as plain data.
+///
+/// The same seam [`progress`] describes for `score`, for the pass that asks no
+/// model: the core decides when an event happens and in what order, the front
+/// end decides what, if anything, to draw. A terminal writes a line per frame, a
+/// window will draw a bar, a test collects them — and the core learns nothing
+/// about any of them.
+pub trait Watcher {
+    /// One event from the pass.
+    fn event(&self, event: Event);
+}
+
+/// One thing a pass tells the front end.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// The folder is scanned and the pass knows how much work there is, before
+    /// the first frame is read.
+    Started(Started),
+    /// One frame is read, whichever way it went.
+    Frame(FrameEvent),
+}
+
+/// The pass beginning: how many frames it faces, and how many at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Started {
+    /// How many files the scan accepted: the denominator of every index.
+    pub total: usize,
+    /// How many frames are read at once.
+    pub jobs: usize,
+}
+
+/// One frame read: the unit the progress line shows.
+///
+/// It comes in the pass's own order — the scan's, which is the folder's names —
+/// rather than the plan's capture order, because the groups are not known until
+/// every frame has been read and being told about a frame after the run is over
+/// would not be progress. The CSV is where capture order lives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameEvent {
+    /// The frame's position in the pass, counting from 1, so a line reads
+    /// `12/400`.
+    pub index: usize,
+    /// How many frames the pass faces: the total [`Started`] announced.
+    pub total: usize,
+    /// The name the CSV will use for this frame.
+    pub filename: String,
+    /// The `status` cell its row will carry: `ok`, or the kind that cost it its
+    /// measures.
+    pub status: &'static str,
+    /// Why there are no measures, when there are none.
+    pub failure: Option<Failure>,
+}
+
+impl FrameEvent {
+    /// The event one finished reading is: the same status and the same failure
+    /// the row carries, so a line and a CSV cell cannot disagree.
+    fn of(index: usize, total: usize, source: &SourceFile, reading: &FrameRead) -> FrameEvent {
+        FrameEvent {
+            index: index + 1,
+            total,
+            filename: source.relative.to_string_lossy().into_owned(),
+            status: status_of(reading.failure.as_ref()),
+            failure: reading.failure.clone(),
+        }
+    }
+}
+
+impl Watcher for progress::Silent {
+    fn event(&self, _event: Event) {}
+}
+
 /// Group a shoot folder and measure every frame in it.
 ///
 /// One pass, one decode per frame, no requests. A frame that cannot be read is a
 /// row with empty measures and a status, and a group of its own: one odd file
 /// never costs the photographer the other 399.
+///
+/// The frames are independent of each other — a reading is a pure function of
+/// one path, and grouping is a pass over what the readings said — so they are
+/// read [`Options::jobs`] at a time, and the plan is assembled in the scan's
+/// order whatever order they finished in. Everything the pass costs is local
+/// CPU, which is why this command is worth threading where `score` is not: no
+/// server is serialising anything here.
+///
+/// What the pass says while it runs goes to a [`Watcher`]; this is the entry
+/// point for a caller that has nothing to say about it.
 pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
+    run_with(shoot, options, &progress::Silent)
+}
+
+/// [`run`], telling `watcher` about each frame as it is read.
+///
+/// The events arrive in the pass's order however many jobs the pass uses: a
+/// watcher sees frame 3 before frame 4 even when 4 finished first, so what a
+/// photographer reads is the same text at any degree, and a redirected log is
+/// the same log a serial run would have written.
+pub fn run_with(shoot: &Path, options: &Options, watcher: &dyn Watcher) -> Result<Plan> {
     check(&options.thresholds)?;
     let started = Instant::now();
     let scan = ingest::scan(shoot, &options.scan)?;
 
-    let mut readings: Vec<FrameRead> = Vec::with_capacity(scan.files.len());
-    let mut facts: Vec<Facts> = Vec::with_capacity(scan.files.len());
-    for source in &scan.files {
-        let reading = read(source);
-        facts.push(reading.facts.clone());
-        readings.push(reading);
-    }
+    let jobs = degree(options.jobs, scan.files.len());
+    watcher.event(Event::Started(Started {
+        total: scan.files.len(),
+        jobs,
+    }));
+    let readings = read_all(&scan.files, jobs, watcher);
+    let facts: Vec<Facts> = readings
+        .iter()
+        .map(|reading| reading.facts.clone())
+        .collect();
 
     let groupings = assign(&facts, &options.thresholds);
     let mut frames = Vec::with_capacity(scan.files.len());
@@ -554,6 +676,7 @@ pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
         hash: grouping_hash(&options.thresholds),
         counts: scan.counts,
         elapsed: started.elapsed(),
+        jobs,
     })
 }
 
@@ -573,6 +696,80 @@ fn check(thresholds: &Thresholds) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// How many frames to read at once: what was asked for, or one per core, and
+/// never more workers than there are frames to read.
+fn degree(asked: Option<usize>, frames: usize) -> usize {
+    asked
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+        .clamp(1, frames.max(1))
+}
+
+/// Read every frame, `jobs` of them at a time, and return them in the scan's
+/// order, telling `watcher` about each one as it arrives.
+///
+/// A worker claims the next index from a cursor and sends its reading back; the
+/// pass's own thread buffers whatever arrived out of order and says each frame
+/// exactly once, in index order. So the plan, the CSV, the hash and the log are
+/// the same at any degree. Below two jobs this is a plain loop: a shoot of one
+/// file has nothing to overlap, and keeping the serial path exact is what lets a
+/// slow run be reproduced.
+fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<FrameRead> {
+    let total = sources.len();
+    let mut readings: Vec<FrameRead> = Vec::with_capacity(total);
+    let tell = |readings: &mut Vec<FrameRead>, index: usize, reading: FrameRead| {
+        watcher.event(Event::Frame(FrameEvent::of(
+            index,
+            total,
+            &sources[index],
+            &reading,
+        )));
+        readings.push(reading);
+    };
+    if jobs < 2 || total < 2 {
+        for (index, source) in sources.iter().enumerate() {
+            tell(&mut readings, index, read(source));
+        }
+        return readings;
+    }
+
+    let cursor = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel::<(usize, FrameRead)>();
+    let cursor = &cursor;
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                while let Some(index) = next(cursor, total) {
+                    let reading = read(&sources[index]);
+                    // The receiver lives until every sender is gone, which is
+                    // the end of this scope: a send cannot be refused here.
+                    sender
+                        .send((index, reading))
+                        .expect("the pass is still collecting readings");
+                }
+            });
+        }
+        // Drop the pass's own handle, or the channel would never close.
+        drop(sender);
+        let mut pending: BTreeMap<usize, FrameRead> = BTreeMap::new();
+        let mut due = 0;
+        for (index, reading) in receiver {
+            pending.insert(index, reading);
+            while let Some(reading) = pending.remove(&due) {
+                tell(&mut readings, due, reading);
+                due += 1;
+            }
+        }
+    });
+    readings
+}
+
+/// The next unclaimed frame index, or `None` when the shoot has been handed out.
+fn next(cursor: &AtomicUsize, frames: usize) -> Option<usize> {
+    let index = cursor.fetch_add(1, Ordering::Relaxed);
+    (index < frames).then_some(index)
 }
 
 /// What one file yielded.

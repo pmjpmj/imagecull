@@ -278,6 +278,15 @@ pub struct GroupsArgs {
     /// (default 0.90)
     #[arg(long, value_name = "SIMILARITY", value_parser = similarity)]
     pub group_similarity: Option<f64>,
+
+    /// How many frames to read at once, on this machine's own cores
+    /// (default: one per core)
+    #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
+    pub jobs: Option<usize>,
+
+    /// Print only the summary, not the per-frame progress or the group lines
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 impl GroupsArgs {
@@ -295,6 +304,7 @@ impl GroupsArgs {
                     .map_or(group::DEFAULT_GAP, std::time::Duration::from_secs_f64),
                 similarity: self.group_similarity.unwrap_or(group::DEFAULT_SIMILARITY),
             },
+            jobs: self.jobs,
         }
     }
 }
@@ -349,6 +359,18 @@ fn positive_count(text: &str) -> Result<usize, String> {
         return Err("a limit of 0 files would score nothing; leave --limit out".to_string());
     }
     Ok(count)
+}
+
+/// A number of frames to read at once: at least one, because `--jobs 0` asks a
+/// run to do nothing at all rather than to do it one frame at a time.
+fn parallel_jobs(text: &str) -> Result<usize, String> {
+    let jobs: usize = text
+        .parse()
+        .map_err(|_| format!("'{text}' is not a number of frames"))?;
+    if jobs == 0 {
+        return Err("zero jobs would read nothing; leave --jobs out for one per core".to_string());
+    }
+    Ok(jobs)
 }
 
 impl ScoreArgs {
@@ -770,9 +792,11 @@ mod tests {
         assert_eq!(args.limit, None);
         assert_eq!(args.group_gap, None);
         assert_eq!(args.group_similarity, None);
+        assert_eq!(args.jobs, None);
 
         let options = args.options();
         assert_eq!(options.thresholds, Thresholds::default());
+        assert_eq!(options.jobs, None, "unasked means one job per core");
         assert!(!options.scan.recursive);
         assert_eq!(options.scan.limit, None);
     }
@@ -791,6 +815,8 @@ mod tests {
             "0.75",
             "--group-similarity",
             "0.96",
+            "--jobs",
+            "4",
         ]) else {
             panic!("not a groups command");
         };
@@ -803,6 +829,7 @@ mod tests {
         assert_eq!(options.thresholds.similarity, 0.96);
         assert!(options.scan.recursive);
         assert_eq!(options.scan.limit, Some(40));
+        assert_eq!(options.jobs, Some(4), "the degree is the flag's");
         assert_eq!(args.out, PathBuf::from("march-groups.csv"));
     }
 
@@ -814,12 +841,25 @@ mod tests {
             &["groups", "shoot", "--group-similarity", "1.5"][..],
             &["groups", "shoot", "--group-similarity", "-0.1"][..],
             &["groups", "shoot", "--limit", "0"][..],
+            &["groups", "shoot", "--jobs", "0"][..],
         ] {
             assert!(
                 parse_result(arguments).is_err(),
                 "{arguments:?} should be refused"
             );
         }
+    }
+
+    #[test]
+    fn groups_can_be_asked_for_the_summary_alone() {
+        let Command::Groups(args) = parse(&["groups", "shoot", "--quiet"]) else {
+            panic!("not a groups command");
+        };
+        assert!(args.quiet);
+        assert!(
+            !args.options().scan.recursive,
+            "--quiet silences, it does not scan"
+        );
     }
 
     #[test]
