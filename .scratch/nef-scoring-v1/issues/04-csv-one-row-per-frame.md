@@ -91,3 +91,13 @@ What tickets 05, 06 and 07 must know:
 ### Resolution
 
 Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
+
+### Superseded in part by ticket 09
+
+The column set, the RFC 4180 escaping and the number formatting above are
+unchanged. What changed is *when* the file is written: it used to be written once
+at the end of `run`, with the every-25-rows rewrite left to ticket 05. Since
+ticket 09 it is truncated and given its header once, after preflight, and each
+judged frame appends its row through `report::Writer` — so the CSV on disk is
+never a row behind the ledger and `--resume` rebuilds it from scratch. The
+`--json-scores` object is still written once, at exit.

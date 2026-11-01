@@ -55,7 +55,6 @@ pub fn run(args: &ScoreArgs) -> u8 {
     // which config file these values came from.
     config.ledger = args.ledger_mode();
     config.dedupe = effective.dedupe;
-    config.csv_rewrite_every = effective.csv_rewrite_every;
     config.endpoint = Some(effective.endpoint.clone());
     config.source = effective.source.clone();
     let client = match args.common.client(&effective) {
@@ -71,7 +70,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
 
     // The run narrates itself; the terminal draws it. The exit code is the
     // run's own classification, so a script can act on the outcome.
-    let reporter = Terminal::attached(verbosity(args));
+    let reporter = Terminal::new(verbosity(args));
     match scoring::run(
         &args.dir,
         &config,

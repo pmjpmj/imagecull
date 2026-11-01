@@ -230,8 +230,8 @@ pub struct ScoreArgs {
     #[arg(long)]
     pub no_dedupe: bool,
 
-    /// Suppress the per-frame progress line; the outcome and a one-line summary
-    /// remain, so a script can read them
+    /// Suppress the per-frame line; the outcome and a one-line summary remain,
+    /// so a script can read them
     #[arg(long, conflicts_with = "verbose")]
     pub quiet: bool,
 
@@ -358,7 +358,7 @@ mod tests {
         assert!(!args.common.no_config);
         assert!(
             !args.quiet && !args.verbose,
-            "a plain run shows the progress line and the summary"
+            "a plain run shows a line per frame and the summary"
         );
 
         let effective = effective(&args);

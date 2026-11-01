@@ -19,7 +19,7 @@
 //! is what lets a run be interrupted: each frame is recorded and flushed as it
 //! is judged, `--resume` skips what is already there, and the CSV is rendered
 //! from those records. Ticket 07 adds the run's own account of itself
-//! ([`progress`]): the events a front end draws a progress line and a summary
+//! ([`progress`]): the events a front end draws a frame line and a summary
 //! from, still with no terminal in the core. The config file ([`config`]) is the
 //! last source of values a run reads: what stays true across runs, resolved into
 //! the same effective config the flags produce.

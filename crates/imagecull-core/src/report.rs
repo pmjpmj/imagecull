@@ -1,10 +1,16 @@
 //! The deliverable: a CSV one row per frame, and the raw answers behind it.
 //!
-//! The columns are the spec's table verbatim (spec §9.2), in its order, so a
+//! The columns are the spec's table verbatim (spec §9.1), in its order, so a
 //! photographer who has read the spec reads the file without a legend. A row is
-//! rendered from a ledger record as that record is produced rather than rebuilt
-//! from the finished run, so a long run can be flushed mid-flight and the CSV is
-//! always the ledger's own account of itself.
+//! appended as the ledger record behind it is produced, and the file is
+//! truncated once at the start of the run and never again, so after frame N the
+//! CSV holds exactly the ledger's first N rows: it is never a snapshot, and a
+//! spreadsheet or `tail -f` can follow it while the run is still going.
+//!
+//! No row is `fsync`ed. The ledger is the durable record — it is flushed per
+//! record and repaired on reopen — and the CSV is a rendering of it that a
+//! `--resume` rebuilds from scratch, so paying for durability twice would buy
+//! nothing.
 //!
 //! RFC 4180 above all: a filename may contain a comma, a quote or a line break,
 //! and every cell is UTF-8. Values are the model's own numbers at the precision
@@ -12,7 +18,8 @@
 //! value cells empty rather than zero, because "no answer" and "a score of
 //! zero" are different facts.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -60,7 +67,7 @@ pub struct Outputs {
 }
 
 /// One line of the CSV: the unit a run accumulates as it goes, and the unit a
-/// ledger record will turn back into (spec §9.3).
+/// ledger record will turn back into (spec §9.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     /// The file, as the scan found it. The `file` column picks the absolute or
@@ -76,7 +83,7 @@ pub struct Row {
     pub document: Option<Value>,
     /// Why the row has no answers; `None` means it has them.
     pub failure: Option<Failure>,
-    /// The first frame whose identical preview this row reuses (spec §9.3): the
+    /// The first frame whose identical preview this row reuses (spec §9.2): the
     /// frame that paid for the request this row's numbers came from.
     pub duplicate_of: Option<String>,
     /// The rubric's short hash: the row's provenance at a glance.
@@ -121,24 +128,50 @@ impl Failure {
     }
 }
 
-/// Write the run's report: the CSV, and the raw documents when asked for.
-pub fn write(rows: &[Row], outputs: &Outputs) -> Result<()> {
-    write_file(&outputs.csv, csv(rows, outputs.absolute).as_bytes())?;
+/// The CSV as a run writes it: truncated once, then one row appended per frame.
+///
+/// The open is what makes the file the run's: whatever was at `path` belonged to
+/// an earlier run, and a report that is the ledger's own account of itself
+/// cannot start by keeping someone else's rows.
+pub struct Writer {
+    path: PathBuf,
+    file: File,
+    /// How this report spells the `file` column; fixed for the whole run.
+    absolute: bool,
+}
+
+impl Writer {
+    /// Truncate `path` and write the header, ready to append.
+    pub fn open(path: &Path, absolute: bool) -> Result<Writer> {
+        let mut file = File::create(path)
+            .map_err(|error| Error::fatal(format!("cannot write {}: {error}", path.display())))?;
+        let mut header = String::new();
+        push_record(&mut header, &COLUMNS);
+        write_bytes(&mut file, path, &header)?;
+        Ok(Writer {
+            path: path.to_path_buf(),
+            file,
+            absolute,
+        })
+    }
+
+    /// Append one frame's row. A file write puts it in the kernel's hands
+    /// immediately, so a reader sees it without anything being flushed here.
+    pub fn append(&mut self, row: &Row) -> Result<()> {
+        let mut line = String::new();
+        push_record(&mut line, &cells(row, self.absolute));
+        write_bytes(&mut self.file, &self.path, &line)
+    }
+}
+
+/// Write `--json-scores`, when the run asked for it: the raw documents, once, at
+/// the end. A JSON object cannot be appended line by line, and a frame whose
+/// document a killed run lost is still in the ledger.
+pub fn write_json(rows: &[Row], outputs: &Outputs) -> Result<()> {
     if let Some(path) = &outputs.json_scores {
         write_file(path, json(rows, outputs.absolute).as_bytes())?;
     }
     Ok(())
-}
-
-/// The CSV: the header, then one record per row in ingest order.
-fn csv(rows: &[Row], absolute: bool) -> String {
-    let mut out = String::new();
-    let header: Vec<&str> = COLUMNS.to_vec();
-    push_record(&mut out, &header);
-    for row in rows {
-        push_record(&mut out, &cells(row, absolute));
-    }
-    out
 }
 
 /// One row's cells, in [`COLUMNS`] order.
@@ -236,6 +269,11 @@ fn json(rows: &[Row], absolute: bool) -> String {
         .unwrap_or_else(|_| "{}".to_string());
     out.push('\n');
     out
+}
+
+fn write_bytes(file: &mut File, path: &Path, bytes: &str) -> Result<()> {
+    file.write_all(bytes.as_bytes())
+        .map_err(|error| Error::fatal(format!("cannot write {}: {error}", path.display())))
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {

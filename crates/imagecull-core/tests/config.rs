@@ -34,7 +34,6 @@ absolute = true
 rubric = "mine.toml"
 shoot_context = "night street, pushed two stops"
 dedupe = false
-csv_rewrite_every = 10
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -96,7 +95,6 @@ fn every_key_reaches_the_resolved_values() {
         Some("night street, pushed two stops")
     );
     assert_eq!(resolved.dedupe, Some(false));
-    assert_eq!(resolved.csv_rewrite_every, Some(10));
 }
 
 #[test]
@@ -118,12 +116,20 @@ fn an_unknown_section_is_fatal_and_names_itself() {
 }
 
 #[test]
+fn the_deleted_rewrite_interval_is_an_unknown_key() {
+    let message = error("[run]\ncsv_rewrite_every = 25\n");
+    assert!(
+        message.contains("csv_rewrite_every"),
+        "a key that no longer does anything has to fail by name, not be ignored: {message}"
+    );
+}
+
+#[test]
 fn a_value_the_flags_would_reject_is_fatal() {
     let cases = [
         ("[preview]\nmax_edge = 0\n", "max_edge"),
         ("[preview]\njpeg_quality = 0\n", "jpeg_quality"),
         ("[preview]\njpeg_quality = 101\n", "jpeg_quality"),
-        ("[run]\ncsv_rewrite_every = 0\n", "csv_rewrite_every"),
         ("[server]\ntimeout = 0\n", "timeout"),
         ("[server]\nmodel = \"  \"\n", "model"),
         ("[server]\nendpoint = \"\"\n", "endpoint"),
@@ -209,7 +215,6 @@ fn the_file_wins_over_the_built_in_default() {
     assert!(!effective.dedupe);
     assert!(effective.recursive);
     assert!(effective.outputs.absolute);
-    assert_eq!(effective.csv_rewrite_every, 10);
     assert_eq!(
         effective.shoot_context.as_deref(),
         Some("night street, pushed two stops")
@@ -232,7 +237,6 @@ fn an_empty_source_settles_to_the_specs_defaults() {
     assert!(!effective.outputs.absolute);
     assert_eq!(effective.rubric, None);
     assert!(effective.dedupe);
-    assert_eq!(effective.csv_rewrite_every, 25);
     assert_eq!(effective.source, None);
     assert_eq!(
         effective.scan(None),

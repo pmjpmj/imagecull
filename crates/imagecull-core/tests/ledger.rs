@@ -23,9 +23,7 @@ use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{
-    self, Cancel, Config, DEFAULT_CSV_REWRITE_EVERY, Decider, Ending, Request, Response,
-};
+use imagecull_core::scoring::{self, Cancel, Config, Decider, Ending, Request, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use support::decider::{Scripted, document};
@@ -832,34 +830,51 @@ fn rows_on_disk(path: &Path) -> usize {
 }
 
 #[test]
-fn the_csv_is_rewritten_as_the_run_goes_and_again_at_exit() {
-    assert_eq!(
-        DEFAULT_CSV_REWRITE_EVERY, 25,
-        "the spec's rewrite interval (spec §9.3)"
-    );
+fn the_csv_is_never_a_row_behind_the_ledger() {
     let dir = shoot(3);
-
-    // The default: nothing on disk until the run ends, so a 26th row is the
-    // first one that makes it visible mid-flight.
     let watched = out();
     let watching = Watching::new(csv_in(watched.path()), Scripted::always_reading(3));
-    run(dir.path(), &config(watched.path()), &watching);
-    assert_eq!(watching.rows(), [0, 0, 0]);
-    assert_eq!(csv_rows(watched.path()).len(), 4);
 
-    // Shrunk to every row: each frame's judgement leaves the report one row
-    // longer, which is what a killed run has to rely on.
-    let eager = out();
-    let mut config = config(eager.path());
-    config.csv_rewrite_every = 1;
-    let watching = Watching::new(csv_in(eager.path()), Scripted::always_reading(3));
-    run(dir.path(), &config, &watching);
+    run(dir.path(), &config(watched.path()), &watching);
+
     assert_eq!(
         watching.rows(),
         [0, 1, 2],
-        "the CSV is rewritten from the ledger as the rows arrive"
+        "at the moment frame N+1 is asked, the CSV already holds N rows"
     );
-    assert_eq!(csv_rows(eager.path()).len(), 4);
+    assert_eq!(csv_rows(watched.path()).len(), 4);
+}
+
+#[test]
+fn a_run_cancelled_before_the_first_frame_leaves_a_header_only_csv() {
+    let dir = shoot(3);
+    let out = out();
+    // A run that already filled this report, so the file starts with rows in it.
+    run(
+        dir.path(),
+        &config(out.path()),
+        &Scripted::always_reading(3),
+    );
+    assert_eq!(csv_rows(out.path()).len(), 4);
+
+    let cancel = Arc::new(Cancel::new());
+    cancel.cancel();
+    let stopped = scoring::run(
+        dir.path(),
+        &config(out.path()),
+        &Scripted::always_reading(0),
+        &Silent,
+        &cancel,
+    )
+    .expect("a run");
+
+    assert_eq!(stopped.ending, Ending::Interrupted);
+    assert_eq!(
+        csv_rows(out.path()).len(),
+        1,
+        "the report belongs to the run: a run that judged nothing leaves no rows, never the \
+         last run's"
+    );
 }
 
 #[test]

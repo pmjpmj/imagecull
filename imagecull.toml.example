@@ -64,6 +64,3 @@ endpoint = "http://127.0.0.1:8000"
 # Reuse the outcome of a frame whose preview is byte-identical to another.
 # Default: true
 # dedupe = true
-# How many rows accumulate between rewrites of the CSV, so a killed run leaves
-# a readable spreadsheet behind. Default: 25
-# csv_rewrite_every = 25

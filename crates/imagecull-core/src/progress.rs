@@ -280,7 +280,7 @@ pub struct Started {
     pub model: String,
 }
 
-/// One frame, done: the unit the progress line shows.
+/// One frame, done: the unit the frame line shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameEvent {
     /// The frame's position, counting from 1, so a line reads `12/400`.

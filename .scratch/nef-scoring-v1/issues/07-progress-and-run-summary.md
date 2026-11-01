@@ -176,3 +176,14 @@ What ticket 08 must know:
 ### Resolution
 
 Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
+
+### Superseded in part by ticket 09
+
+The reporter seam, the event vocabulary and the summary block are unchanged. The
+default mode's presentation is not: it used to draw one line that overwrote
+itself with `\r` + `ESC[K`, and only when stdout was a terminal. Since ticket 09
+it prints one newline-terminated line per frame wherever stdout points —
+`--quiet` is the switch for silence — and a frame whose answers an identical
+preview paid for names that frame on the line, which used to be `--verbose`'s
+alone. `render` no longer takes a TTY flag, and the summary block needs no
+separator before it.

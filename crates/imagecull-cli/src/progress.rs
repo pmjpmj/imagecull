@@ -1,16 +1,19 @@
 //! How a run looks on a terminal, rendered from the core's events.
 //!
-//! Rendering is a pure function of an [`Event`], a verbosity and whether the
-//! output is a terminal, so every presentation decision is assertable without a
-//! terminal: a test folds the events of interest through [`render`] and reads
-//! the strings. [`Terminal`] is the reporter that does nothing but write them.
+//! Rendering is a pure function of an [`Event`] and a verbosity, so every
+//! presentation decision is assertable without a terminal: a test folds the
+//! events of interest through [`render`] and reads the strings. [`Terminal`] is
+//! the reporter that does nothing but write them.
 //!
 //! Three ways to watch the same run: `--quiet` says only what the run did, the
-//! default draws a line that overwrites itself and then the summary, and
-//! `--verbose` writes a line per frame with the bytes that went out, so a
-//! surprising result can be traced without re-running with a debugger.
+//! default writes a line per frame and then the summary, and `--verbose` writes
+//! that line with the bytes that went out and the answers at full precision, so
+//! a surprising result can be traced without re-running with a debugger. Nothing
+//! checks where stdout points: a frame line ends in a newline, so a redirected
+//! log is the same text a terminal received, and `--quiet` is how a script asks
+//! for silence.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use imagecull_core::ingest::ScanCounts;
 use imagecull_core::progress::{
@@ -23,9 +26,9 @@ use imagecull_core::scoring::Ending;
 pub enum Verbosity {
     /// `--quiet`: the outcome and nothing else, so a script's output stays clean.
     Quiet,
-    /// The default: a progress line while it runs, the summary when it ends.
+    /// The default: a line per frame, then the summary.
     Normal,
-    /// `--verbose`: a line per frame, with what was sent and what came back.
+    /// `--verbose`: that line plus what was sent and what came back.
     Verbose,
 }
 
@@ -54,17 +57,17 @@ pub struct Rendering {
 
 /// Render one event for a terminal.
 ///
-/// `live` is whether stdout is a terminal. The running commentary — the header
-/// and the self-overwriting progress line — is the one thing that depends on it,
-/// because a redirected stdout must stay clean (spec §11).
-pub fn render(event: &Event, verbosity: Verbosity, live: bool) -> Rendering {
+/// A frame becomes one line, terminated by a newline, in every mode that says
+/// anything about it: a line you can no longer read after it scrolls is a line
+/// that was not worth printing.
+pub fn render(event: &Event, verbosity: Verbosity) -> Rendering {
     match event {
         Event::Started(started) => Rendering {
-            out: started_line(started, verbosity, live).unwrap_or_default(),
+            out: started_line(started, verbosity).unwrap_or_default(),
             err: String::new(),
         },
         Event::Frame(frame) => Rendering {
-            out: frame_text(frame, verbosity, live).unwrap_or_default(),
+            out: frame_text(frame, verbosity).unwrap_or_default(),
             err: String::new(),
         },
         Event::Warning(warning) => Rendering {
@@ -79,17 +82,7 @@ pub fn render(event: &Event, verbosity: Verbosity, live: bool) -> Rendering {
                 }
             } else {
                 Rendering {
-                    // The progress line is drawn with a carriage return and no
-                    // newline, so it has to be ended before the block starts.
-                    out: format!(
-                        "{}{}",
-                        if live && verbosity == Verbosity::Normal {
-                            "\n"
-                        } else {
-                            ""
-                        },
-                        summary_block(&finished.summary)
-                    ),
+                    out: summary_block(&finished.summary),
                     err: String::new(),
                 }
             }
@@ -101,29 +94,25 @@ pub fn render(event: &Event, verbosity: Verbosity, live: bool) -> Rendering {
 /// nothing.
 pub struct Terminal {
     verbosity: Verbosity,
-    live: bool,
 }
 
 impl Terminal {
-    /// A reporter for a run whose stdout may be a terminal.
-    pub fn attached(verbosity: Verbosity) -> Terminal {
-        Terminal {
-            verbosity,
-            live: std::io::stdout().is_terminal(),
-        }
+    /// A reporter for a run.
+    pub fn new(verbosity: Verbosity) -> Terminal {
+        Terminal { verbosity }
     }
 }
 
 impl Reporter for Terminal {
     fn event(&self, event: Event) {
-        let rendering = render(&event, self.verbosity, self.live);
+        let rendering = render(&event, self.verbosity);
         write(Stream::Out, &rendering.out);
         write(Stream::Err, &rendering.err);
     }
 }
 
-/// Write `text` to `stream` and flush it, so a progress line appears when it is
-/// drawn rather than when the buffer fills.
+/// Write `text` to `stream` and flush it, so a line appears when it is drawn
+/// rather than when the buffer fills.
 fn write(stream: Stream, text: &str) {
     if text.is_empty() {
         return;
@@ -145,11 +134,9 @@ fn write(stream: Stream, text: &str) {
 }
 
 /// The line a run opens with: how much work it is about to do, and under what.
-fn started_line(started: &Started, verbosity: Verbosity, live: bool) -> Option<String> {
+fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
     match verbosity {
         Verbosity::Quiet => None,
-        // A redirected stdout carries the result, not the running commentary.
-        Verbosity::Normal if !live => None,
         Verbosity::Normal | Verbosity::Verbose => Some(format!(
             "scoring {} {} · rubric {} · model {}\n",
             started.total,
@@ -160,22 +147,18 @@ fn started_line(started: &Started, verbosity: Verbosity, live: bool) -> Option<S
     }
 }
 
-/// One frame: the live line, or the verbose account of it.
-fn frame_text(frame: &FrameEvent, verbosity: Verbosity, live: bool) -> Option<String> {
+/// One frame: the line, or the verbose account of it.
+fn frame_text(frame: &FrameEvent, verbosity: Verbosity) -> Option<String> {
     match verbosity {
         Verbosity::Quiet => None,
         Verbosity::Verbose => Some(verbose_line(frame)),
-        Verbosity::Normal if live => {
-            // `\r` returns to the start of the line and `ESC[K` clears what the
-            // previous, longer line left behind.
-            Some(format!("\r{}\x1b[K", progress_line(frame)))
-        }
-        Verbosity::Normal => None,
+        Verbosity::Normal => Some(format!("{}\n", frame_line(frame))),
     }
 }
 
-/// The live progress line: index, name, the scores and stars, latency, ETA.
-fn progress_line(frame: &FrameEvent) -> String {
+/// The per-frame line: index, name, the scores and stars, what it cost, whether
+/// an identical preview paid for it, and when the run will be done.
+fn frame_line(frame: &FrameEvent) -> String {
     let mut parts = vec![
         format!("{}/{}", frame.index, frame.total),
         frame.filename.clone(),
@@ -192,6 +175,9 @@ fn progress_line(frame: &FrameEvent) -> String {
     }
     if let Some(latency_ms) = frame.latency_ms {
         parts.push(format!("{latency_ms}ms"));
+    }
+    if let Some(original) = &frame.duplicate_of {
+        parts.push(format!("duplicate of {original}"));
     }
     if let Some(eta) = frame.eta {
         parts.push(format!("eta {}", duration_text(eta)));
@@ -557,9 +543,9 @@ mod tests {
     }
 
     /// The whole run as a terminal would have received it.
-    fn transcript(events: &[Event], verbosity: Verbosity, live: bool) -> Rendering {
+    fn transcript(events: &[Event], verbosity: Verbosity) -> Rendering {
         events.iter().fold(Rendering::default(), |mut seen, event| {
-            let one = render(event, verbosity, live);
+            let one = render(event, verbosity);
             seen.out.push_str(&one.out);
             seen.err.push_str(&one.err);
             seen
@@ -567,50 +553,55 @@ mod tests {
     }
 
     #[test]
-    fn the_progress_line_shows_index_name_scores_stars_latency_and_eta() {
-        let rendered = transcript(&[answered(12)], Verbosity::Normal, true);
+    fn the_frame_line_shows_index_name_scores_stars_latency_and_eta() {
+        let rendered = transcript(&[answered(12)], Verbosity::Normal);
 
         assert_eq!(
-            rendered.out,
-            "\r12/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 7m41s\x1b[K",
-            "one line, overwriting itself"
+            rendered.out, "12/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 7m41s\n",
+            "one line per frame, ended by a newline"
         );
         assert!(rendered.err.is_empty());
     }
 
     #[test]
-    fn a_failed_frame_keeps_its_place_on_the_progress_line() {
-        let rendered = transcript(&[failed(13)], Verbosity::Normal, true);
+    fn a_failed_frame_keeps_its_place_on_a_line_of_its_own() {
+        let rendered = transcript(&[failed(13)], Verbosity::Normal);
 
         assert_eq!(
-            rendered.out, "\r13/400  DSC_0013.NEF  timeout  eta 7m39s\x1b[K",
+            rendered.out, "13/400  DSC_0013.NEF  timeout  eta 7m39s\n",
             "the row's status, and no latency for a frame that never answered"
         );
     }
 
     #[test]
-    fn normal_output_is_the_progress_line_on_a_terminal_and_silence_when_redirected() {
-        let events = [started(400), answered(12)];
+    fn normal_mode_writes_a_line_per_frame_and_never_a_carriage_return() {
+        let events = [started(400), answered(12), failed(13)];
 
-        let live = transcript(&events, Verbosity::Normal, true);
+        let rendered = transcript(&events, Verbosity::Normal);
+
         assert!(
-            live.out.starts_with("scoring 400 frames · rubric "),
+            rendered.out.starts_with("scoring 400 frames · rubric "),
             "a run says what it is about to do: {}",
-            live.out
+            rendered.out
         );
-        assert!(live.out.contains("\r12/400  DSC_0012.NEF"), "{}", live.out);
-
-        let redirected = transcript(&events, Verbosity::Normal, false);
-        assert_eq!(
-            redirected,
-            Rendering::default(),
-            "a redirected stdout carries the result, not the running commentary"
+        assert!(
+            rendered.out.contains(
+                "12/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 7m41s\n\
+                 13/400  DSC_0013.NEF  timeout  eta 7m39s\n"
+            ),
+            "every frame gets its own line: {}",
+            rendered.out
+        );
+        assert!(
+            !rendered.out.contains(['\r', '\x1b']),
+            "nothing overwrites itself, so a redirected log is the same text: {:?}",
+            rendered.out
         );
     }
 
     #[test]
     fn the_summary_block_reports_the_counts_the_statistics_and_the_rule() {
-        let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Normal, false);
+        let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Normal);
         let short = summary().rubric_hash.short().to_string();
 
         let expected = format!(
@@ -640,7 +631,6 @@ mod tests {
                 summary,
             })],
             Verbosity::Normal,
-            false,
         );
 
         assert!(
@@ -653,16 +643,15 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_block_starts_on_a_fresh_line_after_the_live_progress_line() {
+    fn the_summary_follows_the_last_frame_line_on_its_own_line() {
         let rendered = transcript(
-            &[started(400), answered(12), finished(Ending::Completed)],
+            &[started(400), failed(13), finished(Ending::Completed)],
             Verbosity::Normal,
-            true,
         );
 
         assert!(
-            rendered.out.contains("\x1b[K\nscored: 397 of 400"),
-            "the carriage-return line has to be ended first: {}",
+            rendered.out.contains("eta 7m39s\nscored: 397 of 400"),
+            "the block needs no separator of its own: {}",
             rendered.out
         );
     }
@@ -676,7 +665,7 @@ mod tests {
             finished(Ending::Completed),
         ];
 
-        let rendered = transcript(&events, Verbosity::Quiet, true);
+        let rendered = transcript(&events, Verbosity::Quiet);
 
         assert_eq!(
             rendered.out,
@@ -696,18 +685,17 @@ mod tests {
                 reason: "http_400: invalid criteria".to_string(),
             })],
             Verbosity::Quiet,
-            false,
         );
         assert_eq!(stopped.err, "stopped: http_400: invalid criteria\n");
 
-        let interrupted = transcript(&[finished(Ending::Interrupted)], Verbosity::Quiet, false);
+        let interrupted = transcript(&[finished(Ending::Interrupted)], Verbosity::Quiet);
         assert!(
             interrupted.err.starts_with("interrupted: "),
             "{}",
             interrupted.err
         );
 
-        let completed = transcript(&[finished(Ending::Completed)], Verbosity::Quiet, false);
+        let completed = transcript(&[finished(Ending::Completed)], Verbosity::Quiet);
         assert!(
             completed.err.is_empty(),
             "a finished run warns about nothing"
@@ -723,7 +711,7 @@ mod tests {
             finished(Ending::Completed),
         ];
 
-        let rendered = transcript(&events, Verbosity::Verbose, false);
+        let rendered = transcript(&events, Verbosity::Verbose);
 
         assert!(
             rendered.out.starts_with("scoring 400 frames · rubric "),
@@ -763,7 +751,7 @@ mod tests {
             frame.preview = None;
         }
 
-        let rendered = transcript(&[duplicate], Verbosity::Verbose, false);
+        let rendered = transcript(&[duplicate], Verbosity::Verbose);
 
         assert!(
             rendered
@@ -775,13 +763,30 @@ mod tests {
     }
 
     #[test]
+    fn the_default_line_names_the_frame_a_duplicate_reused() {
+        let mut duplicate = answered(13);
+        if let Event::Frame(frame) = &mut duplicate {
+            frame.duplicate_of = Some("DSC_0001.NEF".to_string());
+        }
+
+        let rendered = transcript(&[duplicate], Verbosity::Normal);
+
+        assert_eq!(
+            rendered.out,
+            "13/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  \
+             duplicate of DSC_0001.NEF  eta 7m41s\n",
+            "a reused score says which frame paid for it, before the clock does"
+        );
+    }
+
+    #[test]
     fn warnings_reach_stderr_in_every_mode() {
         let warning = Event::Warning(Warning {
             message: "scores.ledger.jsonl ends mid-record".to_string(),
         });
 
         for verbosity in [Verbosity::Quiet, Verbosity::Normal, Verbosity::Verbose] {
-            let rendered = transcript(std::slice::from_ref(&warning), verbosity, false);
+            let rendered = transcript(std::slice::from_ref(&warning), verbosity);
             assert_eq!(
                 rendered.err, "warning: scores.ledger.jsonl ends mid-record\n",
                 "{verbosity:?} must still say what went wrong"

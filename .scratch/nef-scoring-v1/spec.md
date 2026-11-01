@@ -74,7 +74,7 @@ The scoring pipeline lives in a library crate with no stdout, TTY, or process-ex
 33. As a photographer, I want `--fresh` to discard the ledger deliberately, so that starting over is an explicit choice.
 34. As a photographer shooting bursts, I want identical previews to cost one request while every NEF still gets its own row with `duplicate_of` set, so that the CSV stays one-row-per-file and the run still gets faster.
 35. As a photographer, I want `--no-dedupe` to score every frame independently, so that I can check whether dedupe is hiding anything.
-36. As a photographer watching a long run, I want a live progress line showing index, filename, scores, per-frame latency and ETA, so that I know it is working and when it will be done.
+36. As a photographer watching a long run, I want a line per frame showing index, filename, scores, per-frame latency and ETA, so that I know it is working, when it will be done, and what it said about the frame I just watched it score.
 37. As a photographer, I want a final summary with counts by status, mean/median per score, a star histogram, the disagreement rate and total wall time, so that I can judge the run and the rubric at a glance.
 38. As a photographer, I want `--quiet` and `--verbose` to control how much of that I see, so that scripted use stays clean and debugging gets detail.
 39. As a photographer scripting this, I want distinct exit codes for all-ok, completed-with-failures, fatal, and interrupted, so that a shell can act on the outcome.
@@ -171,7 +171,7 @@ One seam, at the top of the core:
 - Dedupe key is the SHA-256 of the **sent preview bytes**, plus everything else the model reads — task framing, shoot context, rubric hash, model alias — but **not the filename**: an identical preview judged in the same state reuses the earlier outcome, since the model is deterministic for identical bytes, while two frames of one burst (which always have different names) still dedupe. Disabled with `--no-dedupe`. `docs/adr/0002-dedupe-keys-the-state-but-not-the-filename.md` records why the filename is excluded.
 - **Burst policy:** every NEF gets its own CSV row; deduplicated frames carry the first frame's scores plus `duplicate_of`. The ledger saves the requests; the CSV stays one row per file so a filename is never missing.
 - `--fresh` discards the ledger. A rubric-hash or model mismatch without `--fresh` is a hard error with an actionable message.
-- The CSV is rewritten from the ledger every 25 rows (configurable) and at exit.
+- The CSV is appended one row per judged frame, from the same record, so a run killed mid-flight leaves a CSV that is exactly the ledger's rows and `--resume` rebuilds it. No row is fsynced: the ledger is the durable record.
 
 ### CSV
 
@@ -228,7 +228,7 @@ Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad argum
 - `models` — lists aliases and flags decision models.
 - `doctor [FILE]` — server reachability and version, decision-model detection, and, given a file, a preview-extraction self-test.
 - `--version` prints the version and the embedded rubric hash.
-- Progress (TTY only): index/total, filename, scores and stars, per-frame latency, ETA. Final summary: counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
+- One line per frame: index/total, filename, scores and stars, per-frame latency, ETA, and `duplicate of …` when an identical preview paid. Printed whether or not stdout is a terminal; `--quiet` silences it. Final summary: counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
 - **No `calibrate` subcommand in v1** (decided in this session: there are no star-rated shoots available as ground truth).
 
 ### Determinism

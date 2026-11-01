@@ -69,7 +69,7 @@ The task is *decision*, not generation: each frame gets a few numbers and a verd
                                     ▼
                     ┌──────────────────────────────────────────────┐
                     │ record     ledger.jsonl (append, fsync)      │
-                    │            → scores.csv (rewrite at end)     │
+                    │            → scores.csv (append one row)      │
                     └──────────────────────────────────────────────┘
 ```
 
@@ -275,6 +275,14 @@ On the wire the same authored form is rendered per question type: a `score` send
 
 `--out scores.csv`, RFC 4180, UTF-8, header row, `\n`.
 
+The file is written as the run goes rather than rebuilt at the end: it is
+truncated and given its header once, before the first frame, and every judged
+frame appends its row — so after frame N the CSV is exactly the ledger's first N
+rows. A spreadsheet or `tail -f` can follow it, and a killed run leaves the rows
+it judged rather than a stale snapshot. `--json-scores` is the exception: its
+object is written once, at exit, because a JSON object cannot be appended row by
+row and the ledger already holds every document.
+
 | column | example | notes |
 |---|---|---|
 | `file` | `DSC_0421.NEF` | Relative to the input dir unless `--absolute`. |
@@ -312,7 +320,7 @@ Additions over the original ask (4 scores) are justified: `stars`/`verdict` are 
 - Resume key: `(file, size, mtime_ns)`. Any change ⇒ re-score, because the file changed.
 - Dedupe: `preview_sha256` over the *sent* JPEG bytes. Identical preview ⇒ reuse the earlier outcome (deterministic model, §6.4), so a 20-frame burst costs one request. Disable with `--no-dedupe`.
 - `--fresh` discards the ledger. A rubric-hash mismatch without `--fresh` is a hard error with a clear message, never a silent mix.
-- The CSV is rewritten from the ledger after every N rows (default 25) and at exit, so an interrupted run still leaves a usable CSV.
+- The CSV is appended one row per judged frame, from the same record, so a run killed mid-flight leaves a CSV that is exactly the ledger's rows, and `--resume` rebuilds the whole file from scratch. No row is fsynced: the ledger is the durable record and the CSV is its rendering.
 
 ---
 
@@ -369,7 +377,14 @@ imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:R
 
 `--config` and `--no-config` are on all three subcommands (`§11.1`).
 
-Progress (TTY only): `[142/400] DSC_0555.NEF  overall 6.4★4 · 0.8s · eta 3m10s`, plus a final summary — counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
+One line per frame — `142/400  DSC_0555.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 3m10s`,
+with `duplicate of DSC_0540.NEF` when an identical preview paid for the answers —
+plus a final summary — counts by status, mean/median per score, star histogram,
+disagreement rate, total wall time. These lines print whether or not stdout is a
+terminal: a frame line ends in a newline, so a redirected log is the same text a
+terminal received, and `--quiet` is the switch for a script that wants none of
+it. `--verbose` adds the preview's size, the answers at full precision and each
+failure's message.
 
 `--version` prints version + rubric hash.
 
@@ -380,7 +395,7 @@ retyped as flags. Keys are grouped into five sections that map one-for-one onto
 the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
 `[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
 (`csv`, `json_scores`, `absolute`), `[run]` (`rubric`, `shoot_context`,
-`dedupe`, `csv_rewrite_every`). `imagecull.toml.example` is the commented
+`dedupe`). `imagecull.toml.example` is the commented
 reference; ADR 0003 records why this shape.
 
 **Discovery.** Exactly one file is read. The first of these that exists wins

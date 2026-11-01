@@ -4,7 +4,7 @@
 //! A JSONL file beside the CSV. Its first line is a versioned header naming the
 //! rubric, the model, the endpoint and the start time; every line after it is
 //! one frame — its identity on disk, the SHA-256 of the bytes that were actually
-//! sent, the status, the whole outcome, and when it was recorded (spec §9.3).
+//! sent, the status, the whole outcome, and when it was recorded (spec §9.2).
 //!
 //! Three things make the file worth trusting:
 //!
@@ -43,7 +43,7 @@ pub const VERSION: u32 = 1;
 /// `scores.ledger.jsonl`.
 const SUFFIX: &str = "ledger.jsonl";
 
-/// What to do with a ledger that is already there (spec §9.3).
+/// What to do with a ledger that is already there (spec §9.2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LedgerMode {
     /// Neither `--resume` nor `--fresh`. An existing ledger must have been
@@ -94,7 +94,7 @@ impl FileIdentity {
 }
 
 /// The key a resumed run matches a recorded frame on: the file, its size, and
-/// its modification time in nanoseconds (spec §9.3).
+/// its modification time in nanoseconds (spec §9.2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResumeKey {
     file: String,

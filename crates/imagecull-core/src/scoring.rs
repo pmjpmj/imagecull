@@ -200,12 +200,6 @@ impl RetryPolicy {
     }
 }
 
-/// How many rows accumulate between CSV rewrites: the spec's 25 (spec §9.3).
-///
-/// A run rewrites the CSV from what it has judged, so a killed run leaves a
-/// readable spreadsheet behind instead of nothing.
-pub const DEFAULT_CSV_REWRITE_EVERY: usize = 25;
-
 /// An effective scoring run: which rubric, which alias, how to look at the
 /// folder, how to prepare each frame, and where the report goes.
 #[derive(Debug, Clone)]
@@ -225,13 +219,11 @@ pub struct Config {
     pub retry: RetryPolicy,
     /// Where the CSV and the raw answers are written.
     pub outputs: Outputs,
-    /// What to do with a ledger that is already beside the CSV (spec §9.3).
+    /// What to do with a ledger that is already beside the CSV (spec §9.2).
     pub ledger: LedgerMode,
     /// Whether an identical preview may reuse an earlier frame's outcome
-    /// (spec §9.3); `--no-dedupe` turns it off.
+    /// (spec §9.2); `--no-dedupe` turns it off.
     pub dedupe: bool,
-    /// How many rows accumulate between CSV rewrites.
-    pub csv_rewrite_every: usize,
     /// The server this run talks to, recorded in the ledger's header for
     /// provenance. `None` when the decider has no endpoint of its own, as every
     /// test's fake has.
@@ -267,7 +259,6 @@ impl Config {
             outputs,
             ledger: LedgerMode::default(),
             dedupe: true,
-            csv_rewrite_every: DEFAULT_CSV_REWRITE_EVERY,
             endpoint: None,
             source: None,
         }
@@ -376,7 +367,7 @@ impl Frame {
     ///
     /// One of the two always applies: a document that arrived but could not be
     /// read is a [`Failure`] too, exactly as the CSV records it. This is the
-    /// only place that decision is made, so a progress line, a summary and a
+    /// only place that decision is made, so a frame line, a summary and a
     /// row cannot disagree about what happened to a frame.
     pub fn answers_or_failure(&self) -> std::result::Result<&Answers, Failure> {
         match &self.outcome {
@@ -411,10 +402,11 @@ impl Frame {
 /// stops the run between files, and its rows are written too.
 ///
 /// Every frame becomes a ledger record as it is produced, and its report row is
-/// rendered from that record — so the CSV is a view of the ledger, the CSV can
-/// be rewritten mid-run, and a frame the ledger already holds is skipped rather
-/// than asked again (spec §9.3). An identical preview reuses the earlier frame's
-/// outcome and still gets its own row.
+/// rendered from that record and appended — so the CSV on disk is always the
+/// ledger's own account of itself up to the last judged frame, and a frame the
+/// ledger already holds is skipped rather than asked again (spec §9.2). An
+/// identical preview reuses the earlier frame's outcome and still gets its own
+/// row.
 ///
 /// `reporter` hears about every one of those frames as it goes, in ingest order,
 /// and about the summary they add up to: this is the run's whole account of
@@ -462,8 +454,13 @@ pub fn run(
         }));
     }
     let total = scan.files.len();
+    // The report is the run's from here on: truncate it once, beside the ledger
+    // it renders, and never again. A killed run leaves the rows it judged; a
+    // resumed one rebuilds the whole file from the records it walks through.
+    let mut report = report::Writer::open(&config.outputs.csv, config.outputs.absolute)?;
     // The run's account of itself as it goes: the events a reporter hears, the
-    // rows the CSV is written from, and the frames the summary adds up.
+    // rows the report and the raw documents are written from, and the frames the
+    // summary adds up.
     let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
     let mut ending = Ending::Completed;
     for (position, source) in scan.files.iter().enumerate() {
@@ -476,10 +473,10 @@ pub fn run(
             .map(|identity| ResumeKey::new(display_name(source), identity))
             .and_then(|key| ledger.recorded(&key));
         if let Some(record) = recorded {
-            // Resumed frames are reported like any other: the progress line
-            // counts them and the summary counts them, so an interrupted run
-            // picks up where it stopped and says so.
-            account.resumed(position + 1, source, record);
+            // Resumed frames are reported and written like any other: the frame
+            // line counts them, the CSV carries their row and the summary counts
+            // them, so an interrupted run picks up where it stopped and says so.
+            account.resumed(position + 1, source, record, &mut report)?;
             continue;
         }
         let judged = judge(source, config, decider, &rubric_hash, identity, &ledger);
@@ -492,18 +489,13 @@ pub fn run(
             .err()
             .filter(|error| error.recovery().aborts_run())
             .map(ToString::to_string);
-        account.judged(position + 1, judged, &mut ledger)?;
-        if config.csv_rewrite_every > 0
-            && account.rows.len().is_multiple_of(config.csv_rewrite_every)
-        {
-            report::write(&account.rows, &config.outputs)?;
-        }
+        account.judged(position + 1, judged, &mut ledger, &mut report)?;
         if let Some(reason) = stops_run {
             ending = Ending::Aborted { reason };
             break;
         }
     }
-    report::write(&account.rows, &config.outputs)?;
+    report::write_json(&account.rows, &config.outputs)?;
     let Account {
         frames,
         resumed,
@@ -540,7 +532,8 @@ fn recorded_frames(count: usize) -> String {
 }
 
 /// The run's account of itself while it runs: what the reporter hears, the rows
-/// the CSV is written from, and the frames the summary adds up.
+/// the report and the raw documents are written from, and the frames the summary
+/// adds up.
 ///
 /// A resumed frame and a freshly judged one reach it through two doors and are
 /// recorded identically from there, so a resumed row and a fresh one cannot
@@ -579,32 +572,48 @@ impl<'a> Account<'a> {
         }
     }
 
-    /// A frame the ledger already held: reported and counted like any other, but
-    /// never asked again.
-    fn resumed(&mut self, index: usize, source: &SourceFile, record: &Record) {
-        self.record(index, record.frame(source.clone()), record, None);
+    /// A frame the ledger already held: reported, written and counted like any
+    /// other, but never asked again.
+    fn resumed(
+        &mut self,
+        index: usize,
+        source: &SourceFile,
+        record: &Record,
+        report: &mut report::Writer,
+    ) -> Result<()> {
+        let row = self.record(index, record.frame(source.clone()), record, None);
         self.resumed += 1;
+        report.append(&row)
     }
 
     /// A frame this run prepared and judged: recorded in the ledger it will be
-    /// resumed from, reported, and turned into the row it will be read as.
-    fn judged(&mut self, index: usize, judged: Judged, ledger: &mut Ledger) -> Result<()> {
+    /// resumed from, reported, and appended to the report as the row it will be
+    /// read as — the durable record first, its rendering second.
+    fn judged(
+        &mut self,
+        index: usize,
+        judged: Judged,
+        ledger: &mut Ledger,
+        report: &mut report::Writer,
+    ) -> Result<()> {
         if judged.record.duplicate_of.is_some() {
             self.duplicates += 1;
         }
-        self.record(index, judged.frame, &judged.record, judged.preview);
-        ledger.append(judged.record)
+        let row = self.record(index, judged.frame, &judged.record, judged.preview);
+        ledger.append(judged.record)?;
+        report.append(&row)
     }
 
-    /// One frame's account: the progress event, its CSV row, and the frame the
-    /// summary adds up.
+    /// One frame's account: the event a reporter hears, the row the report
+    /// appends, and the frame the summary adds up. The row is handed back rather
+    /// than only kept, because the caller decides when it reaches the file.
     fn record(
         &mut self,
         index: usize,
         frame: Frame,
         record: &Record,
         preview: Option<PreviewShape>,
-    ) {
+    ) -> Row {
         self.reporter.event(Event::Frame(frame_event(
             index,
             self.total,
@@ -613,9 +622,12 @@ impl<'a> Account<'a> {
             record.duplicate_of.as_deref(),
             self.began.elapsed(),
         )));
-        self.rows
-            .push(record.row(frame.source.clone(), self.rubric_hash, self.model));
+        let row = record.row(frame.source.clone(), self.rubric_hash, self.model);
+        // Kept for `--json-scores`, which is written once at exit and needs every
+        // document; the report does not read this back.
+        self.rows.push(row.clone());
         self.frames.push(frame);
+        row
     }
 }
 

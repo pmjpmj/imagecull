@@ -77,3 +77,12 @@ _Avoid_: continue, restart
 **Dedupe**:
 Reusing the judgement of a frame whose preview is byte-identical to another.
 _Avoid_: cache hit, skip
+
+### What a run prints
+
+**Frame line**:
+The one-line record a run prints as each frame is judged: where the frame sits
+in the run, its answers, what the request cost, and when the run will finish.
+One per frame and ended by a newline, so a redirected log reads the same as a
+terminal.
+_Avoid_: progress line, status line, log line

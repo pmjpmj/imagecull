@@ -95,3 +95,11 @@ content hash is *not* added to the ledger header.
   rows scored from different bytes. This is recorded, not fixed here — the fix
   is a config (or payload) hash in the ledger header, which belongs with the
   flags too and is its own ticket.
+
+## Amendments
+
+**Ticket 09 removed `csv_rewrite_every` from `[run]`.** The CSV is now appended
+one row per judged frame rather than rewritten on an interval, so the key had
+nothing left to control. The strict loader is the whole deprecation: a file that
+still sets it fails as an unknown key, naming it. The section map above is
+otherwise unchanged.

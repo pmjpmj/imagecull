@@ -203,7 +203,6 @@ impl ConfigFile {
             rubric: anchor(&self.run.rubric, base),
             shoot_context: self.run.shoot_context.clone(),
             dedupe: self.run.dedupe,
-            csv_rewrite_every: self.run.csv_rewrite_every,
         }
     }
 
@@ -224,9 +223,6 @@ impl ConfigFile {
             return Err(Error::fatal(format!(
                 "preview.jpeg_quality must be between 1 and 100, not {quality}"
             )));
-        }
-        if let Some(0) = self.run.csv_rewrite_every {
-            return Err(Error::fatal("run.csv_rewrite_every must be at least 1 row"));
         }
         if let Some(0) = self.server.timeout {
             return Err(Error::fatal(
@@ -288,7 +284,6 @@ struct RunSection {
     rubric: Option<PathBuf>,
     shoot_context: Option<String>,
     dedupe: Option<bool>,
-    csv_rewrite_every: Option<usize>,
 }
 
 /// The values one source actually set — a config file's, or the flags'.
@@ -310,7 +305,6 @@ pub struct Resolved {
     pub rubric: Option<PathBuf>,
     pub shoot_context: Option<String>,
     pub dedupe: Option<bool>,
-    pub csv_rewrite_every: Option<usize>,
 }
 
 impl Resolved {
@@ -332,7 +326,6 @@ impl Resolved {
             rubric: flags.rubric.or(self.rubric),
             shoot_context: flags.shoot_context.or(self.shoot_context),
             dedupe: flags.dedupe.or(self.dedupe),
-            csv_rewrite_every: flags.csv_rewrite_every.or(self.csv_rewrite_every),
         }
     }
 
@@ -364,9 +357,6 @@ impl Resolved {
             rubric: self.rubric,
             shoot_context: self.shoot_context,
             dedupe: self.dedupe.unwrap_or(true),
-            csv_rewrite_every: self
-                .csv_rewrite_every
-                .unwrap_or(crate::scoring::DEFAULT_CSV_REWRITE_EVERY),
         }
     }
 }
@@ -395,8 +385,6 @@ pub struct Effective {
     pub shoot_context: Option<String>,
     /// Whether an identical preview may reuse an earlier frame's outcome.
     pub dedupe: bool,
-    /// How many rows accumulate between CSV rewrites.
-    pub csv_rewrite_every: usize,
 }
 
 impl Effective {
