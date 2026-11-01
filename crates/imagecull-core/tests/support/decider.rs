@@ -8,9 +8,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
-use imagecull_core::error::Result;
-use imagecull_core::scoring::{Decider, Request, Response, State};
+use imagecull_core::error::{Error, Result};
+use imagecull_core::scoring::{Cancel, Decider, Request, Response, State};
 use serde_json::{Value, json};
 
 /// One request as the scripted decider saw it, copied out of the borrow.
@@ -30,6 +31,10 @@ pub struct Scripted {
     seen: RefCell<Vec<Seen>>,
     in_flight: Cell<usize>,
     overlapped: Cell<bool>,
+    /// What the preflight answers, when a test gives it something to say.
+    preflight: RefCell<Option<Error>>,
+    /// A cancel flag to pull, and after how many requests.
+    cancel_after: Option<(usize, Arc<Cancel>)>,
     /// The latency this decider reports for every request, as if measured on
     /// this side of a socket.
     pub latency_ms: u64,
@@ -43,6 +48,8 @@ impl Scripted {
             seen: RefCell::new(Vec::new()),
             in_flight: Cell::new(0),
             overlapped: Cell::new(false),
+            preflight: RefCell::new(None),
+            cancel_after: None,
             latency_ms: 812,
         }
     }
@@ -50,6 +57,24 @@ impl Scripted {
     /// A decider that answers every frame with the same readable document.
     pub fn always_reading(frames: usize) -> Scripted {
         Self::answering((0..frames).map(|_| Ok(document(6.4237, "4"))).collect())
+    }
+
+    /// Refuse the preflight with `error`, the way a real decider refuses a
+    /// server that is not answering or does not serve the alias. The refusal is
+    /// handed over once, because that is how often a run asks.
+    pub fn refusing_preflight(error: Error) -> Scripted {
+        let decider = Scripted::answering(Vec::new());
+        *decider.preflight.borrow_mut() = Some(error);
+        decider
+    }
+
+    /// Pull `cancel` after this many requests, from inside the decider: the
+    /// lever a photographer's Ctrl-C pulls, at the point a run checks it.
+    pub fn cancelling_after(self, requests: usize, cancel: Arc<Cancel>) -> Scripted {
+        Scripted {
+            cancel_after: Some((requests, cancel)),
+            ..self
+        }
     }
 
     /// Answer with a client-measured latency of `ms` instead of the default.
@@ -73,6 +98,13 @@ impl Scripted {
 }
 
 impl Decider for Scripted {
+    fn preflight(&self) -> Result<()> {
+        match self.preflight.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
         self.in_flight.set(self.in_flight.get() + 1);
         if self.in_flight.get() > 1 {
@@ -91,6 +123,11 @@ impl Decider for Scripted {
                 .map(|question| question.id().to_string())
                 .collect(),
         });
+        if let Some((after, cancel)) = &self.cancel_after
+            && self.seen.borrow().len() == *after
+        {
+            cancel.cancel();
+        }
         let answer = self
             .answers
             .borrow_mut()

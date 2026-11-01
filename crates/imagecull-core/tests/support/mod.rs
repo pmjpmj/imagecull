@@ -19,6 +19,19 @@ pub mod stub;
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
 use imagecull_core::report::Outputs;
 
+/// A temp shoot folder holding `files`, creating subfolders as needed.
+pub fn shoot(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    for (name, bytes) in files {
+        let path = dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create a subfolder");
+        }
+        std::fs::write(path, bytes).expect("write fixture");
+    }
+    dir
+}
+
 /// Where the report of a test that reads the answers from the run itself goes:
 /// the null device. A run always writes its CSV, and it must never write into
 /// the folder it is scoring.

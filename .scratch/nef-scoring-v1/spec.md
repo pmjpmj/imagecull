@@ -204,11 +204,18 @@ RFC 4180, UTF-8, header row, `\n` line endings, one row per input file, in inges
 | `http_400` | invalid criteria / bad question schema | **abort** (rubric is wrong) |
 | `http_413` | context too long | record, continue, suggest a smaller `--max-edge` |
 | `http_422` | malformed body | abort (client bug) |
+| `http_5xx` | the server failed on its own side | retry, then record, continue |
 | `server_unreachable` | refused / DNS | abort after retries |
 | `timeout` | exceeded read timeout | retry, then record |
 | `bad_response` | answer missing or wrong type | record raw document, continue |
 
 Retries: three attempts with 0.5/1/2 s backoff, **only** for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx.
+
+`http_5xx` exists because the retry rule above already names 5xx as a transient
+class, so the taxonomy has to be able to name one: a run retries it and, if it
+never clears, records the row and carries on, because one server hiccup must not
+cost the photographer the shoot. It is the tenth `status` string, so every
+consumer of `status` (the XMP sidecars in v2, the GUI) accepts it.
 
 Preflight before the first file: `GET /v1/models`, confirm the alias exists, and if the server exposes per-model status, confirm the model is a decision model. Fail fast with an actionable message rather than 400 files of the same 400.
 

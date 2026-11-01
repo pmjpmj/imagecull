@@ -6,9 +6,11 @@
 //! runs but the bytes are written into a previews directory and no request is
 //! made. Rendering is all here; the decisions are in `imagecull_core`.
 
+use std::sync::Arc;
+
 use imagecull_core::ingest::ScanCounts;
 use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{self, Run};
+use imagecull_core::scoring::{self, Cancel, Ending, Run};
 use imagecull_core::systemone::Adapter;
 use imagecull_core::{ExitCode, dry_run};
 
@@ -43,7 +45,15 @@ pub fn run(args: &ScoreArgs) -> u8 {
         }
     };
 
-    match scoring::run(&args.dir, &config, &Adapter::new(client)) {
+    let cancel = Arc::new(Cancel::new());
+    install_cancel_handler(&cancel);
+
+    match scoring::run(
+        &args.dir,
+        &config,
+        &Adapter::new(client, &config.model),
+        &cancel,
+    ) {
         Ok(run) => {
             print!("{}", render_run(&run));
             exit_code_for_run(&run)
@@ -52,6 +62,20 @@ pub fn run(args: &ScoreArgs) -> u8 {
             eprintln!("error: {error}");
             ExitCode::Fatal.code()
         }
+    }
+}
+
+/// The CLI's half of cooperative cancellation: Ctrl-C asks the run to stop
+/// between files rather than killing the process mid-request, so nothing already
+/// scored is lost and the run still writes its CSV and exits `3` (spec §10).
+fn install_cancel_handler(cancel: &Arc<Cancel>) {
+    let cancel = Arc::clone(cancel);
+    if let Err(error) = ctrlc::set_handler(move || cancel.cancel()) {
+        // A process that cannot take the signal still runs; Ctrl-C then kills it
+        // the usual way, without the tidy exit.
+        eprintln!(
+            "warning: Ctrl-C cannot be caught here, so it will not stop a run cleanly: {error}"
+        );
     }
 }
 
@@ -74,14 +98,10 @@ fn dry_run_command(args: &ScoreArgs) -> u8 {
     }
 }
 
-/// The exit classification for a real run: every row scored, or some left
-/// behind. Fatal and interrupted are decided by the caller.
+/// The process exit code for a real run: the run already knows what it is —
+/// all ok, completed with failed rows, stopped, or interrupted.
 pub fn exit_code_for_run(run: &Run) -> u8 {
-    if run.failed() > 0 {
-        ExitCode::FailedRows.code()
-    } else {
-        ExitCode::Ok.code()
-    }
+    run.exit_code().code()
 }
 
 /// The report of a real run: one line per frame with its six answers, then a
@@ -113,11 +133,17 @@ pub fn render_run(run: &Run) -> String {
     out
 }
 
-/// The one-line summary: how much of the shoot was scored, under which rubric.
+/// The one-line summary: how much of the shoot was scored, under which rubric,
+/// and — when it did not finish — what stopped it.
 fn summary(run: &Run) -> String {
-    let mut parts = vec![format!("{} of {} scored", run.scored(), run.frames.len())];
+    let mut parts = vec![format!("{} of {} scored", run.scored(), run.total)];
     if run.failed() > 0 {
         parts.push(format!("{} failed", run.failed()));
+    }
+    match &run.ending {
+        Ending::Aborted { reason } => parts.push(format!("stopped: {reason}")),
+        Ending::Interrupted => parts.push("interrupted".to_string()),
+        Ending::Completed => {}
     }
     parts.extend(left_out(&run.counts));
     parts.push(format!("rubric {}", run.rubric_hash.short()));
@@ -288,7 +314,9 @@ mod tests {
             rubric_hash: Rubric::embedded().expect("parse").hash("clef-flash-oQ4e"),
             model: "clef-flash-oQ4e".to_string(),
             counts: ScanCounts::default(),
+            total: frames.len(),
             frames,
+            ending: Ending::Completed,
         }
     }
 
@@ -356,6 +384,43 @@ mod tests {
             "{rendered}"
         );
         assert_eq!(exit_code_for_run(&run), ExitCode::FailedRows.code());
+    }
+
+    #[test]
+    fn an_interrupted_run_says_so_and_exits_three() {
+        let mut run = run(vec![frame("DSC_0001.NEF", Ok(reading()))]);
+        run.total = 400;
+        run.ending = Ending::Interrupted;
+
+        assert!(
+            render_run(&run).contains("scored: 1 of 400 scored · interrupted ·"),
+            "an interrupted run does not look like a finished one: {}",
+            render_run(&run)
+        );
+        assert_eq!(exit_code_for_run(&run), ExitCode::Interrupted.code());
+    }
+
+    #[test]
+    fn a_stopped_run_prints_why_and_exits_two() {
+        let mut run = run(vec![frame(
+            "DSC_0001.NEF",
+            Err(Error::new(
+                ErrorKind::Http400,
+                "POST /v1/systemone returned HTTP 400: invalid criteria",
+            )),
+        )]);
+        run.ending = Ending::Aborted {
+            reason: "http_400: POST /v1/systemone returned HTTP 400: invalid criteria".into(),
+        };
+
+        let rendered = render_run(&run);
+        assert!(
+            rendered.contains(
+                "stopped: http_400: POST /v1/systemone returned HTTP 400: invalid criteria"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(exit_code_for_run(&run), ExitCode::Fatal.code());
     }
 
     #[test]

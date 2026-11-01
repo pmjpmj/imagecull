@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use imagecull_core::error::{ErrorKind, Result};
+use imagecull_core::error::{ErrorKind, Recovery, Result};
 use imagecull_core::ingest;
 use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
 use imagecull_core::reading::{self, Verdict};
 use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{self, Config, Decider, Request, Response, State};
+use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::systemone::Adapter;
 use serde_json::{Value, json};
 use support::stub::Stub;
@@ -72,15 +72,27 @@ fn request<'a>(
     }
 }
 
+/// The decision requests the stub received, in order: a run's preflight GETs
+/// come first and are not frames.
+fn posts(stub: &Stub) -> Vec<support::stub::Received> {
+    stub.requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/systemone")
+        .collect()
+}
+
 /// The real adapter, pointed at the stub, with the timeouts a run would use.
-fn adapter(stub: &Stub) -> Adapter {
-    Adapter::new(Client::new(stub.endpoint(), Timeouts::with_read_seconds(5)))
+fn adapter(stub: &Stub, model: &str) -> Adapter {
+    Adapter::new(
+        Client::new(stub.endpoint(), Timeouts::with_read_seconds(5)),
+        model,
+    )
 }
 
 /// One request for one frame, as the pipeline would build it.
 fn decide(stub: &Stub, state: State, preview: &Encoded, model: &str) -> Result<Response> {
     let rubric = Rubric::embedded().expect("parse");
-    adapter(stub).decide(&request(&rubric, preview, state, model))
+    adapter(stub, model).decide(&request(&rubric, preview, state, model))
 }
 
 #[test]
@@ -357,9 +369,7 @@ fn the_status_taxonomy_names_what_the_server_rejected() {
 }
 
 #[test]
-fn a_5xx_is_classified_as_a_failure_with_its_status_kept() {
-    // Retrying and the 5xx action are ticket 06's; here the point is that a
-    // 500 is never mistaken for an answer.
+fn a_5xx_names_the_server_side_failure_and_keeps_its_status() {
     let stub = Stub::scripted(vec![(500, r#"{"detail":"boom"}"#.to_string())]);
     let preview = preview(100, 100);
 
@@ -371,8 +381,35 @@ fn a_5xx_is_classified_as_a_failure_with_its_status_kept() {
     )
     .expect_err("a 500 is not an answer");
 
+    assert_eq!(error.kind(), Some(ErrorKind::Http5xx));
     assert_eq!(error.http_status(), Some(500));
+    assert_eq!(
+        error.recovery(),
+        Recovery::RetryThenRecord,
+        "a server-side hiccup is retried, not an abort and not a 4xx"
+    );
     assert!(error.message().contains("boom"));
+}
+
+#[test]
+fn a_context_that_is_too_long_says_which_knob_to_turn_down() {
+    let stub = Stub::scripted(vec![(413, r#"{"detail":"context too long"}"#.to_string())]);
+    let preview = preview(100, 100);
+
+    let error = decide(
+        &stub,
+        State::for_frame("DSC_0001.NEF", None),
+        &preview,
+        "clef-flash-oQ4e",
+    )
+    .expect_err("a 413 is not an answer");
+
+    assert_eq!(error.kind(), Some(ErrorKind::Http413));
+    assert!(
+        error.message().contains("--max-edge"),
+        "the row has to say what to change: {}",
+        error.message()
+    );
 }
 
 #[test]
@@ -381,10 +418,13 @@ fn nothing_listening_is_server_unreachable() {
     let addr = listener.local_addr().expect("addr");
     drop(listener);
 
-    let adapter = Adapter::new(Client::new(
-        Endpoint::parse(&format!("http://{addr}")).expect("valid endpoint"),
-        Timeouts::with_read_seconds(5),
-    ));
+    let adapter = Adapter::new(
+        Client::new(
+            Endpoint::parse(&format!("http://{addr}")).expect("valid endpoint"),
+            Timeouts::with_read_seconds(5),
+        ),
+        "clef-flash-oQ4e",
+    );
     let rubric = Rubric::embedded().expect("parse");
     let preview = preview(100, 100);
     let error = adapter
@@ -402,13 +442,16 @@ fn nothing_listening_is_server_unreachable() {
 #[test]
 fn a_server_that_never_answers_times_out() {
     let stub = Stub::scripted(vec![(200, answer_document())]).taking(Duration::from_secs(2));
-    let adapter = Adapter::new(Client::new(
-        stub.endpoint(),
-        Timeouts {
-            connect: Duration::from_secs(5),
-            read: Duration::from_millis(200),
-        },
-    ));
+    let adapter = Adapter::new(
+        Client::new(
+            stub.endpoint(),
+            Timeouts {
+                connect: Duration::from_secs(5),
+                read: Duration::from_millis(200),
+            },
+        ),
+        "clef-flash-oQ4e",
+    );
     let rubric = Rubric::embedded().expect("parse");
     let preview = preview(100, 100);
 
@@ -440,7 +483,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
     let script = std::iter::repeat_n((200, answer_document()), 3).collect();
     // A handler that takes a moment to answer would let a concurrent client
     // overlap requests; the stub records the deepest overlap it ever saw.
-    let stub = Stub::scripted(script).taking(Duration::from_millis(30));
+    let stub = Stub::serving(script, &["clef-flash-oQ4e"]).taking(Duration::from_millis(30));
 
     let config = Config::new(
         Rubric::embedded().expect("parse"),
@@ -450,7 +493,13 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
         Some("street at dusk".into()),
         support::unwatched(),
     );
-    let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, &config.model),
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(run.frames.len(), 3);
     assert_eq!(run.scored(), 3);
@@ -458,7 +507,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
     assert_eq!(run.model, "clef-flash-oQ4e");
     assert_eq!(run.rubric_hash, config.rubric_hash());
 
-    let requests = stub.requests();
+    let requests = posts(&stub);
     assert_eq!(requests.len(), 3, "one request per frame");
     let names: Vec<&str> = requests
         .iter()
@@ -488,7 +537,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
 #[test]
 fn a_run_over_http_reports_the_answers_it_read() {
     let shoot = shoot(1);
-    let stub = Stub::scripted(vec![(200, answer_document())]);
+    let stub = Stub::serving(vec![(200, answer_document())], &["clef-27b-oQ4e"]);
     let config = Config::new(
         Rubric::embedded().expect("parse"),
         Some("clef-27b-oQ4e".into()),
@@ -498,17 +547,56 @@ fn a_run_over_http_reports_the_answers_it_read() {
         support::unwatched(),
     );
 
-    let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, &config.model),
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     let frame = &run.frames[0];
     let reading = frame.outcome.as_ref().expect("the frame was prepared");
     let answers = reading.answers.as_ref().expect("six answers");
     assert_eq!(answers.overall, 6.4237);
     assert_eq!(answers.stars, 4);
-    assert_eq!(stub.requests()[0].body["model"], "clef-27b-oQ4e");
+    assert_eq!(posts(&stub)[0].body["model"], "clef-27b-oQ4e");
     assert_eq!(
         run.rubric_hash,
         config.rubric.hash("clef-27b-oQ4e"),
         "--model feeds the rubric hash"
+    );
+}
+
+#[test]
+fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() {
+    let shoot = shoot(2);
+    let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);
+    let config = Config::new(
+        Rubric::embedded().expect("parse"),
+        Some("clef-flash-oQ4e".into()),
+        Params::default(),
+        ingest::ScanOptions::default(),
+        None,
+        support::unwatched(),
+    );
+
+    let error = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, "clef-flash-oQ4e"),
+        &Cancel::new(),
+    )
+    .expect_err("a missing alias is a broken server, not a broken file");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("clef-flash-oQ4e") && error.message().contains("clef-27b-oQ4e"),
+        "the message names the alias asked for and the ones served: {}",
+        error.message()
+    );
+    assert!(
+        posts(&stub).is_empty(),
+        "no frame is sent to a server that cannot answer"
     );
 }

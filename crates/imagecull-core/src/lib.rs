@@ -11,7 +11,11 @@
 //! ([`preprocess`]), and the `--dry-run` export that puts them together
 //! ([`dry_run`]) from M1; and the rubric ([`rubric`]), the `/v1/systemone`
 //! client ([`systemone`]) and the one-frame scoring entry point ([`scoring`])
-//! from M2, with the CSV deliverable ([`report`]) on top of them.
+//! from M2, with the CSV deliverable ([`report`]) on top of them. M3 adds the
+//! rules that keep a long run honest: the taxonomy's retries and its aborting
+//! kinds ([`error`]), the preflight that runs before the first frame, the
+//! cancellation flag between files ([`scoring::Cancel`]) and the run's own exit
+//! classification ([`scoring::Ending`]).
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -40,4 +44,6 @@ pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use reading::{Answers, Confidences, Reading, Verdict};
 pub use report::Outputs;
 pub use rubric::{Question, QuestionKind, Rubric, RubricHash};
-pub use scoring::{Config, Decider, Request, Response, Run, State, Usage};
+pub use scoring::{
+    Cancel, Config, Decider, Ending, Request, Response, RetryPolicy, Run, State, Usage,
+};

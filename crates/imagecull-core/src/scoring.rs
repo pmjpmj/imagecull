@@ -12,8 +12,10 @@
 //! so concurrency would only manufacture timeouts (spec §7.1).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use crate::error::Result;
+use crate::error::{ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
@@ -112,6 +114,78 @@ impl Usage {
 pub trait Decider {
     /// Ask the model one frame's questions and return its answer document.
     fn decide(&self, request: &Request<'_>) -> Result<Response>;
+
+    /// Confirm, before the first frame, that this decider can answer at all.
+    ///
+    /// A run over 400 frames that would fail identically 400 times is worse
+    /// than a run that never started, so the preflight runs once, up front, and
+    /// its failure stops the run as a fatal error (spec §10). A decider with
+    /// nothing to check — every fake — is ready by default.
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The photographer's stop button, as a flag the run reads between files.
+///
+/// Cancellation is cooperative and lives outside the pipeline's types so a
+/// terminal, a GUI and a test can all pull the same lever: the run looks at it
+/// before each frame and never in the middle of one, so a cancelled run leaves
+/// its rows whole (spec §6).
+#[derive(Debug, Default)]
+pub struct Cancel {
+    cancelled: AtomicBool,
+}
+
+impl Cancel {
+    /// A flag nothing has pulled yet.
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    /// Ask the run to stop before its next file. Safe to call from a signal
+    /// handler and from another thread.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a stop has been asked for.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+/// How a transient failure is retried (spec §10).
+///
+/// Three retries after the first attempt, waiting 0.5 s, 1 s and 2 s: a hiccup
+/// costs one frame a few seconds instead of the shoot. A 4xx is never retried,
+/// because a rejected rubric fails identically however many times it is asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// The wait after each failed attempt that will be retried, in order.
+    pub backoff: Vec<Duration>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> RetryPolicy {
+        RetryPolicy {
+            backoff: vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+            ],
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// The same retries with no waiting at all: what a test wants when it
+    /// counts attempts rather than feels them.
+    pub fn without_waiting() -> RetryPolicy {
+        RetryPolicy {
+            backoff: vec![Duration::ZERO; RetryPolicy::default().backoff.len()],
+        }
+    }
 }
 
 /// An effective scoring run: which rubric, which alias, how to look at the
@@ -128,6 +202,9 @@ pub struct Config {
     pub scan: ScanOptions,
     /// The photographer's framing of the shoot, when they gave one.
     pub shoot_context: Option<String>,
+    /// How hard to retry a transient failure. The spec's schedule by default;
+    /// tests replace it so an attempt count costs no wall time.
+    pub retry: RetryPolicy,
     /// Where the CSV and the raw answers are written.
     pub outputs: Outputs,
 }
@@ -153,6 +230,7 @@ impl Config {
             params,
             scan,
             shoot_context,
+            retry: RetryPolicy::default(),
             outputs,
         }
     }
@@ -172,8 +250,14 @@ pub struct Run {
     pub model: String,
     /// What the scan left out, and why.
     pub counts: ScanCounts,
-    /// One entry per accepted file, in ingest order.
+    /// How many files the scan accepted. [`Run::frames`] holds the ones the run
+    /// got to, which is fewer when it stopped or was interrupted early.
+    pub total: usize,
+    /// One entry per file the run got to, in ingest order. A run that stopped
+    /// early has one entry for the frame that stopped it and nothing after.
     pub frames: Vec<Frame>,
+    /// How the run ended, which is also what it exits as.
+    pub ending: Ending,
 }
 
 impl Run {
@@ -189,6 +273,37 @@ impl Run {
     pub fn failed(&self) -> usize {
         self.frames.len() - self.scored()
     }
+
+    /// What the process exits with (spec §10).
+    ///
+    /// A pure function of the run: an interruption outranks a failed row
+    /// (the run did not finish, it was stopped), and a run that stopped at a
+    /// frame is fatal however many rows it had already written.
+    pub fn exit_code(&self) -> ExitCode {
+        match &self.ending {
+            Ending::Interrupted => ExitCode::Interrupted,
+            Ending::Aborted { .. } => ExitCode::Fatal,
+            Ending::Completed if self.failed() > 0 => ExitCode::FailedRows,
+            Ending::Completed => ExitCode::Ok,
+        }
+    }
+}
+
+/// How a run ended (spec §10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// Every file the scan accepted was judged.
+    Completed,
+    /// The run stopped at a frame, because its failure is one a retry cannot
+    /// fix: a rejected rubric, a malformed body, or a server that never
+    /// answered. The rows judged so far are still written.
+    Aborted {
+        /// The failure that stopped it, as the photographer reads it.
+        reason: String,
+    },
+    /// The photographer cancelled, between files. The rows judged so far are
+    /// still written, so nothing scored is lost.
+    Interrupted,
 }
 
 /// What happened to one frame.
@@ -208,25 +323,48 @@ pub struct Frame {
 ///
 /// A file that cannot be read or that carries no preview becomes a classified
 /// failure and the run continues: one odd file must not cost the photographer
-/// the other 399. Each frame becomes its report row as it is produced, from the
-/// frame in hand rather than from the finished run, so the rows can be flushed
-/// as they arrive.
-pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider) -> Result<Run> {
+/// the other 399. The failures whose kind says a retry cannot help — a rejected
+/// rubric, a malformed body, a server that never answered — stop the run
+/// instead, and the rows judged so far are written either way. A cancellation
+/// stops the run between files, and its rows are written too. Each frame
+/// becomes its report row as it is produced, from the frame in hand rather than
+/// from the finished run, so the rows can be flushed as they arrive.
+pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel) -> Result<Run> {
     let scan = ingest::scan(shoot, &config.scan)?;
+    // Before the first frame, and before any report is written: a server that
+    // cannot answer must cost seconds, not a shoot.
+    decider.preflight()?;
     let rubric_hash = config.rubric_hash();
     let mut frames = Vec::with_capacity(scan.files.len());
     let mut rows = Vec::with_capacity(scan.files.len());
+    let mut ending = Ending::Completed;
     for source in &scan.files {
+        if cancel.is_cancelled() {
+            ending = Ending::Interrupted;
+            break;
+        }
         let frame = judge(source, config, decider);
+        let stops_run = frame
+            .outcome
+            .as_ref()
+            .err()
+            .filter(|error| error.recovery().aborts_run())
+            .map(ToString::to_string);
         rows.push(Row::of(&frame, &rubric_hash, &config.model));
         frames.push(frame);
+        if let Some(reason) = stops_run {
+            ending = Ending::Aborted { reason };
+            break;
+        }
     }
     report::write(&rows, &config.outputs)?;
     Ok(Run {
         rubric_hash,
         model: config.model.clone(),
         counts: scan.counts,
+        total: scan.files.len(),
         frames,
+        ending,
     })
 }
 
@@ -242,13 +380,32 @@ fn judge(source: &SourceFile, config: &Config, decider: &dyn Decider) -> Frame {
             state: State::for_frame(display_name(source), config.shoot_context.clone()),
             preview: &preview,
         };
-        decider
-            .decide(&request)
+        decide(decider, &request, &config.retry)
             .map(|response| reading::read(&config.rubric, response))
     });
     Frame {
         source: source.clone(),
         outcome,
+    }
+}
+
+/// Ask the model one frame's question, retrying only the transient failures
+/// (spec §10): a connection failure, a timeout and a 5xx are worth another
+/// attempt, with the policy's backoff between them. The failure that ends the
+/// attempts names how many were spent, so the row explains itself.
+fn decide(decider: &dyn Decider, request: &Request<'_>, retry: &RetryPolicy) -> Result<Response> {
+    let mut waited = 0;
+    loop {
+        match decider.decide(request) {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if !error.recovery().is_retried() || waited == retry.backoff.len() {
+                    return Err(error.with_attempts(waited + 1));
+                }
+                std::thread::sleep(retry.backoff[waited]);
+                waited += 1;
+            }
+        }
     }
 }
 

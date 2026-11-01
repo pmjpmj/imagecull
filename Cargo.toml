@@ -32,3 +32,7 @@ toml = "=1.1.8"
 sha2 = "=0.11.1"
 base64 = "=0.23.1"
 tempfile = "=3.27.0"
+# Ctrl-C: the CLI owns the process's signals because the core never may, and
+# `ctrlc` is one short `sigaction` wrapper over `nix` rather than hand-rolled
+# `unsafe` FFI in the front end.
+ctrlc = "=3.5.2"
