@@ -38,6 +38,18 @@ impl Embedded {
 /// small full-quality preview and a large heavily-compressed one, and the
 /// pixels are what the model sees.
 pub fn extract(path: &Path) -> Result<Embedded> {
+    Ok(read(path)?.0)
+}
+
+/// The largest embedded preview and what the camera recorded about the frame,
+/// from one open of the file.
+///
+/// Two things a run needs come out of the same header: the preview the model is
+/// sent and the pixels the [`measure`](crate::measure)s are taken from, and the
+/// capture time, body and exposure the [`group`](crate::group)ing gates read.
+/// Reading it once is why a grouping pass costs one extraction per frame rather
+/// than two.
+pub fn read(path: &Path) -> Result<(Embedded, raw_files::Metadata)> {
     let name = file_name(path);
     let mut raw = RawFile::open(path).map_err(|error| unreadable(path, &name, &error))?;
 
@@ -53,12 +65,13 @@ pub fn extract(path: &Path) -> Result<Embedded> {
         .map_err(|error| Error::new(ErrorKind::Unreadable, format!("{name}: {error}")))?;
 
     let size = preview.size();
-    Ok(Embedded {
+    let embedded = Embedded {
         jpeg,
         width: size.width,
         height: size.height,
         orientation: preview.orientation().to_exif(),
-    })
+    };
+    Ok((embedded, raw.metadata().clone()))
 }
 
 /// The `unreadable` error for a file the extractor cannot open.

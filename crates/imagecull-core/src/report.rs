@@ -227,7 +227,10 @@ fn file_cell(source: &SourceFile, absolute: bool) -> String {
 
 /// Append one CSV record, escaping the cells that need it and ending the line
 /// with `\n` (the spec's ending, not RFC 4180's `\r\n`).
-fn push_record(out: &mut String, fields: &[impl AsRef<str>]) {
+///
+/// Shared with the measures CSV ([`group::render_csv`](crate::group::render_csv)):
+/// one writer, so a filename with a comma is quoted the same way in both reports.
+pub(crate) fn push_record(out: &mut String, fields: &[impl AsRef<str>]) {
     for (index, field) in fields.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -239,7 +242,7 @@ fn push_record(out: &mut String, fields: &[impl AsRef<str>]) {
 
 /// Append one cell, quoted the way RFC 4180 asks when it has to be: it holds a
 /// comma, a quote or a line break.
-fn push_field(out: &mut String, value: &str) {
+pub(crate) fn push_field(out: &mut String, value: &str) {
     if !value.contains([',', '"', '\n', '\r']) {
         out.push_str(value);
         return;

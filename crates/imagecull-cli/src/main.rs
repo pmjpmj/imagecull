@@ -10,6 +10,7 @@ use clap::Parser;
 
 mod cli;
 mod doctor;
+mod groups;
 mod models;
 mod progress;
 mod score;
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
         Command::Models(args) => models::run(&args),
         Command::Doctor(args) => doctor::run(&args),
         Command::Score(args) => score::run(&args),
+        Command::Groups(args) => groups::run(&args),
     };
     ExitCode::from(code)
 }

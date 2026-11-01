@@ -5,6 +5,14 @@ Tests in this directory build their RAW files synthetically
 NEF, with embedded JPEG previews at real frame sizes. That covers everything the
 pipeline does to a preview without committing tens of megabytes.
 
+The burst-grouping tests generate their own answer key the same way
+(`tests/support/burst.rs`): one scene — a bright sky over a textured ground,
+across a level horizon, with one deliberately soft patch — and the transforms a
+burst goes wrong with (a Gaussian blur, a 5 px horizontal motion blur, a known
+tilt, +2 EV), each with a known expected reading. No JPEG is committed, because a
+generator is deterministic, reviewable as code, and can draw the same scene at two
+sensor sizes.
+
 What synthetic files cannot cover is the camera's own quirks. These are the real
 captures the spec's Testing Decisions ask for (`.scratch/nef-scoring-v1/spec.md`,
 "Fixtures"), and they are **not committed**:

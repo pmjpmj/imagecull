@@ -372,7 +372,7 @@ fn percent(rate: f64) -> String {
 }
 
 /// A duration as a photographer reads it: `42s`, `8m12s`, `1h02m`.
-fn duration_text(duration: std::time::Duration) -> String {
+pub(crate) fn duration_text(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
     if seconds < 60 {
         return format!("{seconds}s");

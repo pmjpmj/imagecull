@@ -29,6 +29,42 @@ _Avoid_: session, job, batch, process
 The act of deciding which frames to keep. The tool scores; the photographer
 culls.
 
+### How frames relate
+
+**Group**:
+The frames of one shoot that are the same moment: close in capture time, the
+same body and settings, and the same scene by signature.
+_Avoid_: burst, cluster, stack, set, duplicate group
+
+**Signature**:
+The 32×32 mean-subtracted greyscale of a frame's preview, compared with another
+frame's to decide whether the two are the same scene. A fact about the picture,
+unlike a hash of the bytes.
+_Avoid_: hash, fingerprint, embedding, thumbnail
+
+**Grouping hash**:
+The identity of the grouping algorithm and its thresholds — never of a folder or
+a filename. Two runs with different hashes did not group the same way, so a group
+rank computed under one is not readable under the other.
+_Avoid_: group hash, cluster id, version
+
+**Measure**:
+A number taken from a frame's own pixels or metadata rather than asked of the
+model — acutance, shake, roll, clipping, the camera's focus report. Comparable
+between frames of one group, never a score out of ten.
+_Avoid_: metric, score, technical score, quality score
+
+**Ranking rule**:
+The ordered criteria over named measures that names a group's best frame —
+exclusions first, then the model's impact among survivors. Declared in full,
+never a weighted composite.
+_Avoid_: ranking score, picker, weighting
+
+**Group rank**:
+A frame's place within its group under the ranking rule, 1 being the group's
+best. Not comparable between groups, and not a score.
+_Avoid_: winner score, rating, position
+
 ### What a run reads
 
 **Rubric**:
@@ -87,7 +123,9 @@ Picking up an interrupted run, reusing every frame the ledger already holds.
 _Avoid_: continue, restart
 
 **Dedupe**:
-Reusing the judgement of a frame whose preview is byte-identical to another.
+Reusing the judgement of a frame whose preview is byte-identical to another. A
+cache, not a relation: frames of one group are not duplicates, and identical
+bytes alone do not make a group.
 _Avoid_: cache hit, skip
 
 ### What a run prints

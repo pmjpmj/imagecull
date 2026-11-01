@@ -11,12 +11,17 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use imagecull_core::config::{self, Effective, Loaded, Resolved};
+use imagecull_core::group::{self, Thresholds};
+use imagecull_core::ingest::ScanOptions;
 use imagecull_core::ledger::LedgerMode;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::rubric::{Builtin, RubricSource};
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
+
+/// Where `groups` writes its measures, relative to the working directory.
+pub const DEFAULT_GROUPS_CSV: &str = "groups.csv";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +45,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Score a shoot folder
     Score(ScoreArgs),
+    /// Group a shoot folder by moment and measure every frame, with no server
+    Groups(GroupsArgs),
 }
 
 /// The options every command shares: which server to talk to, and where the
@@ -240,6 +247,87 @@ pub struct ScoreArgs {
     /// precision and the status of every frame
     #[arg(long)]
     pub verbose: bool,
+}
+
+/// The model-free pass: which frames are the same moment, and what their own
+/// pixels say about them.
+///
+/// Nothing here names a server, because nothing in this command asks one: the
+/// point of shipping the measures before they touch a score is that the whole
+/// technical pass runs on a shoot folder with the machine offline.
+#[derive(Args, Debug)]
+pub struct GroupsArgs {
+    /// The shoot folder to scan
+    #[arg(value_name = "DIR")]
+    pub dir: PathBuf,
+
+    /// Where to write the measures CSV
+    #[arg(long, value_name = "FILE", default_value = DEFAULT_GROUPS_CSV)]
+    pub out: PathBuf,
+
+    /// Also scan subdirectories; hidden directories are never scanned. Takes an
+    /// optional true/false, as `score` does
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub recursive: Option<bool>,
+
+    /// Group only the first N files, as a smoke test
+    #[arg(long, value_name = "N", value_parser = positive_count)]
+    pub limit: Option<usize>,
+
+    /// The most seconds between two frames of one group (default 2.0)
+    #[arg(long, value_name = "SECS", value_parser = gap_seconds)]
+    pub group_gap: Option<f64>,
+
+    /// The least cosine similarity between a frame and its group's first frame
+    /// (default 0.90)
+    #[arg(long, value_name = "SIMILARITY", value_parser = similarity)]
+    pub group_similarity: Option<f64>,
+}
+
+impl GroupsArgs {
+    /// What this command actually runs with: the flags, over the defaults the
+    /// core documents.
+    pub fn options(&self) -> group::Options {
+        group::Options {
+            scan: ScanOptions {
+                recursive: self.recursive.unwrap_or(false),
+                limit: self.limit,
+            },
+            thresholds: Thresholds {
+                gap: self
+                    .group_gap
+                    .map_or(group::DEFAULT_GAP, std::time::Duration::from_secs_f64),
+                similarity: self.group_similarity.unwrap_or(group::DEFAULT_SIMILARITY),
+            },
+        }
+    }
+}
+
+/// A gap in seconds: positive, because a burst of zero width is not a moment.
+fn gap_seconds(text: &str) -> Result<f64, String> {
+    let seconds: f64 = text
+        .parse()
+        .map_err(|_| format!("'{text}' is not a number of seconds"))?;
+    if !(seconds > 0.0 && seconds.is_finite()) {
+        return Err("the gap has to be a positive number of seconds".to_string());
+    }
+    Ok(seconds)
+}
+
+/// A similarity threshold: a cosine, so it lies between 0 and 1.
+fn similarity(text: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .parse()
+        .map_err(|_| format!("'{text}' is not a similarity"))?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err("a similarity is a cosine between 0 and 1".to_string());
+    }
+    Ok(value)
 }
 
 /// The `--version` line: the version, and the rubric a run uses by default.
@@ -621,6 +709,11 @@ mod tests {
                 Command::Score(args) => &args.common,
                 Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
+                // `groups` reads no config file: it names no server and writes
+                // one report, and its thresholds are the algorithm's, not a
+                // shoot's. It is deliberately not one of the commands a file
+                // configures.
+                Command::Groups(_) => continue,
             };
             assert_eq!(common.config, Some(PathBuf::from("mine.toml")), "{command}");
 
@@ -630,6 +723,7 @@ mod tests {
                 Command::Score(args) => &args.common,
                 Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
+                Command::Groups(_) => continue,
             };
             assert!(common.no_config, "{command}");
         }
@@ -684,6 +778,79 @@ mod tests {
     #[test]
     fn score_needs_a_directory() {
         assert!(parse_result(&["score"]).is_err());
+    }
+
+    #[test]
+    fn groups_needs_a_directory_and_defaults_to_the_core_thresholds() {
+        assert!(parse_result(&["groups"]).is_err());
+
+        let Command::Groups(args) = parse(&["groups", "shoot"]) else {
+            panic!("not a groups command");
+        };
+        assert_eq!(args.dir, PathBuf::from("shoot"));
+        assert_eq!(args.out, PathBuf::from(DEFAULT_GROUPS_CSV));
+        assert_eq!(args.recursive, None);
+        assert_eq!(args.limit, None);
+        assert_eq!(args.group_gap, None);
+        assert_eq!(args.group_similarity, None);
+
+        let options = args.options();
+        assert_eq!(options.thresholds, Thresholds::default());
+        assert!(!options.scan.recursive);
+        assert_eq!(options.scan.limit, None);
+    }
+
+    #[test]
+    fn groups_takes_its_own_thresholds_and_scan_flags() {
+        let Command::Groups(args) = parse(&[
+            "groups",
+            "shoot",
+            "--out",
+            "march-groups.csv",
+            "--recursive",
+            "--limit",
+            "40",
+            "--group-gap",
+            "0.75",
+            "--group-similarity",
+            "0.96",
+        ]) else {
+            panic!("not a groups command");
+        };
+
+        let options = args.options();
+        assert_eq!(
+            options.thresholds.gap,
+            std::time::Duration::from_secs_f64(0.75)
+        );
+        assert_eq!(options.thresholds.similarity, 0.96);
+        assert!(options.scan.recursive);
+        assert_eq!(options.scan.limit, Some(40));
+        assert_eq!(args.out, PathBuf::from("march-groups.csv"));
+    }
+
+    #[test]
+    fn a_gap_and_a_similarity_outside_their_range_are_refused() {
+        for arguments in [
+            &["groups", "shoot", "--group-gap", "0"][..],
+            &["groups", "shoot", "--group-gap", "-1"][..],
+            &["groups", "shoot", "--group-similarity", "1.5"][..],
+            &["groups", "shoot", "--group-similarity", "-0.1"][..],
+            &["groups", "shoot", "--limit", "0"][..],
+        ] {
+            assert!(
+                parse_result(arguments).is_err(),
+                "{arguments:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_asks_for_no_server_at_all() {
+        assert!(
+            parse_result(&["groups", "shoot", "--endpoint", "http://127.0.0.1:9000"]).is_err(),
+            "a command that makes no request has no endpoint to take"
+        );
     }
 
     #[test]

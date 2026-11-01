@@ -22,7 +22,12 @@
 //! ([`progress`]): the events a front end draws a frame line and a summary
 //! from, still with no terminal in the core. The config file ([`config`]) is the
 //! last source of values a run reads: what stays true across runs, resolved into
-//! the same effective config the flags produce.
+//! the same effective config the flags produce. `imagecull groups` (ticket 01 of
+//! the burst-grouping slice) adds the model-free technical pass: the grouping
+//! ([`group`]) that puts a shoot's frames into the moments they were taken in,
+//! and the [`measure`]s taken from their own pixels — acutance, shake, roll,
+//! clipping and the camera's focus report. Neither consults a model, and neither
+//! changes a score.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -35,8 +40,10 @@ pub mod config;
 pub mod doctor;
 pub mod dry_run;
 pub mod error;
+pub mod group;
 pub mod ingest;
 pub mod ledger;
+pub mod measure;
 pub mod omlx;
 pub mod preprocess;
 pub mod preview;
@@ -50,6 +57,10 @@ pub mod version;
 
 pub use config::{ConfigFile, Effective, Env, Loaded, Resolved};
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
+pub use group::{
+    Capture, Facts, Grouping, Options as GroupOptions, Plan, Planned, Settings, Signature,
+    Thresholds,
+};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
 pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};

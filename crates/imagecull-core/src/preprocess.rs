@@ -53,8 +53,13 @@ pub struct Encoded {
     pub height: u32,
 }
 
-/// Decode, orient, downscale and encode an embedded preview.
-pub fn render(embedded: &Embedded, params: &Params) -> Result<Encoded> {
+/// Decode an embedded preview and turn it upright, without scaling it.
+///
+/// Two callers now need the same picture: the payload a request carries
+/// ([`render`]) and the pixels a [`measure`](crate::measure) is taken from. The
+/// decode and the orientation are the same for both, so they happen once, here;
+/// what each does next is its own.
+pub fn decode(embedded: &Embedded) -> Result<DynamicImage> {
     let mut image = image::load_from_memory_with_format(&embedded.jpeg, image::ImageFormat::Jpeg)
         .map_err(|error| {
         Error::new(
@@ -63,12 +68,14 @@ pub fn render(embedded: &Embedded, params: &Params) -> Result<Encoded> {
         )
     })?;
     apply_orientation(&mut image, embedded.orientation);
+    Ok(image)
+}
 
-    let mut rgb = image.to_rgb8();
-    let (width, height) = scaled_size(rgb.width(), rgb.height(), params.max_edge);
-    if (width, height) != rgb.dimensions() {
-        rgb = downscale(&rgb, width, height)?;
-    }
+/// Decode, orient, downscale and encode an embedded preview.
+pub fn render(embedded: &Embedded, params: &Params) -> Result<Encoded> {
+    let image = decode(embedded)?;
+
+    let rgb = fit(&image.to_rgb8(), params.max_edge)?;
 
     let jpeg = encode(&rgb, params.jpeg_quality)?;
     Ok(Encoded {
@@ -94,6 +101,18 @@ fn apply_orientation(image: &mut DynamicImage, exif_orientation: u16) {
     {
         image.apply_orientation(orientation);
     }
+}
+
+/// The image with its longest edge at most `max_edge`, Lanczos3, never up.
+///
+/// Shared with [`measure`](crate::measure), which needs the same one-pass
+/// downscale at its own fixed working size.
+pub(crate) fn fit(source: &image::RgbImage, max_edge: u32) -> Result<image::RgbImage> {
+    let (width, height) = scaled_size(source.width(), source.height(), max_edge);
+    if (width, height) == source.dimensions() {
+        return Ok(source.clone());
+    }
+    downscale(source, width, height)
 }
 
 /// The largest size inside a `max_edge` square with the same shape as the
