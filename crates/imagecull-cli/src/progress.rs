@@ -29,6 +29,9 @@ pub enum Verbosity {
     Normal,
     /// `--verbose`: that line plus what was sent and what came back.
     Verbose,
+    /// `--print-sidecars`: one block per frame saying what would be written, and
+    /// nothing written at all.
+    Print,
 }
 
 /// Which stream an event's text belongs on.
@@ -135,7 +138,7 @@ fn write(stream: Stream, text: &str) {
 /// The line a run opens with: how much work it is about to do, and under what.
 fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
     match verbosity {
-        Verbosity::Quiet => None,
+        Verbosity::Quiet | Verbosity::Print => None,
         Verbosity::Normal | Verbosity::Verbose => Some(format!(
             "scoring {} {} · rubric {} · model {}\n",
             started.total,
@@ -146,12 +149,46 @@ fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
     }
 }
 
+/// `--print-sidecars`' per-frame text.
+///
+/// An answered frame's block comes from the printing writer, which is the only
+/// thing that sees the document; a kept frame never reaches a writer, so its line
+/// is said here — the preview has to account for the whole folder, not just its
+/// unrated part. A failure is the same line it would be anywhere else.
+fn print_block(frame: &FrameEvent) -> Option<String> {
+    match &frame.judgement {
+        Judgement::Answered(_) => None,
+        Judgement::Skipped { rating } => {
+            let sidecar = imagecull_core::sidecar::path_for(std::path::Path::new(&frame.filename));
+            Some(format!(
+                "{}  would leave {} alone (rating {rating}, pass --force to rate them again)\n",
+                frame.filename,
+                sidecar
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ))
+        }
+        Judgement::Failed(failure) => Some(format!(
+            "{}  {}{}\n",
+            frame.filename,
+            failure.kind.as_str(),
+            if failure.message.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", failure.message)
+            }
+        )),
+    }
+}
+
 /// One frame: the line, or the verbose account of it.
 fn frame_text(frame: &FrameEvent, verbosity: Verbosity) -> Option<String> {
     match verbosity {
         Verbosity::Quiet => None,
         Verbosity::Verbose => Some(verbose_line(frame)),
         Verbosity::Normal => Some(format!("{}\n", frame_line(frame))),
+        Verbosity::Print => print_block(frame),
     }
 }
 
@@ -467,6 +504,19 @@ mod tests {
         })
     }
 
+    fn skipped(index: usize, rating: u8) -> Event {
+        Event::Frame(FrameEvent {
+            index,
+            total: 400,
+            filename: "DSC_0014.NEF".to_string(),
+            judgement: Judgement::Skipped { rating },
+            latency_ms: None,
+            eta: Some(Duration::from_secs(457)),
+            preview: None,
+            duplicate_of: None,
+        })
+    }
+
     /// The summary of a 400-frame run that scored 397 of them.
     fn summary() -> Summary {
         let rubric = Builtin::General
@@ -538,6 +588,47 @@ mod tests {
             "one line per frame, ended by a newline"
         );
         assert!(rendered.err.is_empty());
+    }
+
+    #[test]
+    fn a_kept_frame_says_so_on_its_own_line() {
+        let rendered = transcript(&[skipped(14, 5)], Verbosity::Normal);
+
+        assert_eq!(
+            rendered.out, "14/400  DSC_0014.NEF  5★ kept  eta 7m37s\n",
+            "the rating channel keeps its meaning and one word says nothing was spent"
+        );
+    }
+
+    #[test]
+    fn print_mode_says_what_would_be_left_alone_and_nothing_else_for_an_answer() {
+        let events = [started(400), answered(12), skipped(14, 5), failed(13)];
+
+        let rendered = transcript(&events, Verbosity::Print);
+
+        assert!(
+            !rendered.out.contains("scoring 400 frames"),
+            "a preview is a list of frames, not a run in progress: {}",
+            rendered.out
+        );
+        assert_eq!(
+            rendered.out,
+            "DSC_0014.NEF  would leave DSC_0014.xmp alone \
+             (rating 5, pass --force to rate them again)\n\
+             DSC_0013.NEF  timeout: POST /v1/systemone timed out after 120s — 3 attempts\n",
+            "an answered frame's block comes from the writer, not from here"
+        );
+    }
+
+    #[test]
+    fn print_mode_still_ends_with_the_summary() {
+        let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Print);
+
+        assert!(
+            rendered.out.starts_with("scored: 397 of 400"),
+            "a preview says what the run did as well as what it would write: {}",
+            rendered.out
+        );
     }
 
     #[test]

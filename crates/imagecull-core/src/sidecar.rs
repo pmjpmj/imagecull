@@ -429,10 +429,11 @@ pub struct Filesystem;
 impl Writer for Filesystem {
     fn write(
         &self,
-        target: &std::path::Path,
+        frame: &std::path::Path,
         document: &str,
         existing: Option<&str>,
     ) -> Result<Written> {
+        let target = &path_for(frame);
         if let Some(previous) = existing {
             back_up(target, previous)?;
         }
@@ -614,6 +615,24 @@ pub fn can_extend(document: &str) -> bool {
         .find(DESCRIPTION)
         .and_then(|start| tag_end(document, start))
         .is_some()
+}
+
+/// The properties this tool owns in a document, as name and text: what a preview
+/// of a write shows, and what a merge compares.
+pub fn properties_in(document: &str) -> Vec<(String, String)> {
+    let Some(start) = document.find(DESCRIPTION) else {
+        return Vec::new();
+    };
+    let Some(end) = tag_end(document, start) else {
+        return Vec::new();
+    };
+    attributes(&document[start..end])
+        .into_iter()
+        .filter(|attribute| {
+            attribute.name == "xmp:Rating" || attribute.name.starts_with("imagecull:")
+        })
+        .map(|attribute| (attribute.name, attribute.value))
+        .collect()
 }
 
 /// Whether another application owns this sidecar: darktable records its history

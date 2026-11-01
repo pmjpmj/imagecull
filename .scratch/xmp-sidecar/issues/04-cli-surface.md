@@ -1,7 +1,7 @@
 # 04: The CLI's flags and the words it prints
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** resolved
 **Blocked by:** 03
 **Spec:** [../spec.md](../spec.md) §"CLI surface", §"Testing Decisions" seam 5
 
@@ -46,3 +46,36 @@ terminal's output moves.
 - The `Terminal` reporter renders `Event`s; `--print-sidecars` is a run that
   suppresses writes rather than a new pipeline, so it should not fork `run`.
 - Keep the summary's `status:` and `stars:` clauses untouched.
+
+## Comments
+
+### Evidence (2026-11-19)
+
+`--force`, `--allow-foreign` and `--print-sidecars` on `score`; the latter
+conflicts with `--quiet`/`--verbose`, because it says its own thing about every
+frame. `--out`, `--absolute`, `--resume` and `--fresh` are gone, refused as
+unknown arguments and absent from `--help`.
+
+`Verbosity::Print` is the preview mode: the started line is suppressed, an
+answered frame prints nothing there (its block comes from the printing writer),
+a kept frame prints `DSC_0014.NEF  would leave DSC_0014.xmp alone (rating 5, pass
+--force to rate them again)`, a failure prints in the same shape, and the run
+still ends with the summary block.
+
+`crates/imagecull-cli/src/printer.rs` is the printing `Writer`: it renders
+`frame  would create/update sidecar` and one line per property with the previous
+value in parentheses, and writes nothing at all — no sidecar, no `.bak`, no temp
+file. The writer port now takes the frame path and derives the sidecar, since a
+preview has to name both.
+
+A skipped frame's normal frame line is `14/400  DSC_0014.NEF  5★ kept  eta 7m37s`;
+the quiet one-liner already carried `N skipped` in the headline.
+
+A run in which every frame was kept now emits one warning telling the
+photographer to pass `--force`, and still exits 0.
+
+Tests: frame line for a kept frame, print-mode block for a kept and a failed
+frame, print mode's silence on an answered frame, print mode still summarising,
+the printer's block shape (new and update, with `was:` values), the three flags
+parsing, `--print-sidecars` conflicting with quiet/verbose, the four removed flags
+being refused, and the all-skipped warning at the run seam.

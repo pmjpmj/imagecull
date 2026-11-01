@@ -24,7 +24,7 @@ use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::progress::{
-    Event, Finished, FrameEvent, Judgement, PreviewShape, Reporter, Started, Summary,
+    Event, Finished, FrameEvent, Judgement, PreviewShape, Reporter, Started, Summary, Warning,
 };
 use crate::reading::{self, Answers, Reading};
 use crate::rubric::{Builtin, Rubric, RubricHash, hex};
@@ -570,7 +570,6 @@ pub fn run(
         persist(
             &mut judged.frame,
             existing.as_deref(),
-            &path,
             config,
             &rubric_hash,
             sidecars,
@@ -581,6 +580,15 @@ pub fn run(
             ending = Ending::Aborted { reason };
             break;
         }
+    }
+    // A run that rated nothing because everything was already rated looks
+    // identical to a broken one unless it says so.
+    if !account.frames.is_empty() && account.frames.iter().all(|frame| frame.kept().is_some()) {
+        reporter.event(Event::Warning(Warning {
+            message: "every frame already had a rating, so this run scored nothing: pass \
+                      --force to rate them again"
+                .to_string(),
+        }));
     }
     sidecar::write_json(&account.rows, &config.outputs)?;
     let Account {
@@ -625,7 +633,6 @@ fn read_sidecar(path: &Path) -> Result<Option<String>> {
 fn persist(
     frame: &mut Frame,
     existing: Option<&str>,
-    path: &Path,
     config: &Config,
     rubric_hash: &RubricHash,
     writer: &dyn sidecar::Writer,
@@ -646,7 +653,7 @@ fn persist(
             return;
         }
     };
-    frame.persisted = match writer.write(path, &document, existing) {
+    frame.persisted = match writer.write(&frame.source.path, &document, existing) {
         Ok(_) => Persisted::Written,
         Err(error) => Persisted::Failed(Failure::of(&error)),
     };

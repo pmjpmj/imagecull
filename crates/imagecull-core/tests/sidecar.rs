@@ -140,6 +140,26 @@ impl Collected {
     }
 }
 
+/// A reporter that keeps every warning.
+#[derive(Default)]
+struct Warnings {
+    messages: Mutex<Vec<String>>,
+}
+
+impl Reporter for Warnings {
+    fn event(&self, event: Event) {
+        if let Event::Warning(warning) = event {
+            self.messages.lock().expect("a lock").push(warning.message);
+        }
+    }
+}
+
+impl Warnings {
+    fn messages(&self) -> Vec<String> {
+        self.messages.lock().expect("a lock").clone()
+    }
+}
+
 /// A writer that refuses everything, so the abort path is reachable without
 /// fighting the filesystem's permissions.
 #[derive(Default)]
@@ -531,6 +551,32 @@ fn json_scores_keeps_the_raw_answer_document_of_every_frame() {
         documents["DSC_0002.NEF"],
         serde_json::Value::Null,
         "a frame the model never answered says so instead of vanishing"
+    );
+}
+
+#[test]
+fn a_run_that_rated_nothing_says_so_and_still_succeeds() {
+    let shoot = Shoot::one();
+    fs::write(shoot.sidecar("DSC_0001.NEF"), rated(4)).expect("a sidecar");
+    let reporter = Warnings::default();
+
+    let run = scoring::run(
+        shoot.path(),
+        &shoot.config(),
+        &Scripted::answering(vec![]),
+        &sidecar::Filesystem,
+        &reporter,
+        &Cancel::new(),
+    )
+    .expect("a run");
+
+    assert_eq!(run.exit_code(), imagecull_core::ExitCode::Ok);
+    let warnings = reporter.messages();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("--force"),
+        "a run that did nothing has to say how to make it do something: {}",
+        warnings[0]
     );
 }
 

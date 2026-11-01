@@ -12,6 +12,7 @@ mod cli;
 mod doctor;
 mod groups;
 mod models;
+mod printer;
 mod progress;
 mod score;
 

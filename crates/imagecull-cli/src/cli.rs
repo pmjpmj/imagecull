@@ -215,6 +215,20 @@ pub struct ScoreArgs {
     #[arg(long)]
     pub no_dedupe: bool,
 
+    /// Rate frames again even though their sidecars already carry a rating
+    #[arg(long)]
+    pub force: bool,
+
+    /// Write into a sidecar another application owns (darktable), which will
+    /// rewrite it from its own history
+    #[arg(long)]
+    pub allow_foreign: bool,
+
+    /// Score the folder and print what each sidecar would become, writing
+    /// nothing
+    #[arg(long, conflicts_with_all = ["quiet", "verbose"])]
+    pub print_sidecars: bool,
+
     /// Suppress the per-frame line; the outcome and a one-line summary remain,
     /// so a script can read them
     #[arg(long, conflicts_with = "verbose")]
@@ -606,6 +620,40 @@ mod tests {
             Some(false),
             "--no-dedupe can only turn dedupe off"
         );
+    }
+
+    #[test]
+    fn score_takes_the_sidecar_flags() {
+        let Command::Score(args) = parse(&[
+            "score",
+            "shoot",
+            "--force",
+            "--allow-foreign",
+            "--print-sidecars",
+        ]) else {
+            panic!("not a score command");
+        };
+        assert!(args.force, "--force is how a re-score gets to happen");
+        assert!(
+            args.allow_foreign,
+            "--allow-foreign is the darktable override"
+        );
+        assert!(args.print_sidecars, "--print-sidecars writes nothing");
+
+        let Command::Score(args) = parse(&["score", "shoot"]) else {
+            panic!("not a score command");
+        };
+        assert!(!args.force && !args.allow_foreign && !args.print_sidecars);
+    }
+
+    #[test]
+    fn a_preview_is_not_also_quiet_or_verbose() {
+        for other in ["--quiet", "--verbose"] {
+            assert!(
+                parse_result(&["score", "shoot", "--print-sidecars", other]).is_err(),
+                "--print-sidecars says its own thing about every frame"
+            );
+        }
     }
 
     #[test]
