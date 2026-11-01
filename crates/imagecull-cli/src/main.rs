@@ -11,6 +11,7 @@ use clap::Parser;
 mod cli;
 mod doctor;
 mod models;
+mod progress;
 mod score;
 
 use cli::{Cli, Command};
