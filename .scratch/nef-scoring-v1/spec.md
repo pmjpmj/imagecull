@@ -158,6 +158,7 @@ One seam, at the top of the core:
 - `stars` is a `choice` question with five keys `1`–`5` described in star-rating terms (`reject` … `hero frame`).
 - `verdict` is a `choice` question with keys `dislike`, `neutral`, `like`.
 - `choice` criteria are an **ordered array of `{key, description}` pairs**, not a table, because option order is part of the model's legend and tables do not guarantee order.
+- **Wire rendering:** the rubric is authored in that one ordered form and rendered per question type — the ordered legend of level descriptions for a `score` (the index is the key), an object keyed by option, in declaration order, for a `choice` — because those are the two shapes the Clef heads read. `docs/adr/0001-rubric-renders-two-criteria-shapes.md` records why and what it costs.
 - **Rubric hash:** SHA-256 over the canonicalised question schema (ids, types, instructions, criteria, in declaration order) plus the model alias. Recorded in the ledger header, in every CSV row, and (v2) in the XMP sidecar. Calibration and resume both key off it: changed wording invalidates cached scores by design.
 - `stars` and `overall` will sometimes disagree. They are both recorded and **never reconciled**; the run summary prints the disagreement rate. A high rate means the rubric wording needs work, not a fudge factor.
 

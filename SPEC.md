@@ -257,6 +257,8 @@ Splitting them is what makes the output actionable: a blurry but decisive moment
 
 `criteria` for `choice` is an **array of `{key, description}`** in TOML rather than a table, because TOML tables do not guarantee key order and the option order matters to the model's legend.
 
+On the wire the same authored form is rendered per question type: a `score` sends the ordered list of level descriptions (index = key), a `choice` sends an object keyed by option. Those are the shapes the Clef heads read; see `docs/adr/0001-rubric-renders-two-criteria-shapes.md`.
+
 ### 8.3 Rubric hash
 
 `sha256` over the canonicalised question schema (ids, types, instructions, criteria, in declaration order) + `model` alias. Recorded in the ledger header, in the CSV's `rubric_hash` column, and (v2) in the XMP sidecar. `calibration` and `resume` both key off it: changing wording invalidates cached scores by design, and the run refuses to silently mix rubrics.

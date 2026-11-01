@@ -32,7 +32,7 @@ pub fn run(args: &ServerArgs) -> u8 {
                     &catalog,
                     version.as_deref(),
                     client.endpoint().as_str(),
-                    &args.model
+                    args.model()
                 )
             );
             ExitCode::Ok.code()

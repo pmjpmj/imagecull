@@ -1,0 +1,147 @@
+# The embedded cull rubric: six questions, answered in one forward pass (spec §8).
+#
+# This wording is draft v1. M4 (ticket 08) tunes it against real shoots and
+# freezes it. Editing any of it — an instruction, a criterion, the model alias —
+# changes the rubric hash, and two CSVs with different hashes are not
+# comparable. That is deliberate: resume and calibration key off the hash, so a
+# changed rubric re-scores rather than silently mixing two rubrics in one file.
+#
+# Structure: `model` names the alias the wording was written for (`--model`
+# overrides it), then one `[[question]]` per question in declaration order.
+# Criteria are ordered arrays rather than tables, because the order is part of
+# the legend the model reads.
+
+model = "clef-flash-oQ4e"
+
+# --- the four independent scores -------------------------------------------
+#
+# Each `criteria` array is that score's legend: keys "0"…"10" in order, so the
+# answer is the expected value over eleven levels. The four scores are never
+# combined and never rescaled to 100; a blurry decisive frame and a sterile
+# sharp one must stay distinguishable.
+
+[[question]]
+id = "overall"
+type = "score"
+instructions = """
+You are a photo editor culling a shoot of photojournalistic work, deciding \
+which frames are keepers. Judge the frame as a whole: is this worth keeping at \
+all? A distinctive moment, gesture, expression or quality of light counts for \
+more than clinical perfection — a decisive frame that is slightly soft is a \
+better keeper than a sharp frame in which nothing happens.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, the frame does not work" },
+    { key = "1", description = "failing — almost nothing about it works" },
+    { key = "2", description = "poor — a serious problem, hard to rescue" },
+    { key = "3", description = "weak — a clear problem a viewer would notice" },
+    { key = "4", description = "below par — mostly there, with one obvious shortcoming" },
+    { key = "5", description = "record — acceptable, worth keeping only as a record of the moment" },
+    { key = "6", description = "competent — solid and unremarkable" },
+    { key = "7", description = "good — clearly above the middle of a shoot" },
+    { key = "8", description = "deliverable — good enough to deliver to a client" },
+    { key = "9", description = "excellent — among the best frames of the shoot" },
+    { key = "10", description = "portfolio-grade — the best the shoot can offer" },
+]
+
+[[question]]
+id = "technical"
+type = "score"
+instructions = """
+Judge technical image quality only: focus on the intended subject, motion blur, \
+noise, exposure, white balance, lens and sensor artifacts, clipped highlights \
+and crushed shadows. Ignore impact and ignore composition — whether the moment \
+is interesting and how the frame is composed are judged by other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, the frame does not work" },
+    { key = "1", description = "failing — almost nothing about it works" },
+    { key = "2", description = "poor — a serious problem, hard to rescue" },
+    { key = "3", description = "weak — a clear problem a viewer would notice" },
+    { key = "4", description = "below par — mostly there, with one obvious shortcoming" },
+    { key = "5", description = "record — acceptable, worth keeping only as a record of the moment" },
+    { key = "6", description = "competent — solid and unremarkable" },
+    { key = "7", description = "good — clearly above the middle of a shoot" },
+    { key = "8", description = "deliverable — good enough to deliver to a client" },
+    { key = "9", description = "excellent — among the best frames of the shoot" },
+    { key = "10", description = "portfolio-grade — the best the shoot can offer" },
+]
+
+[[question]]
+id = "composition"
+type = "score"
+instructions = """
+Judge framing and graphic design only: subject placement, balance, leading \
+lines, negative space, a level horizon, distracting background or edge \
+intrusions, and the crop. Ignore technical quality and ignore impact — those \
+are judged by other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, the frame does not work" },
+    { key = "1", description = "failing — almost nothing about it works" },
+    { key = "2", description = "poor — a serious problem, hard to rescue" },
+    { key = "3", description = "weak — a clear problem a viewer would notice" },
+    { key = "4", description = "below par — mostly there, with one obvious shortcoming" },
+    { key = "5", description = "record — acceptable, worth keeping only as a record of the moment" },
+    { key = "6", description = "competent — solid and unremarkable" },
+    { key = "7", description = "good — clearly above the middle of a shoot" },
+    { key = "8", description = "deliverable — good enough to deliver to a client" },
+    { key = "9", description = "excellent — among the best frames of the shoot" },
+    { key = "10", description = "portfolio-grade — the best the shoot can offer" },
+]
+
+[[question]]
+id = "impact"
+type = "score"
+instructions = """
+Judge emotional and visual impact only: does the frame capture a distinctive \
+moment, gesture, expression or quality of light that makes someone stop and \
+look? Ignore technical quality and ignore composition — those are judged by \
+other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, the frame does not work" },
+    { key = "1", description = "failing — almost nothing about it works" },
+    { key = "2", description = "poor — a serious problem, hard to rescue" },
+    { key = "3", description = "weak — a clear problem a viewer would notice" },
+    { key = "4", description = "below par — mostly there, with one obvious shortcoming" },
+    { key = "5", description = "record — acceptable, worth keeping only as a record of the moment" },
+    { key = "6", description = "competent — solid and unremarkable" },
+    { key = "7", description = "good — clearly above the middle of a shoot" },
+    { key = "8", description = "deliverable — good enough to deliver to a client" },
+    { key = "9", description = "excellent — among the best frames of the shoot" },
+    { key = "10", description = "portfolio-grade — the best the shoot can offer" },
+]
+
+# --- the two choice questions ----------------------------------------------
+#
+# `stars` is the portable channel into Lightroom (v2 writes it as xmp:Rating),
+# and `verdict` is the model's own keep/drop opinion. Both are recorded as the
+# model answered them: the star rating never comes from thresholds over the
+# scores, and a `stars`/`overall` disagreement is reported, never reconciled.
+
+[[question]]
+id = "stars"
+type = "choice"
+instructions = """
+Applying a typical star rating to this frame, how many stars?
+"""
+criteria = [
+    { key = "1", description = "reject — unusable, out of focus, or a duplicate" },
+    { key = "2", description = "poor — technically fine but nothing worth keeping" },
+    { key = "3", description = "ok — keep as a record of the moment" },
+    { key = "4", description = "strong — good enough to deliver to a client" },
+    { key = "5", description = "excellent — hero frame, portfolio or print" },
+]
+
+[[question]]
+id = "verdict"
+type = "choice"
+instructions = """
+Would you personally keep this photograph?
+"""
+criteria = [
+    { key = "dislike", description = "I would not keep it" },
+    { key = "neutral", description = "I could keep it or not" },
+    { key = "like", description = "I would keep it and show it" },
+]

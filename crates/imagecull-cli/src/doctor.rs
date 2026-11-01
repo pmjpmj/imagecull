@@ -13,7 +13,7 @@ use crate::cli::DoctorArgs;
 pub fn run(args: &DoctorArgs) -> u8 {
     let mut code = match args.server.client() {
         Ok(client) => {
-            let report = doctor::diagnose(&client, &args.server.model);
+            let report = doctor::diagnose(&client, args.server.model());
             if report.is_ready() {
                 println!("ok: {}", report.message());
             } else {

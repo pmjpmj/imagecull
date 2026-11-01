@@ -5,8 +5,13 @@
 //! TIFF whose IFD0 names Nikon, carries an EXIF orientation, and points at the
 //! JPEG previews the camera would have embedded. That is enough to drive the
 //! whole extraction, orientation, downscale and encode path without a camera.
+//!
+//! [`stub`] is the other shared fixture: a loopback HTTP server that answers
+//! canned bytes, for the tests that drive the real client.
 
 #![allow(dead_code)]
+
+pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
 

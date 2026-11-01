@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
-use crate::preprocess::{self, Params};
-use crate::preview;
+use crate::preprocess::Params;
+use crate::scoring;
 
 /// What a dry run did.
 #[derive(Debug)]
@@ -38,9 +38,7 @@ impl Export {
 
     /// The per-file failures, in ingest order.
     pub fn failures(&self) -> impl Iterator<Item = &Frame> {
-        self.frames
-            .iter()
-            .filter(|frame| frame.outcome.is_err())
+        self.frames.iter().filter(|frame| frame.outcome.is_err())
     }
 }
 
@@ -95,10 +93,12 @@ pub fn render_previews(
     })
 }
 
-/// Extract, orient, downscale, encode and write one file's preview.
+/// Prepare one file's preview the way a scoring run would, then write it.
+///
+/// The preparation is [`scoring::prepare`], the same call a real run makes, so
+/// the file written here is byte-for-byte the image the model would be sent.
 fn render_one(source: &SourceFile, previews: &Path, params: &Params) -> Result<Written> {
-    let embedded = preview::extract(&source.path)?;
-    let encoded = preprocess::render(&embedded, params)?;
+    let encoded = scoring::prepare(source, params)?;
 
     let jpeg = encoded.jpeg;
     let target = preview_path(previews, &source.relative);

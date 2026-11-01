@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::Params;
+use imagecull_core::rubric::Rubric;
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
@@ -45,9 +46,10 @@ pub struct ServerArgs {
     #[arg(long, value_name = "URL", default_value = omlx::DEFAULT_ENDPOINT)]
     pub endpoint: String,
 
-    /// Model alias to check or score with
-    #[arg(short = 'm', long, value_name = "ALIAS", default_value = omlx::DEFAULT_MODEL)]
-    pub model: String,
+    /// Model alias to check or score with (score defaults to the rubric's alias,
+    /// doctor and models to clef-flash-oQ4e)
+    #[arg(short = 'm', long, value_name = "ALIAS")]
+    pub model: Option<String>,
 
     /// Read timeout in seconds
     #[arg(long, value_name = "SECS", default_value_t = 120)]
@@ -55,6 +57,12 @@ pub struct ServerArgs {
 }
 
 impl ServerArgs {
+    /// The alias to use when nothing more specific applies: the configured one,
+    /// or the reference server's default. `score` prefers the rubric's alias.
+    pub fn model(&self) -> &str {
+        self.model.as_deref().unwrap_or(omlx::DEFAULT_MODEL)
+    }
+
     /// Build the client these options describe, or the message explaining why
     /// they describe nothing.
     pub fn client(&self) -> Result<Client, String> {
@@ -111,6 +119,18 @@ pub struct ScoreArgs {
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
+    #[command(flatten)]
+    pub server: ServerArgs,
+
+    /// A rubric file to use instead of the one built into imagecull
+    #[arg(long, value_name = "FILE")]
+    pub rubric: Option<PathBuf>,
+
+    /// Free text about the shoot, passed to the model as state.shoot_context,
+    /// so a dim, high-ISO street shoot is judged as that
+    #[arg(long, value_name = "TEXT")]
+    pub shoot_context: Option<String>,
+
     /// Write the exact previews a scoring run would send, and make no requests
     #[arg(long)]
     pub dry_run: bool,
@@ -144,6 +164,25 @@ pub struct ScoreArgs {
     /// Score only the first N files, as a smoke test
     #[arg(long, value_name = "N", value_parser = positive_count)]
     pub limit: Option<usize>,
+}
+
+/// The `--version` line: the version, and the rubric compiled into the binary.
+///
+/// The hash is what makes the line worth printing: two builds with different
+/// default rubrics are not the same tool, and a photographer comparing CSVs
+/// needs the identity of the rubric that made them (spec §8.3, §11).
+pub fn version_line() -> String {
+    match Rubric::embedded() {
+        Ok(rubric) => format!(
+            "imagecull {} (rubric {}, model {})",
+            env!("CARGO_PKG_VERSION"),
+            rubric.hash(rubric.model()).short(),
+            rubric.model(),
+        ),
+        // Unreachable in a tested build, but a version line must never be the
+        // thing that fails.
+        Err(_) => format!("imagecull {}", env!("CARGO_PKG_VERSION")),
+    }
 }
 
 /// A count of files: at least one, because `--limit 0` is a typo, not a run.
@@ -194,6 +233,14 @@ mod tests {
         };
         assert_eq!(args.dir, PathBuf::from("shoot"));
         assert!(!args.dry_run);
+        assert_eq!(args.server.endpoint, omlx::DEFAULT_ENDPOINT);
+        assert_eq!(
+            args.server.model, None,
+            "--model defaults to the rubric's alias"
+        );
+        assert_eq!(args.server.timeout, 120);
+        assert_eq!(args.rubric, None);
+        assert_eq!(args.shoot_context, None);
         assert_eq!(args.previews_dir, PathBuf::from(DEFAULT_PREVIEWS_DIR));
         assert_eq!(args.max_edge, Params::DEFAULT_MAX_EDGE);
         assert_eq!(args.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
@@ -245,13 +292,41 @@ mod tests {
     }
 
     #[test]
+    fn score_takes_the_rubric_the_context_and_the_server() {
+        let Command::Score(args) = parse(&[
+            "score",
+            "shoot",
+            "--endpoint",
+            "http://127.0.0.1:9000",
+            "--model",
+            "clef-27b-oQ4e",
+            "--rubric",
+            "mine.toml",
+            "--shoot-context",
+            "street at dusk, high ISO expected",
+            "--timeout",
+            "240",
+        ]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(args.server.endpoint, "http://127.0.0.1:9000");
+        assert_eq!(args.server.model.as_deref(), Some("clef-27b-oQ4e"));
+        assert_eq!(args.rubric, Some(PathBuf::from("mine.toml")));
+        assert_eq!(
+            args.shoot_context.as_deref(),
+            Some("street at dusk, high ISO expected")
+        );
+        assert_eq!(args.server.timeout, 240);
+    }
+
+    #[test]
     fn doctor_takes_an_optional_file_and_the_server_flags() {
         let Command::Doctor(args) = parse(&["doctor"]) else {
             panic!("not a doctor command");
         };
         assert_eq!(args.file, None);
         assert_eq!(args.server.endpoint, omlx::DEFAULT_ENDPOINT);
-        assert_eq!(args.server.model, omlx::DEFAULT_MODEL);
+        assert_eq!(args.server.model(), omlx::DEFAULT_MODEL);
 
         let Command::Doctor(args) = parse(&[
             "doctor",
@@ -265,7 +340,7 @@ mod tests {
         };
         assert_eq!(args.file, Some(PathBuf::from("DSC_0001.NEF")));
         assert_eq!(args.server.endpoint, "http://127.0.0.1:9000");
-        assert_eq!(args.server.model, "clef-27b");
+        assert_eq!(args.server.model(), "clef-27b");
         assert_eq!(args.params().max_edge, Params::DEFAULT_MAX_EDGE);
     }
 
@@ -281,5 +356,20 @@ mod tests {
     #[test]
     fn score_needs_a_directory() {
         assert!(parse_result(&["score"]).is_err());
+    }
+
+    #[test]
+    fn the_version_line_names_the_version_and_the_embedded_rubric() {
+        let line = version_line();
+        assert!(line.starts_with(&format!("imagecull {}", env!("CARGO_PKG_VERSION"))));
+        assert!(line.contains("rubric "), "{line}");
+        assert!(line.contains(omlx::DEFAULT_MODEL), "{line}");
+
+        let short = Rubric::embedded()
+            .expect("parse")
+            .hash(omlx::DEFAULT_MODEL)
+            .short()
+            .to_string();
+        assert!(line.contains(&short), "{line} should carry {short}");
     }
 }

@@ -311,6 +311,27 @@ impl Client {
         Ok(Catalog::new(models, statuses.is_some()))
     }
 
+    /// `POST path` with a JSON body, returning the status and the body
+    /// whatever the status is.
+    ///
+    /// Classifying the answer is the caller's job: a 400 names a rejected
+    /// rubric, a 5xx names a hiccup, and both are decisions rather than
+    /// transport failures.
+    pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Fetched> {
+        let url = self.endpoint.url(path);
+        let mut response = self
+            .agent
+            .post(&url)
+            .send_json(body)
+            .map_err(|error| self.transport_error("POST", path, error))?;
+        let http_status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| self.transport_error("POST", path, error))?;
+        Ok(Fetched { http_status, body })
+    }
+
     /// Fetch `path`, requiring a 2xx and returning its body.
     fn get_success(&self, path: &str) -> Result<String> {
         let fetched = self.get(path)?;
@@ -327,21 +348,21 @@ impl Client {
             .agent
             .get(&url)
             .call()
-            .map_err(|error| self.transport_error(path, error))?;
+            .map_err(|error| self.transport_error("GET", path, error))?;
         let http_status = response.status().as_u16();
         let body = response
             .body_mut()
             .read_to_string()
-            .map_err(|error| self.transport_error(path, error))?;
+            .map_err(|error| self.transport_error("GET", path, error))?;
         Ok(Fetched { http_status, body })
     }
 
-    fn transport_error(&self, path: &str, error: ureq::Error) -> Error {
+    fn transport_error(&self, method: &str, path: &str, error: ureq::Error) -> Error {
         match error {
             ureq::Error::Timeout(_) => Error::new(
                 ErrorKind::Timeout,
                 format!(
-                    "GET {path} at {} timed out after {}s",
+                    "{method} {path} at {} timed out after {}s",
                     self.endpoint,
                     self.timeouts.read.as_secs()
                 ),
@@ -355,11 +376,13 @@ impl Client {
     }
 }
 
-/// A read that finished at the transport level, whatever its status.
+/// A request that finished at the transport level, whatever its status.
 #[derive(Debug)]
-struct Fetched {
-    http_status: u16,
-    body: String,
+pub struct Fetched {
+    /// The HTTP status.
+    pub http_status: u16,
+    /// The response body, unparsed.
+    pub body: String,
 }
 
 /// `/health`, reduced to what imagecull reads. Unknown fields are ignored: the
