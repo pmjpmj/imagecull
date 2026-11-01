@@ -4,7 +4,7 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Each status in the taxonomy is produced by its documented cause and follows its documented record-or-abort action
 - [x] Connection failures, timeouts and 5xx are retried three times with 0.5/1/2 s backoff; 4xx is never retried
@@ -139,3 +139,7 @@ the git safeguard blocks autonomous write operations rather than prompting - so
 this ticket's work is one uncommitted change set on `ticket/06-taxonomy`, which
 is otherwise still at `feat/nef-scoring-v1`'s tip (`be3ffe0`); the merge back is
 a genuine no-op today. Nothing is staged.
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.

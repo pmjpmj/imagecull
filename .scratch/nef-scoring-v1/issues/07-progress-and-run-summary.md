@@ -4,7 +4,7 @@
 
 **Blocked by:** 05, 06
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Progress, warnings and the summary reach the CLI as data through the reporter seam; the core still writes nothing to stdout, checks no TTY and calls no process exit
 - [x] A test can collect progress events into a collection and assert on them without a terminal
@@ -172,3 +172,7 @@ What ticket 08 must know:
 - `--quiet` prints no statistics by design; a validation run that wants the
   numbers on a redirected stdout wants the default mode (stdout is then just the
   summary block).
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.

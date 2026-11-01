@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] `imagecull score <DIR> --dry-run` writes one preview per accepted file and performs no HTTP
 - [x] Extensions `.nef`, `.nrw`, `.dng` accepted case-insensitively; anything else counted as skipped, never an error
@@ -144,3 +144,7 @@ Two findings are recorded and deliberately not fixed here:
   shot. If that friction turns out to matter, the change is one `if` in
   `dry_run::guard_outside_shoot`, but it should be a decision about the safety
   rule, not a convenience patch.
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.

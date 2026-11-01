@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] `cargo build` produces a workspace with a core library crate and a CLI binary; every dependency is pinned exactly and `Cargo.lock` is committed
 - [x] The core crate defines the error taxonomy as types and never writes to stdout, never checks whether it is a TTY, and never calls process exit
@@ -29,3 +29,21 @@ Implemented. What landed, and how each box is met:
 Tests: 36 green (`cargo test`), clippy clean. `crates/imagecull-core/tests/doctor_http.rs` drives the real `ureq` client against a hand-rolled stub server for every verdict above, including a 401 on `/v1/models/status`; the `imagecull-core` lib never touches stdout, so those paths are covered without capturing terminal output.
 
 Verified by hand against stub servers: ready (`ok: oMLX 0.7.1.dev1 ... ready to score`, exit 0), old server (exit 2, names `0.7.1.dev1`), plain VLM alias (exit 2), absent alias (exit 2, lists served aliases), bad `--endpoint` (exit 2).
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
+
+### Found later, on a real server (2026-11-01)
+
+Pointing this at the oMLX on this machine showed the optional type endpoint
+being treated as required: the server guards `GET /v1/models/status` with its API
+key while `/v1/models` and `/v1/systemone` stay open, so `models` printed an
+error, `doctor` called the server fatal, and a run's preflight refused to start —
+against a server that then scored eleven frames. Fixed on
+`feat/nef-scoring-v1`: the catalog refuses only when `/v1/models` fails, `doctor`
+gained `Verdict::TypesUnavailable` (ready with a caveat, exit 0) and checks the
+alias before the type report, `models` names the status code instead of blaming
+the version, and preflight (`Report::can_score`) refuses only what the server has
+proven unfit. `Unauthorized` now means what it says: the alias list itself is
+behind the key.

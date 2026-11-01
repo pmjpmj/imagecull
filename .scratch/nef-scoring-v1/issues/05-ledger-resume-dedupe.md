@@ -4,7 +4,7 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The ledger is written beside the output CSV with a versioned header and one record per scored frame, appended and flushed immediately
 - [x] A deliberately truncated/garbage final ledger line is repaired on recovery and does not poison the run
@@ -131,3 +131,7 @@ What tickets 07 and 08 must know:
   `--fresh` (or a different `--out`) — that is the error, not a silent mix. The
   ledger keeps the full raw document per frame, so a later XMP writer or a
   re-read of a scored shoot needs no re-scoring.
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.

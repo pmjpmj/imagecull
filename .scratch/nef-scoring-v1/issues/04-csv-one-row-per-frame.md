@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] `imagecull score <DIR> --out <FILE>` writes a CSV covering every accepted input file, one row each, in ingest order
 - [x] Column set is exactly the spec's: file, the four scores, stars, verdict, the three confidences, latency, input tokens, status, error, duplicate_of, rubric hash, model
@@ -87,3 +87,7 @@ What tickets 05, 06 and 07 must know:
   2024) because `cargo fmt --check` was already failing on six files from earlier
   tickets under it. That change is mechanical and separable; if the project pins
   an older rustfmt, drop it.
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
