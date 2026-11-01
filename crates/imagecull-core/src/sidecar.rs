@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 
@@ -53,46 +54,76 @@ pub const NOT_COMPARED: &str = "not_compared";
 /// thing that makes a red attributable to us rather than to the photographer.
 pub const LABELED_BY: &str = "imagecull";
 
-/// Every `imagecull:` property name this build writes, in one list.
+/// The name the proof that a label is ours is written under.
+const LABELED_BY_NAME: &str = "imagecull:labeledBy";
+
+/// One property a write owns: the name it is written under, and the value it
+/// carries.
+type Property = (&'static str, String);
+
+/// Every property name this build writes, learned from the two writers over a
+/// value that is only a shape — never written, never merged, only asked what it
+/// would write.
 ///
 /// A merge retires the `imagecull:` names missing from it — ours are ours to
 /// retire — and leaves every name in it that the write in hand does not own
-/// exactly as it found it. That is what keeps a re-rating from erasing a
-/// verdict, and a verdict from inventing a rating.
-const WRITTEN: [&str; 14] = [
-    "imagecull:confStars",
-    "imagecull:groupKeeper",
-    "imagecull:groupNote",
-    "imagecull:groupSize",
-    "imagecull:groupStart",
-    "imagecull:groupingHash",
-    "imagecull:labeledBy",
-    "imagecull:model",
-    "imagecull:pickBy",
-    "imagecull:pickConf",
-    "imagecull:pickedAt",
-    "imagecull:rubricHash",
-    "imagecull:scoredAt",
-    "imagecull:version",
-];
+/// exactly as it found it. That is what keeps a re-rating from erasing a verdict,
+/// and a verdict from inventing a rating, and deriving it here is what keeps a
+/// property added to a writer from needing a second list beside it.
+fn written() -> &'static [&'static str] {
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let (rating, verdict) = shape();
+        names_of(rating).chain(names_of(verdict)).collect()
+    })
+}
 
-/// The verdict names a mark write owns, and so may retire: a frame that was left
-/// out of a comparison last time and was compared this time no longer says
-/// `not_compared`.
-///
-/// `imagecull:labeledBy` is deliberately absent: it is written whenever a label
-/// is written, and left in place whenever the label is left in place, because a
-/// red without it can never be attributed to us again.
-const MARK_NAMES: [&str; 8] = [
-    "imagecull:groupKeeper",
-    "imagecull:groupNote",
-    "imagecull:groupSize",
-    "imagecull:groupStart",
-    "imagecull:groupingHash",
-    "imagecull:pickBy",
-    "imagecull:pickConf",
-    "imagecull:pickedAt",
-];
+/// The verdict names a mark write may retire: the ones it owns, except
+/// `imagecull:labeledBy`, which is written whenever a label is written and left
+/// in place whenever the label is left in place — a red without it can never be
+/// attributed to us again.
+fn retirable_by_mark() -> &'static [&'static str] {
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let (_, verdict) = shape();
+        names_of(verdict)
+            .filter(|name| name.starts_with("imagecull:") && *name != LABELED_BY_NAME)
+            .collect()
+    })
+}
+
+/// A rating and a verdict as a value that is only a shape: every property the
+/// writers produce, with nothing in the values. It is what asks the writers for
+/// their names without a second list that could drift from them.
+fn shape() -> (Vec<Property>, Vec<Property>) {
+    let properties = Properties {
+        rating: 0,
+        conf_stars: 0.0,
+        model: String::new(),
+        rubric_hash: String::new(),
+        scored_at: String::new(),
+        version: String::new(),
+    };
+    let mark = Mark {
+        // A label and a note are set, so the properties only a marked or a
+        // narrowed frame carries are named too.
+        label: Some(RED),
+        keeper: false,
+        group_start: String::new(),
+        group_size: 0,
+        grouping_hash: String::new(),
+        pick_by: String::new(),
+        pick_conf: 0.0,
+        picked_at: String::new(),
+        note: Some(NOT_COMPARED),
+    };
+    (our_properties(&properties), mark_properties(&mark))
+}
+
+/// The names of a write's properties, in the order the write lists them.
+fn names_of(properties: Vec<Property>) -> impl Iterator<Item = &'static str> {
+    properties.into_iter().map(|(name, _)| name)
+}
 
 /// One frame's rating and the provenance of it: everything this tool owns in a
 /// sidecar.
@@ -163,12 +194,12 @@ pub fn render(existing: Option<&str>, properties: &Properties) -> Result<String>
 /// ever added to a frame this run has just rated, so a merge with nothing to
 /// merge into is a caller's bug and not a document this module has to invent.
 pub fn render_mark(rated: &str, mark: &Mark) -> Result<String> {
-    merge(rated, &mark_properties(mark), &MARK_NAMES)
+    merge(rated, &mark_properties(mark), retirable_by_mark())
 }
 
 /// A whole new sidecar for a frame that has none, holding `owned` and nothing
 /// else.
-fn new_document(owned: &[(String, String)]) -> String {
+fn new_document(owned: &[Property]) -> String {
     let mut document = format!(
         "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"imagecull {version}\">\n\
          \x20<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\">\n\
@@ -187,7 +218,7 @@ fn new_document(owned: &[(String, String)]) -> String {
 /// Merge `owned` into an existing document, leaving everything else exactly as
 /// it was, and retiring the `imagecull:` names this write owns but did not
 /// produce.
-fn merge(text: &str, owned: &[(String, String)], retirable: &[&str]) -> Result<String> {
+fn merge(text: &str, owned: &[Property], retirable: &[&str]) -> Result<String> {
     let start = text.find(DESCRIPTION).ok_or_else(no_description)?;
     let end = tag_end(text, start).ok_or_else(no_description)?;
     let tag = &text[start..end];
@@ -216,7 +247,7 @@ fn tag_end(text: &str, start: usize) -> Option<usize> {
 /// Appended attributes go on one line before the tag's `>` (or `/`), separated
 /// by single spaces: the one piece of formatting this tool invents inside
 /// someone else's document, kept as small as it can be.
-fn merge_tag(tag: &str, ours: &[(String, String)], retirable: &[&str]) -> String {
+fn merge_tag(tag: &str, ours: &[Property], retirable: &[&str]) -> String {
     let attributes = attributes(tag);
     // Nothing to do when the document already says exactly this: a forced run
     // over an unchanged rating must not churn the file.
@@ -269,36 +300,34 @@ fn merge_tag(tag: &str, ours: &[(String, String)], retirable: &[&str]) -> String
 
 /// The rating properties this run writes, in the order a new document lists
 /// them.
-fn our_properties(properties: &Properties) -> Vec<(String, String)> {
-    let pair = |name: &str, value: String| (name.to_string(), value);
+fn our_properties(properties: &Properties) -> Vec<Property> {
     vec![
-        pair("xmp:Rating", properties.rating.to_string()),
-        pair("imagecull:confStars", properties.conf_stars.to_string()),
-        pair("imagecull:model", properties.model.clone()),
-        pair("imagecull:rubricHash", properties.rubric_hash.clone()),
-        pair("imagecull:scoredAt", properties.scored_at.clone()),
-        pair("imagecull:version", properties.version.clone()),
+        ("xmp:Rating", properties.rating.to_string()),
+        ("imagecull:confStars", properties.conf_stars.to_string()),
+        ("imagecull:model", properties.model.clone()),
+        ("imagecull:rubricHash", properties.rubric_hash.clone()),
+        ("imagecull:scoredAt", properties.scored_at.clone()),
+        ("imagecull:version", properties.version.clone()),
     ]
 }
 
 /// The properties a group's verdict writes: the label, when it is ours to write,
 /// then the facts that explain it.
-fn mark_properties(mark: &Mark) -> Vec<(String, String)> {
-    let pair = |name: &str, value: String| (name.to_string(), value);
-    let mut owned = Vec::with_capacity(9);
+fn mark_properties(mark: &Mark) -> Vec<Property> {
+    let mut owned = Vec::with_capacity(10);
     if let Some(label) = mark.label {
-        owned.push(pair("xmp:Label", label.to_string()));
-        owned.push(pair("imagecull:labeledBy", LABELED_BY.to_string()));
+        owned.push(("xmp:Label", label.to_string()));
+        owned.push((LABELED_BY_NAME, LABELED_BY.to_string()));
     }
-    owned.push(pair("imagecull:groupKeeper", mark.keeper.to_string()));
-    owned.push(pair("imagecull:groupStart", mark.group_start.clone()));
-    owned.push(pair("imagecull:groupSize", mark.group_size.to_string()));
-    owned.push(pair("imagecull:groupingHash", mark.grouping_hash.clone()));
-    owned.push(pair("imagecull:pickBy", mark.pick_by.clone()));
-    owned.push(pair("imagecull:pickConf", mark.pick_conf.to_string()));
-    owned.push(pair("imagecull:pickedAt", mark.picked_at.clone()));
+    owned.push(("imagecull:groupKeeper", mark.keeper.to_string()));
+    owned.push(("imagecull:groupStart", mark.group_start.clone()));
+    owned.push(("imagecull:groupSize", mark.group_size.to_string()));
+    owned.push(("imagecull:groupingHash", mark.grouping_hash.clone()));
+    owned.push(("imagecull:pickBy", mark.pick_by.clone()));
+    owned.push(("imagecull:pickConf", mark.pick_conf.to_string()));
+    owned.push(("imagecull:pickedAt", mark.picked_at.clone()));
     if let Some(note) = mark.note {
-        owned.push(pair("imagecull:groupNote", note.to_string()));
+        owned.push(("imagecull:groupNote", note.to_string()));
     }
     owned
 }
@@ -306,7 +335,7 @@ fn mark_properties(mark: &Mark) -> Vec<(String, String)> {
 /// Whether the tag already carries exactly the properties this write would put
 /// there, and none this write owns and did not produce: one list of what we own,
 /// so a comparison and a write can never disagree.
-fn is_current(attributes: &[Attribute], ours: &[(String, String)], retirable: &[&str]) -> bool {
+fn is_current(attributes: &[Attribute], ours: &[Property], retirable: &[&str]) -> bool {
     ours.iter().all(|(name, expected)| {
         attributes
             .iter()
@@ -318,11 +347,11 @@ fn is_current(attributes: &[Attribute], ours: &[(String, String)], retirable: &[
 
 /// Whether a merge retires `name`: a property of ours that this build does not
 /// write at all, or one this write owns and did not produce.
-fn retires(name: &str, ours: &[(String, String)], retirable: &[&str]) -> bool {
-    if !name.starts_with("imagecull:") || ours.iter().any(|(owned, _)| owned == name) {
+fn retires(name: &str, ours: &[Property], retirable: &[&str]) -> bool {
+    if !name.starts_with("imagecull:") || ours.iter().any(|(owned, _)| *owned == name) {
         return false;
     }
-    retirable.contains(&name) || !WRITTEN.contains(&name)
+    retirable.contains(&name) || !written().contains(&name)
 }
 
 /// One attribute of an opening tag, as the spans a text edit needs.

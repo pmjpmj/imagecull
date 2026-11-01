@@ -61,7 +61,7 @@ fn a_group_inside_the_budget_is_compared_whole_and_in_capture_order() {
     assert_eq!(
         keeper::compared(&group, keeper::MAX),
         [0, 1, 2],
-        "every frame of a burst the budget holds is compared, in the order it was taken"
+        "every frame of a group the budget holds is compared, in the order it was taken"
     );
 }
 

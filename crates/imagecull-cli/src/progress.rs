@@ -310,7 +310,7 @@ fn summary_block(summary: &Summary) -> String {
         }
         out.push_str(&format!("{}\n", parts.join(" · ")));
     }
-    if let Some(groups) = groups_clause(&summary.groups) {
+    if let Some(groups) = groups_clause(&summary.groups, summary.skipped) {
         out.push_str(&format!("{groups}\n"));
     }
     let left_out = left_out(&summary.left_out);
@@ -350,7 +350,7 @@ fn outcome_line(summary: &Summary) -> String {
     if summary.duplicates > 0 {
         parts.push(format!("{} deduplicated", summary.duplicates));
     }
-    if let Some(groups) = groups_clause(&summary.groups) {
+    if let Some(groups) = groups_clause(&summary.groups, summary.skipped) {
         parts.push(groups);
     }
     let left_out = left_out(&summary.left_out);
@@ -365,51 +365,58 @@ fn outcome_line(summary: &Summary) -> String {
     parts.join(" · ")
 }
 
-/// The group pass, as one clause: how many groups were judged, how many frames
-/// carry the verdict, and every way the folder disagrees with it.
+/// The group pass, as one clause: how many groups were judged, how many
+/// non-keepers carry the verdict, and every way the folder disagrees with it.
 ///
 /// Absent when the run judged no group, so a folder of singletons reads exactly
 /// as it did before the feature existed. A clause appears only when it is not
 /// zero, and `low confidence` is spelled out because a photographer reads it as a
 /// question about the model rather than as a count of frames.
-fn groups_clause(groups: &Groups) -> Option<String> {
+///
+/// `already_rated` is the frames the skip rule kept: they are in no group, so the
+/// marks cover only the frames this run rated, and the line says so rather than
+/// letting a partial delete set read as complete.
+fn groups_clause(groups: &Groups, already_rated: usize) -> Option<String> {
     if groups.judged_nothing() {
         return None;
     }
     let mut parts = vec![format!("groups: {}", groups.groups)];
-    let mut clause = |count: usize, text: String| {
-        if count > 0 {
-            parts.push(text);
-        }
-    };
-    clause(groups.marked, format!("marked: {}", groups.marked));
-    clause(groups.red, format!("red: {}", groups.red));
-    clause(
-        groups.unmarked,
-        format!("unmarked: {} (label not ours)", groups.unmarked),
-    );
-    clause(
-        groups.stale_reds,
-        format!("red now the keeper: {}", groups.stale_reds),
-    );
-    clause(
-        groups.not_compared,
-        format!("not compared: {}", groups.not_compared),
-    );
-    clause(groups.undecided, format!("undecided: {}", groups.undecided));
-    clause(
-        groups.unwritten,
-        format!("mark failed: {}", groups.unwritten),
-    );
-    clause(
-        groups.low_confidence,
+    parts.extend(clause(already_rated, |count| {
+        format!("already rated: {count}, in no group — --force re-marks the folder")
+    }));
+    parts.extend(clause(groups.non_keepers, |count| {
+        format!("non-keepers: {count}")
+    }));
+    parts.extend(clause(groups.red, |count| format!("red: {count}")));
+    parts.extend(clause(groups.unmarked, |count| {
+        format!("unmarked: {count} (label not ours)")
+    }));
+    parts.extend(clause(groups.stale_reds, |count| {
+        format!("red now the keeper: {count}")
+    }));
+    parts.extend(clause(groups.not_compared, |count| {
+        format!("not compared: {count}")
+    }));
+    parts.extend(clause(groups.undecided, |count| {
+        format!("undecided: {count}")
+    }));
+    parts.extend(clause(groups.unwritten, |count| {
+        format!("mark failed: {count}")
+    }));
+    parts.extend(clause(groups.low_confidence, |count| {
         format!(
-            "low confidence: {} {}",
-            groups.low_confidence,
-            plural(groups.low_confidence, "group", "groups")
-        ),
-    );
+            "low confidence: {count} {}",
+            plural(count, "group", "groups")
+        )
+    }));
     Some(parts.join(" · "))
+}
+
+/// One clause of the group summary, when its count is not zero: the count is
+/// passed once and the words are built from it, so the number and its label
+/// cannot disagree.
+fn clause(count: usize, words: impl FnOnce(usize) -> String) -> Option<String> {
+    (count > 0).then(|| words(count))
 }
 
 /// How a run ended, when it did not run to the end: the one thing a `--quiet`
@@ -747,12 +754,13 @@ mod tests {
     }
 
     /// The summary of a run whose group pass marked some frames and left others
-    /// alone.
+    /// alone. Every frame was rated by this run, so no group is missing a member.
     fn grouped_summary() -> Summary {
         let mut summary = summary();
+        summary.skipped = 0;
         summary.groups = Groups {
             groups: 3,
-            marked: 12,
+            non_keepers: 12,
             red: 9,
             unmarked: 3,
             stale_reds: 2,
@@ -775,7 +783,7 @@ mod tests {
 
         assert!(
             rendered.out.contains(
-                "groups: 3 · marked: 12 · red: 9 · unmarked: 3 (label not ours) · \
+                "groups: 3 · non-keepers: 12 · red: 9 · unmarked: 3 (label not ours) · \
                  red now the keeper: 2 · not compared: 4 · undecided: 1 · \
                  low confidence: 2 groups\n"
             ),
@@ -785,6 +793,62 @@ mod tests {
         assert!(
             !rendered.out.contains("low confidence: 2 groups\n\n"),
             "and on one line only: {}",
+            rendered.out
+        );
+        // The three numbers the phrase "12 non-keepers, 9 red, 3 unmarked" adds
+        // up to describe one population, which is what makes the line checkable
+        // in the terminal.
+        let groups = &grouped_summary().groups;
+        assert_eq!(
+            groups.non_keepers,
+            groups.red + groups.unmarked,
+            "the non-keepers are the reds and the colours left to the photographer"
+        );
+    }
+
+    #[test]
+    fn the_group_line_says_the_marks_cover_only_the_frames_this_run_rated() {
+        let mut summary = grouped_summary();
+        summary.skipped = 12;
+
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary,
+            })],
+            Verbosity::Normal,
+        );
+
+        assert!(
+            rendered.out.contains(
+                "groups: 3 · already rated: 12, in no group — --force re-marks the folder · \
+                 non-keepers: 12"
+            ),
+            "a kept frame is in no group, so a partial delete set says so where the marks are \
+             counted: {}",
+            rendered.out
+        );
+        assert!(
+            !rendered.out.contains("groups skipped"),
+            "the run counts frames it did not judge, never groups it did not look at: {}",
+            rendered.out
+        );
+    }
+
+    #[test]
+    fn a_run_that_kept_no_frame_says_nothing_about_them() {
+        let mut summary = grouped_summary();
+        summary.skipped = 0;
+
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary,
+            })],
+            Verbosity::Normal,
+        );
+
+        assert!(
+            !rendered.out.contains("already rated:"),
+            "every frame was this run's, so the marks cover the folder: {}",
             rendered.out
         );
     }

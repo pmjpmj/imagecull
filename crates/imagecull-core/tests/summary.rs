@@ -39,6 +39,7 @@ fn scored(name: &str, stars: u8) -> Frame {
             document: serde_json::Value::Null,
         })),
         persisted: Persisted::Written,
+        rating_document: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn failed(name: &str, kind: ErrorKind) -> Frame {
             format!("{name} did not answer"),
         ))),
         persisted: Persisted::NotAttempted,
+        rating_document: None,
     }
 }
 

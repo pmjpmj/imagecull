@@ -309,7 +309,7 @@ impl GroupsArgs {
     }
 }
 
-/// A gap in seconds: positive, because a burst of zero width is not a moment.
+/// A gap in seconds: positive, because a group of zero width is not a moment.
 fn gap_seconds(text: &str) -> Result<f64, String> {
     let seconds: f64 = text
         .parse()

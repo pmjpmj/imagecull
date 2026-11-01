@@ -208,7 +208,7 @@ fn mark(label: Option<&'static str>) -> sidecar::Mark {
 }
 
 #[test]
-fn a_losers_verdict_writes_the_red_and_the_facts_that_explain_it() {
+fn a_non_keepers_verdict_writes_the_red_and_the_facts_that_explain_it() {
     let rated = sidecar::render(None, &properties()).expect("a rated document");
 
     let document =

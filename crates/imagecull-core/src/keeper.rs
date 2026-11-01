@@ -1,6 +1,6 @@
 //! Which frame of a group to keep: one comparative request, and the verdict.
 //!
-//! The question a burst asks is *relative* — "of these twelve, which one" — and
+//! The question a group asks is *relative* — "of these twelve, which one" — and
 //! the only thing that can answer it is a request that shows the model all of
 //! them at once. So a group of two or more gets one
 //! [`Comparison`](crate::keeper::Comparison): several previews of one moment, a
@@ -18,7 +18,7 @@
 //! highest rating first, ties broken by [`acutance`](crate::measure) because the
 //! rating is the model's judgement and the measure is the only other thing that
 //! can order two equally-rated frames. That narrowing chooses **who is compared**,
-//! never a rating, and the frames it leaves out are still marked as losers.
+//! never a rating, and the frames it leaves out are still marked as non-keepers.
 //!
 //! # What this module does not do
 //!
@@ -31,9 +31,9 @@
 //!
 //! # The answer is a coin flip on a true near-tie, and it still decides
 //!
-//! Measured on a real three-frame burst: the pick swapped between orderings at
+//! Measured on a real three-frame group: the pick swapped between orderings at
 //! 0.55 against 0.43, and between preview sizes. A confidence floor would
-//! therefore go silent on exactly the bursts this exists for. Instead the
+//! therefore go silent on exactly the groups this exists for. Instead the
 //! confidence is recorded beside the verdict on every member, and a group below
 //! [`FLOOR`] is counted on the summary line: the photographer is told which
 //! groups the model was unsure about, rather than being handed a filter that
@@ -64,6 +64,12 @@ pub const QUESTION: &str = "keeper";
 pub const BY_COMPARISON: &str = "comparison";
 
 /// What the model is asked, in the evidence's own words.
+///
+/// "Burst" stays in this sentence on purpose. It is the wording that was measured
+/// against the reference server (`.scratch/burst-grouping-v1/evidence/`), and the
+/// glossary's preference for *group* governs this codebase's prose, not the
+/// question the model answered best: change it and the measurement no longer
+/// describes what a run sends.
 pub const INSTRUCTIONS: &str = "Several frames of one burst are shown, in order. Decide which single frame is the one to \
      keep: the sharpest and the one whose subject, expression and light hold together best. \
      Answer with the key of that frame.";
@@ -127,7 +133,7 @@ pub fn compared(candidates: &[Candidate], max: usize) -> Vec<usize> {
     });
     order.truncate(max.max(1));
     // Back into capture order: the criteria the model reads are positions in a
-    // burst, not a ranking, and the answer has to be a frame rather than a pecking
+    // group, not a ranking, and the answer has to be a frame rather than a
     // order the model was silently handed.
     order.sort_unstable();
     order
