@@ -18,7 +18,9 @@
 //! classification ([`scoring::Ending`]). The ledger beside the CSV ([`ledger`])
 //! is what lets a run be interrupted: each frame is recorded and flushed as it
 //! is judged, `--resume` skips what is already there, and the CSV is rendered
-//! from those records.
+//! from those records. Ticket 07 adds the run's own account of itself
+//! ([`progress`]): the events a front end draws a progress line and a summary
+//! from, still with no terminal in the core.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -35,6 +37,7 @@ pub mod ledger;
 pub mod omlx;
 pub mod preprocess;
 pub mod preview;
+pub mod progress;
 pub mod reading;
 pub mod report;
 pub mod rubric;
@@ -46,6 +49,10 @@ pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
 pub use ledger::{FileIdentity, Ledger, LedgerMode, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
+pub use progress::{
+    DISAGREEMENT_RULE, Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter,
+    Scores, Silent, Started, StatusCount, Summary, Warning, agrees, implied_stars,
+};
 pub use reading::{Answers, Confidences, Reading, Verdict};
 pub use report::Outputs;
 pub use rubric::{Question, QuestionKind, Rubric, RubricHash};

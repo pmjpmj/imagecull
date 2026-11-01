@@ -14,6 +14,7 @@ use imagecull_core::dry_run;
 use imagecull_core::error::{Error, ErrorKind};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
+use imagecull_core::progress::Silent;
 use imagecull_core::reading::Verdict;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel, Config, RetryPolicy};
@@ -63,7 +64,8 @@ fn every_frame_reaches_the_decider_with_its_questions_state_and_alias() {
     let decider = Scripted::always_reading(2);
     let mut config = config(Params::default(), Some("street at dusk, high ISO"));
     config.scan.recursive = true;
-    let run = scoring::run(shoot.path(), &config, &decider, &Cancel::new()).expect("a run");
+    let run =
+        scoring::run(shoot.path(), &config, &decider, &Silent, &Cancel::new()).expect("a run");
 
     assert_eq!(run.frames.len(), 2);
     assert_eq!(run.scored(), 2);
@@ -115,6 +117,7 @@ fn a_portrait_frame_reaches_the_decider_upright_and_capped() {
         shoot.path(),
         &config(params, None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -144,6 +147,7 @@ fn a_preview_smaller_than_the_cap_is_never_upscaled_on_its_way_to_the_decider() 
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -165,6 +169,7 @@ fn the_run_reports_all_six_answers_to_its_caller() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -203,6 +208,7 @@ fn an_unreadable_file_is_classified_and_the_run_continues() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("the folder is readable, so the run happens");
@@ -251,6 +257,7 @@ fn a_transport_failure_is_classified_and_does_not_stop_the_run() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -276,6 +283,7 @@ fn a_bad_response_keeps_its_document_and_the_run_continues() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -310,6 +318,7 @@ fn requests_are_strictly_sequential_in_ingest_order() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -335,7 +344,8 @@ fn limit_scores_only_the_first_files_of_the_run() {
     ]);
     let decider = Scripted::always_reading(1);
 
-    let run = scoring::run(shoot.path(), &limited(1), &decider, &Cancel::new()).expect("a run");
+    let run =
+        scoring::run(shoot.path(), &limited(1), &decider, &Silent, &Cancel::new()).expect("a run");
 
     assert_eq!(run.frames.len(), 1);
     assert_eq!(decider.seen().len(), 1);
@@ -359,6 +369,7 @@ fn the_dry_run_writes_exactly_the_bytes_the_decider_received() {
         shoot.path(),
         &config(params, None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -408,6 +419,7 @@ fn a_folder_with_no_raw_files_is_an_empty_run_not_an_error() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("an empty run");
@@ -424,6 +436,7 @@ fn the_missing_directory_is_a_fatal_error() {
         Path::new("/no/such/shoot"),
         &config(Params::default(), None),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect_err("a missing folder stops the run before any file");

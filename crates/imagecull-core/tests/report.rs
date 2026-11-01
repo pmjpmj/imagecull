@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
+use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel, Config};
@@ -120,6 +121,7 @@ fn a_folder_with_no_raw_files_still_gets_the_header_row() {
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("an empty run");
@@ -136,6 +138,7 @@ fn a_scored_frame_is_one_row_with_its_answers_at_full_precision() {
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -169,6 +172,7 @@ fn a_failed_row_carries_its_status_and_message_and_leaves_the_value_cells_empty(
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -196,6 +200,7 @@ fn a_filename_with_a_comma_a_quote_a_line_break_or_non_ascii_survives_the_round_
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -243,6 +248,7 @@ fn the_golden_report_pins_the_columns_the_numbers_and_the_failures() {
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -275,6 +281,7 @@ fn the_file_column_is_relative_to_the_shoot_folder_unless_absolute_is_asked_for(
         shoot.path(),
         &shoot.config(scan.clone()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -283,7 +290,7 @@ fn the_file_column_is_relative_to_the_shoot_folder_unless_absolute_is_asked_for(
     let mut config = shoot.config(scan);
     config.outputs.absolute = true;
     let decider = Scripted::always_reading(2);
-    scoring::run(shoot.path(), &config, &decider, &Cancel::new()).expect("a run");
+    scoring::run(shoot.path(), &config, &decider, &Silent, &Cancel::new()).expect("a run");
     assert_eq!(
         shoot.files(),
         [
@@ -315,7 +322,14 @@ fn limit_reports_only_the_first_files_of_the_run() {
     };
     let decider = Scripted::always_reading(2);
 
-    scoring::run(shoot.path(), &shoot.config(scan), &decider, &Cancel::new()).expect("a run");
+    scoring::run(
+        shoot.path(),
+        &shoot.config(scan),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(shoot.files(), ["DSC_0001.NEF", "DSC_0002.NEF"]);
     assert_eq!(
@@ -341,7 +355,7 @@ fn json_scores_keeps_the_raw_answer_document_of_every_frame() {
     let path = shoot.out.path().join("scores.json");
     config.outputs.json_scores = Some(path.clone());
 
-    scoring::run(shoot.path(), &config, &decider, &Cancel::new()).expect("a run");
+    scoring::run(shoot.path(), &config, &decider, &Silent, &Cancel::new()).expect("a run");
 
     let raw = fs::read_to_string(&path).expect("--json-scores writes its file");
     let documents: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
@@ -370,6 +384,7 @@ fn a_run_writes_the_csv_with_its_ledger_beside_it_and_nothing_else() {
         shoot.path(),
         &shoot.config(ScanOptions::default()),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");

@@ -322,6 +322,7 @@ pub struct Ledger {
     records: Vec<Record>,
     by_resume: HashMap<ResumeKey, usize>,
     by_dedupe: HashMap<String, usize>,
+    truncated: usize,
 }
 
 impl Ledger {
@@ -337,6 +338,7 @@ impl Ledger {
         let mut records = Vec::new();
         let mut keep = 0;
         let mut write_header = true;
+        let mut truncated = 0;
         if mode != LedgerMode::Discard && !existing.is_empty() {
             let loaded = parse(&path, &existing)?;
             ensure_compatible(&path, &loaded.header, &header)?;
@@ -344,6 +346,10 @@ impl Ledger {
                 records = loaded.records;
                 keep = loaded.keep;
                 write_header = false;
+                // What the last line that did not parse cost: a hard kill's
+                // leavings, which a resumed run re-scores. Worth saying out
+                // loud, because the photographer's last run died.
+                truncated = existing.len().saturating_sub(keep);
             }
         }
         let mut file = OpenOptions::new()
@@ -375,6 +381,7 @@ impl Ledger {
             records: Vec::new(),
             by_resume: HashMap::new(),
             by_dedupe: HashMap::new(),
+            truncated,
         };
         if write_header {
             ledger.write_line(&header, &path)?;
@@ -388,6 +395,15 @@ impl Ledger {
     /// The frames the ledger holds, in the order they were recorded.
     pub fn records(&self) -> &[Record] {
         &self.records
+    }
+
+    /// How many bytes of a half-written record opening this ledger discarded: a
+    /// killed run's last line, which a resume re-scores rather than trusts.
+    ///
+    /// Only a resume can repair anything — a restart starts the file over on
+    /// purpose, so it has nothing to report.
+    pub fn truncated_bytes(&self) -> usize {
+        self.truncated
     }
 
     /// The frame already recorded under `key`, if a resume may skip it.
