@@ -1,0 +1,118 @@
+//! `--print-sidecars`: what the run would write, printed instead of written.
+//!
+//! The writer is the only thing that knows a sidecar's shape, so the preview is a
+//! writer that prints. Nothing touches the shoot folder: no sidecar, no backup, no
+//! temp file — and the requests are paid for exactly as a real run would pay them,
+//! because the point of the preview is to see what those requests would become.
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
+
+use imagecull_core::Result;
+use imagecull_core::sidecar::{self, Writer, Written};
+
+/// The writer a preview run uses.
+pub struct Printer;
+
+impl Writer for Printer {
+    fn write(&self, frame: &Path, document: &str, existing: Option<&str>) -> Result<Written> {
+        let out = block(frame, document, existing);
+        // A closed pipe is the reader's decision, not a failed run.
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(out.as_bytes());
+        let _ = stdout.flush();
+        Ok(if existing.is_some() {
+            Written::Replaced
+        } else {
+            Written::Created
+        })
+    }
+}
+
+/// One frame's preview: what would be created or updated, and which of our
+/// properties would change, with the value that is there now beside it.
+fn block(frame: &Path, document: &str, existing: Option<&str>) -> String {
+    let target = sidecar::path_for(frame);
+    let verb = if existing.is_some() {
+        "would update"
+    } else {
+        "would create"
+    };
+    let mut out = format!("{}  {verb} {}\n", name_of(frame), name_of(&target));
+    let before: HashMap<String, String> = existing
+        .map(sidecar::properties_in)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    for (name, value) in sidecar::properties_in(document) {
+        match before.get(&name) {
+            Some(was) => out.push_str(&format!("  {name:<22} {value}      (was: {was})\n")),
+            None => out.push_str(&format!("  {name:<22} {value}      (was: none)\n")),
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// The last component of a path, as the preview spells it.
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use imagecull_core::sidecar::{self, Properties};
+
+    use super::block;
+
+    fn properties(rating: u8) -> Properties {
+        Properties {
+            rating,
+            conf_stars: 0.63,
+            model: "clef-flash-oQ4e".to_string(),
+            rubric_hash: "9f3c1a77".to_string(),
+            scored_at: "2026-11-08T10:14:02Z".to_string(),
+            version: "0.1.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_new_sidecar_shows_every_property_with_nothing_before_it() {
+        let document = sidecar::render(None, &properties(4)).expect("a document");
+
+        let block = block(Path::new("/shoot/DSC_0421.NEF"), &document, None);
+
+        assert_eq!(
+            block,
+            "DSC_0421.NEF  would create DSC_0421.xmp\n\
+             \x20 xmp:Rating             4      (was: none)\n\
+             \x20 imagecull:confStars    0.63      (was: none)\n\
+             \x20 imagecull:model        clef-flash-oQ4e      (was: none)\n\
+             \x20 imagecull:rubricHash   9f3c1a77      (was: none)\n\
+             \x20 imagecull:scoredAt     2026-11-08T10:14:02Z      (was: none)\n\
+             \x20 imagecull:version      0.1.0      (was: none)\n\n"
+        );
+    }
+
+    #[test]
+    fn an_existing_sidecar_shows_the_rating_it_would_replace() {
+        let existing = sidecar::render(None, &properties(3)).expect("a document");
+        let document = sidecar::render(Some(&existing), &properties(2)).expect("a document");
+
+        let block = block(Path::new("/shoot/DSC_0422.NEF"), &document, Some(&existing));
+
+        assert!(
+            block.starts_with("DSC_0422.NEF  would update DSC_0422.xmp\n"),
+            "{block}"
+        );
+        assert!(
+            block.contains("xmp:Rating             2      (was: 3)"),
+            "the reviewer has to see what the run would overwrite: {block}"
+        );
+    }
+}

@@ -145,7 +145,7 @@ mod tests {
     use imagecull_core::group::Planned;
     use imagecull_core::ingest::{ScanCounts, SourceFile};
     use imagecull_core::measure::Measures;
-    use imagecull_core::report::Failure;
+    use imagecull_core::sidecar::Failure;
 
     use super::*;
 

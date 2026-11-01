@@ -39,11 +39,20 @@ pub enum ErrorKind {
     Timeout,
     /// The answer was missing, misnamed, or of the wrong type.
     BadResponse,
+    /// The frame's existing sidecar cannot be read as text, or has no
+    /// description this tool can safely write into, so it was left alone.
+    XmpUnreadable,
+    /// The frame's sidecar could not be written: a read-only mount, a full
+    /// disk, a file that is not ours to replace.
+    XmpWriteFailed,
+    /// The frame's sidecar belongs to another application, which will rewrite it
+    /// from its own history: the run refused to write into it.
+    XmpForeign,
 }
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 10] = [
+    pub const ALL: [ErrorKind; 13] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
@@ -54,6 +63,9 @@ impl ErrorKind {
         ErrorKind::ServerUnreachable,
         ErrorKind::Timeout,
         ErrorKind::BadResponse,
+        ErrorKind::XmpUnreadable,
+        ErrorKind::XmpWriteFailed,
+        ErrorKind::XmpForeign,
     ];
 
     /// The `status` string for this kind (never `"ok"`: that is the absence of
@@ -70,6 +82,9 @@ impl ErrorKind {
             ErrorKind::ServerUnreachable => "server_unreachable",
             ErrorKind::Timeout => "timeout",
             ErrorKind::BadResponse => "bad_response",
+            ErrorKind::XmpUnreadable => "xmp_unreadable",
+            ErrorKind::XmpWriteFailed => "xmp_write_failed",
+            ErrorKind::XmpForeign => "xmp_foreign",
         }
     }
 
@@ -104,6 +119,13 @@ impl ErrorKind {
                 Recovery::Continue
             }
             ErrorKind::Http413 | ErrorKind::BadResponse => Recovery::Continue,
+            ErrorKind::XmpUnreadable => Recovery::Continue,
+            // Every remaining frame would fail the same way, and each attempt
+            // has already been paid for: stop, do not collect 400 failures.
+            ErrorKind::XmpWriteFailed => Recovery::AbortRun,
+            // One darktable sidecar is not a trend: the photographer may well
+            // want the rest of the folder rated.
+            ErrorKind::XmpForeign => Recovery::Continue,
             ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
             ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
@@ -305,6 +327,12 @@ mod tests {
                 "server_unreachable",
                 "timeout",
                 "bad_response",
+                // The sidecar's own failures: the rating's only home is the
+                // document beside the frame, so its refusals are frame statuses
+                // like any other.
+                "xmp_unreadable",
+                "xmp_write_failed",
+                "xmp_foreign",
             ]
         );
         assert!(!strings.contains(&"ok"));

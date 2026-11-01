@@ -320,3 +320,36 @@ fn the_cap_and_quality_flags_reach_the_previews() {
         "the file on disk is capped too"
     );
 }
+
+#[test]
+fn a_dry_run_writes_previews_and_no_sidecars() {
+    let shoot = support::shoot(&[(
+        "DSC_0001.NEF",
+        support::nef(1, &[support::jpeg(64, 32, 80)]),
+    )]);
+    let out = tempfile::tempdir().expect("a temp dir");
+
+    dry_run::render_previews(
+        shoot.path(),
+        &out.path().join("previews"),
+        &ScanOptions::default(),
+        &Params::default(),
+    )
+    .expect("a dry run");
+
+    let sidecars: Vec<String> = std::fs::read_dir(shoot.path())
+        .expect("the shoot folder")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".xmp"))
+        .collect();
+    assert!(
+        sidecars.is_empty(),
+        "a dry run makes no requests, so it has no rating to write: {sidecars:?}"
+    );
+}

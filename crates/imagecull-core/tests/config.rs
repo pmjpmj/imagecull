@@ -27,9 +27,7 @@ jpeg_quality = 72
 recursive = true
 
 [outputs]
-csv = "cull.csv"
 json_scores = "answers.json"
-absolute = true
 
 [run]
 rubric = "mine.toml"
@@ -87,9 +85,7 @@ fn every_key_reaches_the_resolved_values() {
     assert_eq!(resolved.max_edge, Some(1024));
     assert_eq!(resolved.jpeg_quality, Some(72));
     assert_eq!(resolved.recursive, Some(true));
-    assert_eq!(resolved.csv, Some(PathBuf::from("cull.csv")));
     assert_eq!(resolved.json_scores, Some(PathBuf::from("answers.json")));
-    assert_eq!(resolved.absolute, Some(true));
     assert_eq!(
         resolved.rubric,
         Some(RubricSource::File(PathBuf::from("mine.toml")))
@@ -174,7 +170,6 @@ fn a_relative_path_is_anchored_to_the_files_own_directory() {
         resolved.rubric,
         Some(RubricSource::File(base.join("mine.toml")))
     );
-    assert_eq!(resolved.csv, Some(base.join("cull.csv")));
     assert_eq!(resolved.json_scores, Some(base.join("answers.json")));
 }
 
@@ -182,7 +177,7 @@ fn a_relative_path_is_anchored_to_the_files_own_directory() {
 fn an_absolute_path_is_left_alone() {
     let base = Path::new("/Volumes/Shoot A");
     let file = ConfigFile::from_toml(
-        "[run]\nrubric = \"/etc/rubrics/mine.toml\"\n[outputs]\ncsv = \"/tmp/cull.csv\"\n",
+        "[run]\nrubric = \"/etc/rubrics/mine.toml\"\n[outputs]\njson_scores = \"/tmp/answers.json\"\n",
     )
     .expect("a valid config");
     let resolved = file.resolve(Some(base));
@@ -190,7 +185,10 @@ fn an_absolute_path_is_left_alone() {
         resolved.rubric,
         Some(RubricSource::File(PathBuf::from("/etc/rubrics/mine.toml")))
     );
-    assert_eq!(resolved.csv, Some(PathBuf::from("/tmp/cull.csv")));
+    assert_eq!(
+        resolved.json_scores,
+        Some(PathBuf::from("/tmp/answers.json"))
+    );
 }
 
 #[test]
@@ -199,13 +197,16 @@ fn the_flags_win_over_the_file() {
     let flags = Resolved {
         max_edge: Some(1568),
         model: Some("clef-flash-oQ4e".to_string()),
-        csv: Some(PathBuf::from("elsewhere.csv")),
+        json_scores: Some(PathBuf::from("elsewhere.json")),
         ..Resolved::default()
     };
     let effective = file.override_with(flags).settle(None);
     assert_eq!(effective.params.max_edge, 1568, "--max-edge beat the file");
     assert_eq!(effective.model.as_deref(), Some("clef-flash-oQ4e"));
-    assert_eq!(effective.outputs.csv, PathBuf::from("elsewhere.csv"));
+    assert_eq!(
+        effective.outputs.json_scores,
+        Some(PathBuf::from("elsewhere.json"))
+    );
     assert_eq!(
         effective.params.jpeg_quality, 72,
         "a flag that said nothing leaves the file's value alone"
@@ -221,7 +222,6 @@ fn the_file_wins_over_the_built_in_default() {
     assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
     assert!(!effective.dedupe);
     assert!(effective.recursive);
-    assert!(effective.outputs.absolute);
     assert_eq!(
         effective.shoot_context.as_deref(),
         Some("night street, pushed two stops")
@@ -239,9 +239,7 @@ fn an_empty_source_settles_to_the_specs_defaults() {
     assert_eq!(effective.timeout, 120);
     assert_eq!(effective.params, Params::default());
     assert!(!effective.recursive);
-    assert_eq!(effective.outputs.csv, PathBuf::from("scores.csv"));
-    assert_eq!(effective.outputs.json_scores, None);
-    assert!(!effective.outputs.absolute);
+    assert_eq!(effective.outputs.json_scores, None, "no report path at all");
     assert_eq!(effective.rubric, None);
     assert!(effective.dedupe);
     assert_eq!(effective.source, None);
@@ -463,4 +461,17 @@ fn write_user_config(base: &Path, text: &str) {
     let dir = base.join(config::USER_CONFIG_DIR);
     fs::create_dir_all(&dir).expect("create the config directory");
     fs::write(dir.join(config::USER_CONFIG_FILE), text).expect("write the user config");
+}
+
+#[test]
+fn the_report_keys_are_refused_with_an_explanation_rather_than_a_typo_message() {
+    let message = error("[outputs]\ncsv = \"scores.csv\"\n");
+    assert!(
+        message.contains("sidecar"),
+        "the refusal has to say where ratings go now: {message}"
+    );
+    assert!(message.contains("outputs.csv"), "{message}");
+
+    let message = error("[outputs]\nabsolute = true\n");
+    assert!(message.contains("outputs.absolute"), "{message}");
 }

@@ -12,9 +12,8 @@ use std::time::Duration;
 
 use imagecull_core::error::ErrorKind;
 use imagecull_core::ingest::ScanOptions;
-use imagecull_core::ledger::{self, LedgerMode};
 use imagecull_core::preprocess::Params;
-use imagecull_core::progress::{Event, FrameEvent, Judgement, Reporter, Silent};
+use imagecull_core::progress::{Event, FrameEvent, Judgement, Reporter};
 use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, RetryPolicy};
 use support::decider::{Scripted, document};
@@ -74,8 +73,15 @@ fn config() -> Config {
 /// collected.
 fn driven(shoot: &tempfile::TempDir, decider: &Scripted) -> (Collected, scoring::Run) {
     let reporter = Collected::default();
-    let run =
-        scoring::run(shoot.path(), &config(), decider, &reporter, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(),
+        decider,
+        &imagecull_core::sidecar::Filesystem,
+        &reporter,
+        &Cancel::new(),
+    )
+    .expect("a run");
     (reporter, run)
 }
 
@@ -92,6 +98,7 @@ fn the_run_announces_its_total_rubric_and_model_before_the_first_frame() {
         shoot.path(),
         &config,
         &Scripted::always_reading(2),
+        &imagecull_core::sidecar::Filesystem,
         &reporter,
         &Cancel::new(),
     )
@@ -189,6 +196,7 @@ fn a_fatal_error_returns_before_any_frame_is_reported() {
         std::path::Path::new("/no/such/shoot"),
         &config(),
         &Scripted::answering(vec![]),
+        &imagecull_core::sidecar::Filesystem,
         &reporter,
         &Cancel::new(),
     )
@@ -226,10 +234,7 @@ fn the_reported_failure_is_the_rows_own_failure() {
         panic!("this frame has no answers");
     };
     let row_failure = run.frames[0]
-        .outcome
-        .as_ref()
-        .err()
-        .map(imagecull_core::report::Failure::of)
+        .failure()
         .expect("an unreadable frame is an error");
     assert_eq!(*failure, row_failure);
 }
@@ -255,170 +260,35 @@ fn the_eta_shrinks_to_nothing_by_the_last_frame() {
 }
 
 #[test]
-fn a_resumed_frame_is_reported_too() {
-    let shoot = shoot(&[
-        ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
-        ("DSC_0002.NEF", nef(support::jpeg(48, 32, 80))),
-    ]);
-    let report = tempfile::tempdir().expect("a temp dir");
-    let mut config = config();
-    config.outputs.csv = report.path().join("scores.csv");
-    scoring::run(
+fn a_frame_whose_sidecar_already_has_a_rating_is_reported_as_kept() {
+    let preview = support::jpeg(64, 32, 80);
+    let shoot = shoot(&[("DSC_0001.NEF", nef(preview.clone()))]);
+    let sidecar = imagecull_core::sidecar::path_for(&shoot.path().join("DSC_0001.NEF"));
+    std::fs::write(
+        &sidecar,
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"5\"/></rdf:RDF></x:xmpmeta>",
+    )
+    .expect("a sidecar a photographer rated");
+
+    let reporter = Collected::default();
+    let run = scoring::run(
         shoot.path(),
-        &config,
-        &Scripted::always_reading(2),
-        &Silent,
+        &config(),
+        &Scripted::answering(vec![]),
+        &imagecull_core::sidecar::Filesystem,
+        &reporter,
         &Cancel::new(),
     )
     .expect("a run");
 
-    // The same shoot again, picking up what the ledger already holds.
-    let mut resumed_config = config.clone();
-    resumed_config.ledger = LedgerMode::Resume;
-    let reporter = Collected::default();
-    let run = scoring::run(
-        shoot.path(),
-        &resumed_config,
-        &Scripted::answering(vec![]),
-        &reporter,
-        &Cancel::new(),
-    )
-    .expect("a resumed run");
-
-    assert_eq!(run.resumed, 2);
+    assert_eq!(run.kept(), 1);
+    assert_eq!(run.scored(), 0, "the rating is not this run's judgement");
     let frames = reporter.frames();
-    assert_eq!(frames.len(), 2, "a resumed frame is still progress");
-    assert_eq!(frames[0].latency_ms, Some(812), "what the ledger recorded");
+    assert_eq!(frames.len(), 1, "a kept frame is still progress");
+    assert_eq!(frames[0].judgement, Judgement::Skipped { rating: 5 });
     assert_eq!(
         frames[0].preview, None,
         "nothing was prepared, so there are no bytes to report"
-    );
-}
-
-#[test]
-fn a_deduplicated_frame_names_the_frame_it_reused() {
-    // One preview, two files: a burst, where the second frame costs no request.
-    let preview = support::jpeg(64, 32, 80);
-    let shoot = shoot(&[
-        (
-            "DSC_0001.NEF",
-            support::nef(1, std::slice::from_ref(&preview)),
-        ),
-        ("DSC_0002.NEF", support::nef(1, &[preview])),
-    ]);
-    let decider = Scripted::answering(vec![Ok(document("4"))]);
-
-    let (reporter, _run) = driven(&shoot, &decider);
-
-    assert_eq!(decider.seen().len(), 1, "one request for the burst");
-    let frames = reporter.frames();
-    assert_eq!(frames[0].duplicate_of, None);
-    assert_eq!(frames[1].duplicate_of.as_deref(), Some("DSC_0001.NEF"));
-}
-
-#[test]
-fn a_ledger_cut_short_by_a_killed_run_is_reported_as_a_warning() {
-    let shoot = shoot(&[
-        ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
-        ("DSC_0002.NEF", nef(support::jpeg(48, 32, 80))),
-    ]);
-    let report = tempfile::tempdir().expect("a temp dir");
-    let csv = report.path().join("scores.csv");
-    let mut config = config();
-    config.outputs.csv = csv.clone();
-    scoring::run(
-        shoot.path(),
-        &config,
-        &Scripted::always_reading(2),
-        &Silent,
-        &Cancel::new(),
-    )
-    .expect("a run");
-
-    // A hard kill mid-write: the file ends inside a record.
-    let ledger = ledger::path_for(&csv);
-    let whole = std::fs::read(&ledger).expect("the ledger");
-    std::fs::write(&ledger, &whole[..whole.len() - 30]).expect("a cut-short ledger");
-
-    let mut resumed_config = config.clone();
-    resumed_config.ledger = LedgerMode::Resume;
-    let reporter = Collected::default();
-    scoring::run(
-        shoot.path(),
-        &resumed_config,
-        &Scripted::always_reading(1),
-        &reporter,
-        &Cancel::new(),
-    )
-    .expect("a resumed run");
-
-    let warnings: Vec<String> = reporter
-        .events()
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::Warning(warning) => Some(warning.message),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("ledger"), "{}", warnings[0]);
-}
-
-#[test]
-fn a_plain_score_that_discards_a_ledger_says_so() {
-    // A second plain `score` is a new run, not a silent continuation: it starts
-    // the ledger over. Starting over is allowed, but it must be visible — the
-    // work being thrown away is an hour of a shoot — and it must not be fatal,
-    // because a photographer who meant it should not have to pass a flag.
-    let shoot = shoot(&[
-        ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
-        ("DSC_0002.NEF", nef(support::jpeg(48, 32, 80))),
-    ]);
-    let report = tempfile::tempdir().expect("a temp dir");
-    let csv = report.path().join("scores.csv");
-    let mut config = config();
-    config.outputs.csv = csv.clone();
-    scoring::run(
-        shoot.path(),
-        &config,
-        &Scripted::always_reading(2),
-        &Silent,
-        &Cancel::new(),
-    )
-    .expect("a first run");
-
-    let reporter = Collected::default();
-    let run = scoring::run(
-        shoot.path(),
-        &config,
-        &Scripted::always_reading(2),
-        &reporter,
-        &Cancel::new(),
-    )
-    .expect("a plain score over an existing ledger is a new run, not an error");
-
-    assert_eq!(run.frames.len(), 2, "the new run scored both frames");
-    let warnings: Vec<String> = reporter
-        .events()
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::Warning(warning) => Some(warning.message),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(warnings.len(), 1, "one warning, not a stream: {warnings:?}");
-    let warning = &warnings[0];
-    assert!(
-        warning.contains(&ledger::path_for(&csv).display().to_string()),
-        "it names the file it started over: {warning}"
-    );
-    assert!(
-        warning.contains("2 recorded frames"),
-        "and how much work that is: {warning}"
-    );
-    assert!(
-        warning.contains("--resume"),
-        "and how to keep them instead: {warning}"
     );
 }
 

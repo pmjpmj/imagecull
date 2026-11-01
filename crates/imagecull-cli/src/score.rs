@@ -50,11 +50,11 @@ pub fn run(args: &ScoreArgs) -> u8 {
         effective.shoot_context.clone(),
         effective.outputs.clone(),
     );
-    // What the run does with the ledger beside its CSV, whether an identical
-    // preview may reuse an outcome, which server to record in the header, and
-    // which config file these values came from.
-    config.ledger = args.ledger_mode();
+    // Whether an identical preview may reuse an outcome, which server to record,
+    // and which config file these values came from.
     config.dedupe = effective.dedupe;
+    config.force = args.force;
+    config.allow_foreign = args.allow_foreign;
     config.endpoint = Some(effective.endpoint.clone());
     config.source = effective.source.clone();
     let client = match args.common.client(&effective) {
@@ -71,10 +71,18 @@ pub fn run(args: &ScoreArgs) -> u8 {
     // The run narrates itself; the terminal draws it. The exit code is the
     // run's own classification, so a script can act on the outcome.
     let reporter = Terminal::new(verbosity(args));
+    // A preview scores and prints; a run writes. The port is the whole
+    // difference between the two, which is why there is no second pipeline.
+    let writer: &dyn imagecull_core::sidecar::Writer = if args.print_sidecars {
+        &crate::printer::Printer
+    } else {
+        &imagecull_core::sidecar::Filesystem
+    };
     match scoring::run(
         &args.dir,
         &config,
         &Adapter::new(client, &config.model),
+        writer,
         &reporter,
         &cancel,
     ) {
@@ -88,7 +96,9 @@ pub fn run(args: &ScoreArgs) -> u8 {
 
 /// How much of the run the photographer asked to see.
 fn verbosity(args: &ScoreArgs) -> Verbosity {
-    if args.quiet {
+    if args.print_sidecars {
+        Verbosity::Print
+    } else if args.quiet {
         Verbosity::Quiet
     } else if args.verbose {
         Verbosity::Verbose

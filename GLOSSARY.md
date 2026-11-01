@@ -74,8 +74,8 @@ _Avoid_: prompt, template, config file
 
 **Rating**:
 The model's answer to the rubric's question: 1 delete, 2 not great, 3 okay to
-keep, 4 good, 5 great. The whole judgement of a frame, recorded as the `stars`
-column and written to `xmp:Rating` in v2.
+keep, 4 good, 5 great. The whole judgement of a frame, written to `xmp:Rating` in
+the frame's sidecar and nowhere else.
 _Avoid_: score, grade, verdict, aesthetic score
 
 **Built-in rubric**:
@@ -115,23 +115,21 @@ _Avoid_: global config, default config
 
 ### What a run leaves behind
 
-**Ledger**:
-The record beside the report of what each frame was judged, so an interrupted
-run can pick up where it stopped.
-_Avoid_: journal, state file, cache, checkpoint
+**Sidecar**:
+The `.xmp` file beside a frame, carrying its rating and the provenance of that
+rating. The run's only lasting record of a frame.
+_Avoid_: metadata file, XMP file, report, output
 
-**Report**:
-The table of ratings one row per frame, read in a spreadsheet.
-_Avoid_: output, CSV, results
-
-**Resume**:
-Picking up an interrupted run, reusing every frame the ledger already holds.
-_Avoid_: continue, restart
+**Skip**:
+Leaving a frame alone because its sidecar already carries a rating of 1–5. No
+request is made, nothing is written, and the rating stays whatever it was.
+_Avoid_: cache hit, reuse, ignore, duplicate
 
 **Dedupe**:
-Reusing the judgement of a frame whose preview is byte-identical to another. A
-cache, not a relation: frames of one group are not duplicates, and identical
-bytes alone do not make a group.
+Reusing the judgement of a frame whose preview is byte-identical to another
+frame's within one run. A cache, not a relation: frames of one group are not
+duplicates, identical bytes alone do not make a group, and the cache dies with
+the run.
 _Avoid_: cache hit, skip
 
 ### What a run prints

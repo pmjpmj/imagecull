@@ -13,7 +13,6 @@ use clap::{Args, Parser, Subcommand};
 use imagecull_core::config::{self, Effective, Loaded, Resolved};
 use imagecull_core::group::{self, Thresholds};
 use imagecull_core::ingest::ScanOptions;
-use imagecull_core::ledger::LedgerMode;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::rubric::{Builtin, RubricSource};
 
@@ -206,37 +205,29 @@ pub struct ScoreArgs {
     #[arg(long, value_name = "N", value_parser = positive_count)]
     pub limit: Option<usize>,
 
-    /// Where to write the CSV of scores (default ./scores.csv)
-    #[arg(long, value_name = "FILE")]
-    pub out: Option<PathBuf>,
-
     /// Also write every raw model answer to this JSON file, so a surprising
     /// score loses nothing
     #[arg(long, value_name = "FILE")]
     pub json_scores: Option<PathBuf>,
 
-    /// Write absolute paths in the CSV instead of paths inside the shoot folder
-    #[arg(
-        long,
-        value_name = "BOOL",
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    pub absolute: Option<bool>,
-
-    /// Pick up an interrupted run: frames the ledger beside the CSV already
-    /// holds are not scored again
-    #[arg(long, conflicts_with = "fresh")]
-    pub resume: bool,
-
-    /// Throw the ledger beside the CSV away and score every frame again
-    #[arg(long)]
-    pub fresh: bool,
-
     /// Score every frame independently instead of reusing the outcome of an
     /// identical preview
     #[arg(long)]
     pub no_dedupe: bool,
+
+    /// Rate frames again even though their sidecars already carry a rating
+    #[arg(long)]
+    pub force: bool,
+
+    /// Write into a sidecar another application owns (darktable), which will
+    /// rewrite it from its own history
+    #[arg(long)]
+    pub allow_foreign: bool,
+
+    /// Score the folder and print what each sidecar would become, writing
+    /// nothing
+    #[arg(long, conflicts_with_all = ["quiet", "verbose"])]
+    pub print_sidecars: bool,
 
     /// Suppress the per-frame line; the outcome and a one-line summary remain,
     /// so a script can read them
@@ -370,29 +361,11 @@ impl ScoreArgs {
             max_edge: self.max_edge,
             jpeg_quality: self.jpeg_quality,
             recursive: self.recursive,
-            csv: self.out.clone(),
             json_scores: self.json_scores.clone(),
-            absolute: self.absolute,
             rubric: self.rubric.clone(),
             shoot_context: self.shoot_context.clone(),
             dedupe: self.no_dedupe.then_some(false),
             ..self.common.overrides()
-        }
-    }
-
-    /// What the run does with a ledger that is already beside its CSV.
-    ///
-    /// Neither flag is a deliberate choice too: a plain `score` is a new run, so
-    /// it starts the ledger over — after the same rubric-and-model check
-    /// `--resume` makes, because two rubrics silently sharing a ledger is the
-    /// failure that check exists to prevent (spec §28, §33).
-    pub fn ledger_mode(&self) -> LedgerMode {
-        if self.fresh {
-            LedgerMode::Discard
-        } else if self.resume {
-            LedgerMode::Resume
-        } else {
-            LedgerMode::Restart
         }
     }
 }
@@ -440,9 +413,7 @@ mod tests {
         assert_eq!(args.jpeg_quality, None);
         assert_eq!(args.recursive, None);
         assert_eq!(args.limit, None);
-        assert_eq!(args.out, None);
         assert_eq!(args.json_scores, None);
-        assert_eq!(args.absolute, None);
         assert_eq!(args.common.config, None);
         assert!(!args.common.no_config);
         assert!(
@@ -458,9 +429,7 @@ mod tests {
         assert_eq!(effective.params.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
         assert!(!effective.recursive);
         assert!(!effective.scan(None).recursive);
-        assert_eq!(effective.outputs.csv, PathBuf::from(config::DEFAULT_CSV));
-        assert_eq!(effective.outputs.json_scores, None);
-        assert!(!effective.outputs.absolute);
+        assert_eq!(effective.outputs.json_scores, None, "no report path at all");
         assert!(effective.dedupe);
         assert_eq!(effective.source, None);
     }
@@ -508,30 +477,26 @@ mod tests {
     }
 
     #[test]
-    fn score_takes_the_report_flags() {
-        let Command::Score(args) = parse(&[
-            "score",
-            "shoot",
-            "--out",
-            "scores/march.csv",
-            "--json-scores",
-            "scores/march.json",
-            "--absolute",
-        ]) else {
+    fn score_takes_the_raw_answers_flag() {
+        let Command::Score(args) = parse(&["score", "shoot", "--json-scores", "scores/march.json"])
+        else {
             panic!("not a score command");
         };
         let outputs = effective(&args).outputs;
-        assert_eq!(outputs.csv, PathBuf::from("scores/march.csv"));
         assert_eq!(
             outputs.json_scores,
             Some(PathBuf::from("scores/march.json"))
         );
-        assert!(outputs.absolute);
-        assert_eq!(
-            args.absolute,
-            Some(true),
-            "the flag is distinguishable from its absence"
-        );
+    }
+
+    #[test]
+    fn the_report_flags_are_gone() {
+        for flag in ["--out", "--absolute", "--resume", "--fresh"] {
+            assert!(
+                parse_result(&["score", "shoot", flag, "x"]).is_err(),
+                "{flag} belonged to the report and is not a flag any more"
+            );
+        }
     }
 
     #[test]
@@ -634,34 +599,17 @@ mod tests {
         }
     }
 
-    /// The three flags that decide what a run does with a ledger it finds
-    /// beside its CSV: neither is a new run, and the two conflict.
     #[test]
-    fn score_takes_the_ledger_and_dedupe_flags() {
+    fn score_takes_the_dedupe_flag() {
         let Command::Score(args) = parse(&["score", "shoot"]) else {
             panic!("not a score command");
         };
-        assert!(!args.resume && !args.fresh && !args.no_dedupe);
-        assert_eq!(
-            args.ledger_mode(),
-            LedgerMode::Restart,
-            "a plain score starts the ledger over, after the mismatch check"
-        );
+        assert!(!args.no_dedupe);
         assert_eq!(
             args.overrides().dedupe,
             None,
             "a run that says nothing about dedupe lets a config file decide"
         );
-
-        let Command::Score(args) = parse(&["score", "shoot", "--resume"]) else {
-            panic!("not a score command");
-        };
-        assert_eq!(args.ledger_mode(), LedgerMode::Resume);
-
-        let Command::Score(args) = parse(&["score", "shoot", "--fresh"]) else {
-            panic!("not a score command");
-        };
-        assert_eq!(args.ledger_mode(), LedgerMode::Discard);
 
         let Command::Score(args) = parse(&["score", "shoot", "--no-dedupe"]) else {
             panic!("not a score command");
@@ -675,8 +623,37 @@ mod tests {
     }
 
     #[test]
-    fn resuming_and_starting_fresh_are_opposite_answers() {
-        assert!(parse_result(&["score", "shoot", "--resume", "--fresh"]).is_err());
+    fn score_takes_the_sidecar_flags() {
+        let Command::Score(args) = parse(&[
+            "score",
+            "shoot",
+            "--force",
+            "--allow-foreign",
+            "--print-sidecars",
+        ]) else {
+            panic!("not a score command");
+        };
+        assert!(args.force, "--force is how a re-score gets to happen");
+        assert!(
+            args.allow_foreign,
+            "--allow-foreign is the darktable override"
+        );
+        assert!(args.print_sidecars, "--print-sidecars writes nothing");
+
+        let Command::Score(args) = parse(&["score", "shoot"]) else {
+            panic!("not a score command");
+        };
+        assert!(!args.force && !args.allow_foreign && !args.print_sidecars);
+    }
+
+    #[test]
+    fn a_preview_is_not_also_quiet_or_verbose() {
+        for other in ["--quiet", "--verbose"] {
+            assert!(
+                parse_result(&["score", "shoot", "--print-sidecars", other]).is_err(),
+                "--print-sidecars says its own thing about every frame"
+            );
+        }
     }
 
     #[test]

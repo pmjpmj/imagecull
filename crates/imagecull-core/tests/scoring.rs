@@ -67,8 +67,15 @@ fn every_frame_reaches_the_decider_with_its_questions_state_and_alias() {
     let decider = Scripted::always_reading(2);
     let mut config = config(Params::default(), Some("street at dusk, high ISO"));
     config.scan.recursive = true;
-    let run =
-        scoring::run(shoot.path(), &config, &decider, &Silent, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &decider,
+        &imagecull_core::sidecar::Filesystem,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(run.frames.len(), 2);
     assert_eq!(run.scored(), 2);
@@ -113,6 +120,7 @@ fn a_portrait_frame_reaches_the_decider_upright_and_capped() {
         shoot.path(),
         &config(params, None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -143,6 +151,7 @@ fn a_preview_smaller_than_the_cap_is_never_upscaled_on_its_way_to_the_decider() 
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -165,6 +174,7 @@ fn the_run_reports_the_one_answer_to_its_caller() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -172,10 +182,7 @@ fn the_run_reports_the_one_answer_to_its_caller() {
 
     let frame = &run.frames[0];
     assert_eq!(frame.source.relative.to_str(), Some("DSC_0001.NEF"));
-    let reading = frame
-        .outcome
-        .as_ref()
-        .expect("the frame reached the decider");
+    let reading = frame.reading().expect("the frame reached the decider");
     let answers = reading.answers.as_ref().expect("a readable answer");
     assert_eq!(answers.stars, 4);
     assert_eq!(answers.confidence, 0.63);
@@ -199,6 +206,7 @@ fn an_unreadable_file_is_classified_and_the_run_continues() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -207,15 +215,14 @@ fn an_unreadable_file_is_classified_and_the_run_continues() {
     assert_eq!(run.frames.len(), 2);
     assert_eq!(run.scored(), 1);
     assert_eq!(run.failed(), 1);
-    let error = run.frames[0]
-        .outcome
-        .as_ref()
-        .expect_err("a garbage file cannot be prepared");
-    assert_eq!(error.kind(), Some(ErrorKind::Unreadable));
+    let failure = run.frames[0]
+        .failure()
+        .expect("a garbage file cannot be prepared");
+    assert_eq!(failure.kind, ErrorKind::Unreadable);
     assert!(
-        error.message().contains("DSC_0001.NEF"),
+        failure.message.contains("DSC_0001.NEF"),
         "the row's error names the file: {}",
-        error.message()
+        failure.message
     );
     assert_eq!(
         decider.seen().len(),
@@ -248,15 +255,15 @@ fn a_transport_failure_is_classified_and_does_not_stop_the_run() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
-    let timeout = run.frames[0].outcome.as_ref().expect_err("no reading");
-    assert_eq!(timeout.kind(), Some(ErrorKind::Timeout));
-    let second = run.frames[1].outcome.as_ref().expect("the run continued");
-    assert_eq!(second.answers.as_ref().expect("readable").stars, 3);
+    let timeout = run.frames[0].failure().expect("no reading");
+    assert_eq!(timeout.kind, ErrorKind::Timeout);
+    assert_eq!(run.frames[1].answers().expect("the run continued").stars, 3);
     assert_eq!(run.scored(), 1);
     assert_eq!(run.failed(), 1);
 }
@@ -274,20 +281,17 @@ fn a_bad_response_keeps_its_document_and_the_run_continues() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
     let reading = run.frames[0]
-        .outcome
-        .as_ref()
+        .reading()
         .expect("a document arrived, so the frame is not a transport failure");
-    let error = reading
-        .answers
-        .as_ref()
-        .expect_err("the document is unreadable");
-    assert_eq!(error.kind(), Some(ErrorKind::BadResponse));
+    let failure = run.frames[0].failure().expect("the document is unreadable");
+    assert_eq!(failure.kind, ErrorKind::BadResponse);
     assert_eq!(
         reading.document, unreadable,
         "the raw document survives for --json-scores"
@@ -309,6 +313,7 @@ fn requests_are_strictly_sequential_in_ingest_order() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -335,8 +340,15 @@ fn limit_scores_only_the_first_files_of_the_run() {
     ]);
     let decider = Scripted::always_reading(1);
 
-    let run =
-        scoring::run(shoot.path(), &limited(1), &decider, &Silent, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &limited(1),
+        &decider,
+        &imagecull_core::sidecar::Filesystem,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(run.frames.len(), 1);
     assert_eq!(decider.seen().len(), 1);
@@ -360,6 +372,7 @@ fn the_dry_run_writes_exactly_the_bytes_the_decider_received() {
         shoot.path(),
         &config(params, None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -410,6 +423,7 @@ fn a_folder_with_no_raw_files_is_an_empty_run_not_an_error() {
         shoot.path(),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -427,6 +441,7 @@ fn the_missing_directory_is_a_fatal_error() {
         Path::new("/no/such/shoot"),
         &config(Params::default(), None),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )

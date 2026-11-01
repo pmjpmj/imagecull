@@ -29,6 +29,9 @@ pub enum Verbosity {
     Normal,
     /// `--verbose`: that line plus what was sent and what came back.
     Verbose,
+    /// `--print-sidecars`: one block per frame saying what would be written, and
+    /// nothing written at all.
+    Print,
 }
 
 /// Which stream an event's text belongs on.
@@ -135,7 +138,7 @@ fn write(stream: Stream, text: &str) {
 /// The line a run opens with: how much work it is about to do, and under what.
 fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
     match verbosity {
-        Verbosity::Quiet => None,
+        Verbosity::Quiet | Verbosity::Print => None,
         Verbosity::Normal | Verbosity::Verbose => Some(format!(
             "scoring {} {} · rubric {} · model {}\n",
             started.total,
@@ -146,12 +149,46 @@ fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
     }
 }
 
+/// `--print-sidecars`' per-frame text.
+///
+/// An answered frame's block comes from the printing writer, which is the only
+/// thing that sees the document; a kept frame never reaches a writer, so its line
+/// is said here — the preview has to account for the whole folder, not just its
+/// unrated part. A failure is the same line it would be anywhere else.
+fn print_block(frame: &FrameEvent) -> Option<String> {
+    match &frame.judgement {
+        Judgement::Answered(_) => None,
+        Judgement::Skipped { rating } => {
+            let sidecar = imagecull_core::sidecar::path_for(std::path::Path::new(&frame.filename));
+            Some(format!(
+                "{}  would leave {} alone (rating {rating}, pass --force to rate them again)\n",
+                frame.filename,
+                sidecar
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ))
+        }
+        Judgement::Failed(failure) => Some(format!(
+            "{}  {}{}\n",
+            frame.filename,
+            failure.kind.as_str(),
+            if failure.message.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", failure.message)
+            }
+        )),
+    }
+}
+
 /// One frame: the line, or the verbose account of it.
 fn frame_text(frame: &FrameEvent, verbosity: Verbosity) -> Option<String> {
     match verbosity {
         Verbosity::Quiet => None,
         Verbosity::Verbose => Some(verbose_line(frame)),
         Verbosity::Normal => Some(format!("{}\n", frame_line(frame))),
+        Verbosity::Print => print_block(frame),
     }
 }
 
@@ -166,6 +203,7 @@ fn frame_line(frame: &FrameEvent) -> String {
         Judgement::Answered(answers) => {
             parts.push(format!("{}★", answers.stars));
         }
+        Judgement::Skipped { rating } => parts.push(format!("{rating}★ kept")),
         Judgement::Failed(failure) => parts.push(failure.kind.as_str().to_string()),
     }
     if let Some(latency_ms) = frame.latency_ms {
@@ -202,6 +240,10 @@ fn verbose_line(frame: &FrameEvent) -> String {
                 "{}★  confidence {:.2}",
                 answers.stars, answers.confidence
             ));
+        }
+        Judgement::Skipped { rating } => {
+            parts.push(format!("kept {rating}★"));
+            parts.push("the sidecar already had a rating".to_string());
         }
         Judgement::Failed(failure) => {
             parts.push(failure.kind.as_str().to_string());
@@ -252,11 +294,15 @@ fn summary_block(summary: &Summary) -> String {
         ));
         out.push_str(&format!("stars: {}\n", histogram(&summary.stars)));
     }
-    if summary.resumed > 0 || summary.duplicates > 0 {
-        out.push_str(&format!(
-            "resumed: {} · deduplicated: {}\n",
-            summary.resumed, summary.duplicates
-        ));
+    if summary.skipped > 0 || summary.duplicates > 0 {
+        let mut parts = Vec::new();
+        if summary.skipped > 0 {
+            parts.push(format!("skipped: {}", summary.skipped));
+        }
+        if summary.duplicates > 0 {
+            parts.push(format!("deduplicated: {}", summary.duplicates));
+        }
+        out.push_str(&format!("{}\n", parts.join(" · ")));
     }
     let left_out = left_out(&summary.left_out);
     if !left_out.is_empty() {
@@ -289,8 +335,8 @@ fn outcome_line(summary: &Summary) -> String {
         duration_text(summary.elapsed)
     )];
     parts.push(statuses(summary));
-    if summary.resumed > 0 {
-        parts.push(format!("{} resumed", summary.resumed));
+    if summary.skipped > 0 {
+        parts.push(format!("{} skipped", summary.skipped));
     }
     if summary.duplicates > 0 {
         parts.push(format!("{} deduplicated", summary.duplicates));
@@ -400,9 +446,9 @@ mod tests {
     use imagecull_core::ingest::ScanCounts;
     use imagecull_core::progress::{MeanMedian, PreviewShape, StatusCount, Warning};
     use imagecull_core::reading::Answers;
-    use imagecull_core::report::Failure;
     use imagecull_core::rubric::Builtin;
     use imagecull_core::scoring::Ending;
+    use imagecull_core::sidecar::Failure;
 
     use super::*;
 
@@ -458,6 +504,19 @@ mod tests {
         })
     }
 
+    fn skipped(index: usize, rating: u8) -> Event {
+        Event::Frame(FrameEvent {
+            index,
+            total: 400,
+            filename: "DSC_0014.NEF".to_string(),
+            judgement: Judgement::Skipped { rating },
+            latency_ms: None,
+            eta: Some(Duration::from_secs(457)),
+            preview: None,
+            duplicate_of: None,
+        })
+    }
+
     /// The summary of a 400-frame run that scored 397 of them.
     fn summary() -> Summary {
         let rubric = Builtin::General
@@ -469,7 +528,7 @@ mod tests {
             judged: 400,
             scored: 397,
             failed: 3,
-            resumed: 3,
+            skipped: 3,
             duplicates: 2,
             counts: vec![
                 StatusCount {
@@ -532,6 +591,47 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_frame_says_so_on_its_own_line() {
+        let rendered = transcript(&[skipped(14, 5)], Verbosity::Normal);
+
+        assert_eq!(
+            rendered.out, "14/400  DSC_0014.NEF  5★ kept  eta 7m37s\n",
+            "the rating channel keeps its meaning and one word says nothing was spent"
+        );
+    }
+
+    #[test]
+    fn print_mode_says_what_would_be_left_alone_and_nothing_else_for_an_answer() {
+        let events = [started(400), answered(12), skipped(14, 5), failed(13)];
+
+        let rendered = transcript(&events, Verbosity::Print);
+
+        assert!(
+            !rendered.out.contains("scoring 400 frames"),
+            "a preview is a list of frames, not a run in progress: {}",
+            rendered.out
+        );
+        assert_eq!(
+            rendered.out,
+            "DSC_0014.NEF  would leave DSC_0014.xmp alone \
+             (rating 5, pass --force to rate them again)\n\
+             DSC_0013.NEF  timeout: POST /v1/systemone timed out after 120s — 3 attempts\n",
+            "an answered frame's block comes from the writer, not from here"
+        );
+    }
+
+    #[test]
+    fn print_mode_still_ends_with_the_summary() {
+        let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Print);
+
+        assert!(
+            rendered.out.starts_with("scored: 397 of 400"),
+            "a preview says what the run did as well as what it would write: {}",
+            rendered.out
+        );
+    }
+
+    #[test]
     fn a_failed_frame_keeps_its_place_on_a_line_of_its_own() {
         let rendered = transcript(&[failed(13)], Verbosity::Normal);
 
@@ -577,7 +677,7 @@ mod tests {
              status: ok 397 · no_preview 1 · timeout 2\n\
              rating: 4.54 mean / 5.00 median\n\
              stars: 1★ 0 · 2★ 4 · 3★ 51 · 4★ 68 · 5★ 274\n\
-             resumed: 3 · deduplicated: 2\n\
+             skipped: 3 · deduplicated: 2\n\
              left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned\n\
              rubric general/{short} · model clef-flash-oQ4e\n"
@@ -658,7 +758,7 @@ mod tests {
 
         assert_eq!(
             rendered.out,
-            "scored 397 of 400 in 8m12s · ok 397 · no_preview 1 · timeout 2 · 3 resumed · \
+            "scored 397 of 400 in 8m12s · ok 397 · no_preview 1 · timeout 2 · 3 skipped · \
              2 deduplicated · left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned · rubric general/3f2a1b0c · model clef-flash-oQ4e\n"
                 .replace("3f2a1b0c", summary().rubric_hash.short()),

@@ -49,8 +49,8 @@ fn raw_extensions_are_accepted_in_any_case_and_the_rest_are_counted() {
 
     assert_eq!(accepted(&scan), ["a.NEF", "b.nrw", "c.DnG"]);
     assert_eq!(
-        scan.counts.skipped_extension, 4,
-        "every non-RAW file is skipped and counted, never an error"
+        scan.counts.skipped_extension, 3,
+        "every foreign file is skipped and counted, never an error; the .bak is ours"
     );
 }
 
@@ -171,5 +171,34 @@ fn names_are_compared_after_unicode_normalisation() {
         accepted(&scan),
         ["\u{c0}.NEF", "A\u{301}.NEF"],
         "U+00C0 sorts before U+00C1; comparing raw bytes would put the decomposed Á first"
+    );
+}
+
+#[test]
+fn the_sidecars_and_backups_a_run_wrote_are_neither_accepted_nor_counted() {
+    let dir = shoot();
+    for name in [
+        "a.NEF",
+        "a.xmp",
+        "b.nrw",
+        "b.XMP",
+        "c.dng",
+        "c.xmp.bak",
+        "d.xmp",
+        "notes.txt",
+    ] {
+        touch(dir.path(), name);
+    }
+
+    let scan = ingest::scan(dir.path(), &ScanOptions::default()).expect("scan");
+
+    assert_eq!(accepted(&scan), ["a.NEF", "b.nrw", "c.dng"]);
+    assert_eq!(
+        scan.counts.skipped_extension, 1,
+        "only notes.txt is a file the photographer left out; the sidecars are this tool's own output"
+    );
+    assert_eq!(
+        scan.counts.ignored, 0,
+        "our output is not Finder noise either: it is simply not in the way"
     );
 }
