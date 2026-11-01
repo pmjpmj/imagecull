@@ -1,7 +1,7 @@
 //! Grouping, at the seam that matters: a shoot folder in, groups and measures
 //! out.
 //!
-//! Every test here writes a small synthetic burst to disk — NEF-shaped files
+//! Every test here writes a few synthetic frames to disk — NEF-shaped files
 //! whose Exif IFD carries a real capture time, body serial and exposure, and
 //! whose embedded preview is a known transform of one scene — then runs the
 //! model-free entry point over the folder. Nothing here starts a server, and
@@ -15,18 +15,14 @@ use image::RgbImage;
 use imagecull_core::group::{self, Thresholds};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::measure::Measures;
-use support::{ExifFacts, burst};
+use support::{ExifFacts, scenes};
 
 /// The size the grouping tests draw at: small, because a group is about times,
 /// serials and settings, and every pixel here costs the suite a decode.
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 427;
 
-fn larger() -> (u32, u32) {
-    (WIDTH, HEIGHT)
-}
-
-/// What one frame of a synthetic burst is.
+/// What one frame of a synthetic sequence is.
 struct Frame {
     name: &'static str,
     image: RgbImage,
@@ -58,9 +54,15 @@ fn frame(
     }
 }
 
-/// The scene every frame of a burst shows, freshly drawn.
+/// A frame of the default body at the default exposure: what almost every test
+/// here needs, without the two arguments it never varies.
+fn moment(name: &'static str, image: &RgbImage, second: u8, subsecond: &str) -> Frame {
+    frame(name, image, second, subsecond, "3001", 200)
+}
+
+/// The scene every frame of a sequence shows, freshly drawn.
 fn scene() -> RgbImage {
-    burst::scene(WIDTH, HEIGHT)
+    scenes::scene(WIDTH, HEIGHT)
 }
 
 /// Write `frames` as NEFs into a fresh folder, in the order given.
@@ -111,13 +113,13 @@ fn measures_of(plan: &group::Plan, name: &str) -> Measures {
 }
 
 #[test]
-fn a_burst_inside_the_gap_with_one_body_and_one_scene_is_one_group() {
+fn frames_inside_the_gap_with_one_body_and_one_scene_are_one_group() {
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "10", "3001", 200),
-        frame("DSC_0002.NEF", &image, 0, "20", "3001", 200),
-        frame("DSC_0003.NEF", &image, 0, "30", "3001", 200),
-        frame("DSC_0004.NEF", &image, 0, "40", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "10"),
+        moment("DSC_0002.NEF", &image, 0, "20"),
+        moment("DSC_0003.NEF", &image, 0, "30"),
+        moment("DSC_0004.NEF", &image, 0, "40"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -135,9 +137,9 @@ fn a_burst_inside_the_gap_with_one_body_and_one_scene_is_one_group() {
 fn a_gap_longer_than_the_threshold_starts_a_new_group() {
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "00", "3001", 200),
-        frame("DSC_0002.NEF", &image, 0, "10", "3001", 200),
-        frame("DSC_0003.NEF", &image, 3, "50", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "10"),
+        moment("DSC_0003.NEF", &image, 3, "50"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -156,7 +158,7 @@ fn a_gap_longer_than_the_threshold_starts_a_new_group() {
 fn a_different_body_or_a_different_exposure_is_a_different_moment() {
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "00", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "00"),
         frame("DSC_0002.NEF", &image, 0, "10", "3002", 200),
         frame("DSC_0003.NEF", &image, 0, "20", "3002", 800),
     ]);
@@ -170,16 +172,16 @@ fn a_different_body_or_a_different_exposure_is_a_different_moment() {
 }
 
 #[test]
-fn a_pan_splits_the_burst_into_the_compositions_it_produced() {
+fn a_pan_splits_the_sequence_into_the_compositions_it_produced() {
     // The camera held still, then swung: the same body, the same settings and
     // no gap, but a different picture.
     let before = scene();
-    let after = burst::noise(WIDTH, HEIGHT, 11);
+    let after = scenes::noise(WIDTH, HEIGHT, 11);
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &before, 0, "00", "3001", 200),
-        frame("DSC_0002.NEF", &before, 0, "10", "3001", 200),
-        frame("DSC_0003.NEF", &after, 0, "20", "3001", 200),
-        frame("DSC_0004.NEF", &after, 0, "30", "3001", 200),
+        moment("DSC_0001.NEF", &before, 0, "00"),
+        moment("DSC_0002.NEF", &before, 0, "10"),
+        moment("DSC_0003.NEF", &after, 0, "20"),
+        moment("DSC_0004.NEF", &after, 0, "30"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -198,13 +200,13 @@ fn a_pan_splits_the_burst_into_the_compositions_it_produced() {
 #[test]
 fn a_frame_with_no_capture_time_is_a_group_of_its_own() {
     let image = scene();
-    let mut undated = frame("DSC_0002.NEF", &image, 0, "10", "3001", 200);
+    let mut undated = moment("DSC_0002.NEF", &image, 0, "10");
     undated.facts.captured = None;
     undated.facts.subsecond = None;
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "00", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "00"),
         undated,
-        frame("DSC_0003.NEF", &image, 0, "20", "3001", 200),
+        moment("DSC_0003.NEF", &image, 0, "20"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -227,8 +229,8 @@ fn groups_follow_capture_order_and_not_the_order_of_their_names() {
     // the plan has to read as the shoot happened.
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_10.NEF", &image, 0, "00", "3001", 200),
-        frame("DSC_9.NEF", &image, 0, "10", "3001", 200),
+        moment("DSC_10.NEF", &image, 0, "00"),
+        moment("DSC_9.NEF", &image, 0, "10"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -247,14 +249,14 @@ fn groups_follow_capture_order_and_not_the_order_of_their_names() {
 fn renaming_the_files_changes_nothing_about_the_groups() {
     let image = scene();
     let first = shoot(vec![
-        frame("AAA_0001.NEF", &image, 0, "00", "3001", 200),
-        frame("AAA_0002.NEF", &image, 0, "10", "3001", 200),
-        frame("AAA_0003.NEF", &image, 5, "00", "3001", 200),
+        moment("AAA_0001.NEF", &image, 0, "00"),
+        moment("AAA_0002.NEF", &image, 0, "10"),
+        moment("AAA_0003.NEF", &image, 5, "00"),
     ]);
     let second = shoot(vec![
-        frame("ZZZ_9999.NEF", &image, 0, "00", "3001", 200),
-        frame("ZZZ_0001.NEF", &image, 0, "10", "3001", 200),
-        frame("MMM_0042.NEF", &image, 5, "00", "3001", 200),
+        moment("ZZZ_9999.NEF", &image, 0, "00"),
+        moment("ZZZ_0001.NEF", &image, 0, "10"),
+        moment("MMM_0042.NEF", &image, 5, "00"),
     ]);
 
     let left = plan(first.path(), Thresholds::default());
@@ -276,16 +278,9 @@ fn renaming_the_files_changes_nothing_about_the_groups() {
 #[test]
 fn two_runs_over_the_same_folder_agree_column_for_column() {
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &scene(), 0, "00", "3001", 200),
-        frame(
-            "DSC_0002.NEF",
-            &burst::blurred(&scene(), 1.0),
-            0,
-            "10",
-            "3001",
-            200,
-        ),
-        frame("DSC_0003.NEF", &scene(), 0, "20", "3001", 200),
+        moment("DSC_0001.NEF", &scene(), 0, "00"),
+        moment("DSC_0002.NEF", &scenes::blurred(&scene(), 1.0), 0, "10"),
+        moment("DSC_0003.NEF", &scene(), 0, "20"),
     ]);
 
     let first = group::render_csv(&plan(dir.path(), Thresholds::default()));
@@ -323,29 +318,14 @@ fn the_synthetic_answer_key_orders_as_the_transforms_did() {
     // scene: the ranking issue 02 will do needs these numbers to come out in
     // the order the transforms say.
     let sharp = scene();
-    let (width, height) = larger();
-    let blown = burst::brighter(&sharp, 2.0);
-    let tilted = burst::tilted_scene(width, height, 1.5);
+    let blown = scenes::brighter(&sharp, 2.0);
+    let tilted = scenes::tilted_scene(WIDTH, HEIGHT, 1.5);
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &sharp, 0, "00", "3001", 200),
-        frame(
-            "DSC_0002.NEF",
-            &burst::blurred(&sharp, 1.0),
-            0,
-            "10",
-            "3001",
-            200,
-        ),
-        frame(
-            "DSC_0003.NEF",
-            &burst::shaken(&sharp, 5),
-            0,
-            "20",
-            "3001",
-            200,
-        ),
-        frame("DSC_0004.NEF", &blown, 0, "30", "3001", 200),
-        frame("DSC_0005.NEF", &tilted, 0, "40", "3001", 200),
+        moment("DSC_0001.NEF", &sharp, 0, "00"),
+        moment("DSC_0002.NEF", &scenes::blurred(&sharp, 1.0), 0, "10"),
+        moment("DSC_0003.NEF", &scenes::shaken(&sharp, 5), 0, "20"),
+        moment("DSC_0004.NEF", &blown, 0, "30"),
+        moment("DSC_0005.NEF", &tilted, 0, "40"),
     ]);
 
     // The tilted frame is a different picture — a flat scene drawn at an angle,
@@ -395,10 +375,10 @@ fn the_synthetic_answer_key_orders_as_the_transforms_did() {
 #[test]
 fn a_frame_with_no_readable_preview_is_a_singleton_with_empty_measures_and_a_status() {
     let image = scene();
-    let dir = shoot(vec![frame("DSC_0001.NEF", &image, 0, "00", "3001", 200)]);
+    let dir = shoot(vec![moment("DSC_0001.NEF", &image, 0, "00")]);
     // A file whose preview the reader cannot get at: the frame is still a frame,
     // and its numbers are missing rather than zero.
-    let previewless = support::nef_with(1, &[], &frame("x", &image, 0, "10", "3001", 200).facts);
+    let previewless = support::nef_with(1, &[], &moment("x", &image, 0, "10").facts);
     std::fs::write(dir.path().join("DSC_0002.NEF"), previewless).expect("write a NEF");
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -432,8 +412,8 @@ fn a_frame_with_no_readable_preview_is_a_singleton_with_empty_measures_and_a_sta
 fn the_csv_keeps_one_row_per_frame_and_names_its_columns() {
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "00", "3001", 200),
-        frame("DSC_0002.NEF", &image, 0, "10", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "10"),
     ]);
 
     let csv = group::render_csv(&plan(dir.path(), Thresholds::default()));
@@ -456,8 +436,8 @@ fn the_csv_keeps_one_row_per_frame_and_names_its_columns() {
 fn the_cost_of_the_pass_is_measured_rather_than_assumed() {
     let image = scene();
     let dir = shoot(vec![
-        frame("DSC_0001.NEF", &image, 0, "00", "3001", 200),
-        frame("DSC_0002.NEF", &image, 0, "10", "3001", 200),
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "10"),
     ]);
 
     let plan = plan(dir.path(), Thresholds::default());
@@ -468,4 +448,69 @@ fn the_cost_of_the_pass_is_measured_rather_than_assumed() {
         "the plan records how long the pass took, so the evidence can quote it"
     );
     assert_eq!(plan.groups, 1);
+}
+
+#[test]
+fn the_similarity_gate_is_the_threshold_and_not_a_property_of_the_scene() {
+    // Same second, same body, same settings, two horizons a degree apart: the
+    // only thing that decides whether they are one moment is the threshold, so
+    // both sides of it are exercised.
+    let before = scenes::tilted_scene(WIDTH, HEIGHT, 0.0);
+    let nudged = scenes::tilted_scene(WIDTH, HEIGHT, 1.0);
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &before, 0, "00"),
+        moment("DSC_0002.NEF", &nudged, 0, "10"),
+    ]);
+
+    let strict = plan(
+        dir.path(),
+        Thresholds {
+            similarity: 0.9999,
+            ..Thresholds::default()
+        },
+    );
+    let loose = plan(
+        dir.path(),
+        Thresholds {
+            similarity: 0.10,
+            ..Thresholds::default()
+        },
+    );
+
+    assert_eq!(strict.groups, 2, "0.9999 asks for the same picture");
+    assert_eq!(loose.groups, 1, "0.10 asks only for the same second");
+}
+
+#[test]
+fn frames_that_share_a_timestamp_group_the_same_whatever_they_are_called() {
+    // No subsecond stamps: the recorded times tie, so nothing about a name may
+    // decide who is in which group.
+    let image = scene();
+    let tied = |name: &'static str| moment(name, &image, 0, "");
+    let first = shoot(vec![
+        tied("AAA_0001.NEF"),
+        tied("AAA_0002.NEF"),
+        moment("AAA_0003.NEF", &image, 9, ""),
+    ]);
+    let second = shoot(vec![
+        tied("ZZZ_0009.NEF"),
+        tied("MMM_0001.NEF"),
+        moment("BBB_0042.NEF", &image, 9, ""),
+    ]);
+
+    let sizes = |plan: &group::Plan| {
+        plan.grouped()
+            .iter()
+            .map(|row| row.frames.len())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sizes(&plan(first.path(), Thresholds::default())),
+        vec![2, 1]
+    );
+    assert_eq!(
+        sizes(&plan(first.path(), Thresholds::default())),
+        sizes(&plan(second.path(), Thresholds::default())),
+        "a name cannot move a frame between groups"
+    );
 }

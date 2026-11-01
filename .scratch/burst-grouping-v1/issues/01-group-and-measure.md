@@ -32,7 +32,7 @@ this ticket.
 - [x] An undecodable preview yields empty measures and a singleton group, with no panic and no zero that reads as "bad"
 - [x] `imagecull groups` runs the whole pass with no server running and the test suite contains no HTTP
 - [ ] A real burst-heavy shoot has been reviewed blind against the photographer's own picks, with the agreement rate and every disagreement recorded as evidence
-- [x] Measured cost per frame is recorded in the evidence, not assumed (22 ms/frame, release, 100 frames)
+- [x] Measured cost per frame is recorded in the evidence, not assumed (69 ms/frame at a 3000×2000 preview, 22 ms/frame at 1600×1067, release)
 
 ## Notes
 
@@ -61,10 +61,11 @@ from the spec live in `.scratch/burst-grouping-v1/evidence/evidence.md`.
   horizon drawn at 1.5°; `clip_hi` 74.06 % for +2 EV against 0.00 %; noise peaks
   at 0.012 of the orientation weight, under the 0.05 floor, so it reports *no*
   angle rather than 0°.
-- **Cost, measured not assumed:** 22 ms/frame in release over 100 synthetic NEFs
-  at 1600×1067 (extraction, decode, orientation, the 2048 px fit, every measure
-  and the signature), reported by the command's own summary. The spec budgeted
-  ~50 ms.
+- **Cost, measured not assumed:** 69 ms/frame in release over 60 synthetic NEFs
+  at 3000×2000 — above the working size, so the 2048 px fit runs — and 22 ms/frame
+  at 1600×1067, where it does not. That is the whole pass: extraction, decode,
+  orientation, fit, every measure and the signature, reported by the command's own
+  summary. The spec budgeted ~50 ms; a 400-frame shoot is about half a minute.
 - **Determinism:** two runs over the same folder wrote byte-identical CSVs.
 - **Still open (the photographer):** the blind review against their own picks,
   which also settles which acutance formulation wins and where `sharp_floor`,
@@ -78,3 +79,11 @@ from the spec live in `.scratch/burst-grouping-v1/evidence/evidence.md`.
 - **A finding for issue 02:** the roll estimate drifts by up to 0.33° on blurred
   frames, so angles below about 0.4° are not yet distinguishable from level —
   the same order as the proposed `roll_tolerance` of 0.5°.
+- **Reviewed and fixed:** a two-axis review (standards and spec, parallel
+  sub-agents) found that the signature was *not* the documented 32×32 — the fit
+  preserved the frame's shape, so a 3:2 preview gave 32×21 and mixed aspects
+  compared by truncation. It now resamples onto a square grid. Also fixed: the
+  algorithm string said `burst-grouping` where the glossary says *group*, the AF
+  window scaled by the wrong axis on a quarter-turned frame, duplicated luma,
+  three colliding names, a dead rotation helper, fractions without a type, and
+  thresholds only validated in the CLI. See the evidence file's review section.

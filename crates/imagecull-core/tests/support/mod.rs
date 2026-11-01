@@ -13,8 +13,8 @@
 
 #![allow(dead_code)]
 
-pub mod burst;
 pub mod decider;
+pub mod scenes;
 pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};

@@ -106,14 +106,7 @@ impl Working {
     pub fn from_rgb(image: &RgbImage) -> Result<Working> {
         let (clip_hi, clip_lo) = clipping(image);
         let fitted = preprocess::fit(image, WORK_EDGE)?;
-        let grey = fitted
-            .pixels()
-            .map(|pixel| {
-                0.299 * f32::from(pixel.0[0])
-                    + 0.587 * f32::from(pixel.0[1])
-                    + 0.114 * f32::from(pixel.0[2])
-            })
-            .collect();
+        let grey = fitted.pixels().map(preprocess::luma).collect();
         Ok(Working {
             width: fitted.width(),
             height: fitted.height(),
@@ -345,7 +338,12 @@ impl Working {
         // The camera's own area when it records one, scaled with the frame;
         // otherwise a window a fraction of the working long edge. Never smaller
         // than a block, or there would be nothing to average.
-        let scale = work_width / frame_width;
+        //
+        // The scale is long edge against long edge, not width against width: on
+        // a quarter-turned frame the working image's width is the sensor's
+        // height, and comparing those would size a portrait frame's window by
+        // the wrong axis.
+        let scale = self.long_edge() as f32 / af.frame.0.max(af.frame.1) as f32;
         let side = af
             .size
             .map(|(width, height)| width.max(height) as f32 * scale)

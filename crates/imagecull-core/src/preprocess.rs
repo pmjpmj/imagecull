@@ -112,7 +112,34 @@ pub(crate) fn fit(source: &image::RgbImage, max_edge: u32) -> Result<image::RgbI
     if (width, height) == source.dimensions() {
         return Ok(source.clone());
     }
-    downscale(source, width, height)
+    resize_to(source, width, height)
+}
+
+/// The image at exactly `width` by `height`, Lanczos3, up or down.
+///
+/// The signature needs a *fixed* grid — 32×32 and no other — so that two frames
+/// of different shapes are still compared value for value, and a square grid is
+/// what the spec asks for. [`fit`] cannot give that: it keeps the frame's shape,
+/// which is right for a payload and wrong for a signature.
+pub(crate) fn resize_to(
+    source: &image::RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<image::RgbImage> {
+    if (width.max(1), height.max(1)) == source.dimensions() {
+        return Ok(source.clone());
+    }
+    downscale(source, width.max(1), height.max(1))
+}
+
+/// One pixel's luminance, the Rec. 601 weighting every greyscale path in the
+/// crate uses.
+///
+/// Shared by the [`measure`](crate::measure)s, which read the working image in
+/// grey, and the [`group`](crate::group) signature: two greys computed two ways
+/// would be two scales for the same picture.
+pub(crate) fn luma(pixel: &image::Rgb<u8>) -> f32 {
+    0.299 * f32::from(pixel.0[0]) + 0.587 * f32::from(pixel.0[1]) + 0.114 * f32::from(pixel.0[2])
 }
 
 /// The largest size inside a `max_edge` square with the same shape as the

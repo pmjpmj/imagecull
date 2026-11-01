@@ -10,7 +10,8 @@
 //! The similarity gate is what makes this safe. Without it, "a second apart"
 //! merges a subject who stepped behind a tree, a hat that came off, a pan. With
 //! it, a pan splits into the compositions it actually produced — the right
-//! answer, even though it is not what a naive burst detector would say.
+//! answer, even though it is not what a naive "same second, same group" detector
+//! would say.
 //!
 //! Nothing here consults a model. Grouping and measures are a fact about the
 //! shoot, computable with no server running, which is why they ship first as
@@ -42,7 +43,7 @@ use image::RgbImage;
 use raw_files::{DateTime, Metadata};
 use sha2::{Digest, Sha256};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::measure::{self, AfPoint, Measures};
 use crate::preprocess;
@@ -51,9 +52,12 @@ use crate::report::{self, Failure};
 use crate::rubric::hex;
 
 /// The identity of the algorithm, part of every [`grouping_hash`]. Bump it when
-/// a gate, its order or the signature changes: two runs under different
-/// versions did not group the same way.
-pub const ALGORITHM: &str = "burst-grouping/1";
+/// a gate, its order or the signature changes: two runs under different versions
+/// did not group the same way.
+///
+/// The word is *group*, not *burst*: this string is hashed into every plan, and
+/// a persisted identifier outlives the prose around it.
+pub const ALGORITHM: &str = "grouping/1";
 
 /// The side of a [`Signature`], in pixels.
 pub const SIGNATURE_EDGE: u32 = 32;
@@ -161,6 +165,8 @@ fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
 ///
 /// Every field is optional because a file may record none of them; two frames
 /// that both record nothing have not been shown to differ, so the gate passes.
+/// Equality *is* the gate — a [`Fraction`] compares by its value, so two
+/// settings are one exposure exactly when they are equal.
 /// That is the same treatment the serial number gets, and the opposite of what a
 /// *measure* does with a missing value: a gate asks "may these be one moment",
 /// a measure asks "what is true".
@@ -168,12 +174,12 @@ fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
 pub struct Settings {
     /// The sensor sensitivity the camera set.
     pub iso: Option<u32>,
-    /// The exposure time, as the numerator and denominator the file stored.
-    pub exposure_time: Option<(u32, u32)>,
-    /// The aperture, as a fraction.
-    pub f_number: Option<(u32, u32)>,
-    /// The focal length, as a fraction.
-    pub focal_length: Option<(u32, u32)>,
+    /// The exposure time.
+    pub exposure_time: Option<Fraction>,
+    /// The aperture.
+    pub f_number: Option<Fraction>,
+    /// The focal length.
+    pub focal_length: Option<Fraction>,
     /// The EXIF orientation: a frame turned on its side is not the same
     /// composition as the one before it.
     pub orientation: u16,
@@ -185,41 +191,47 @@ impl Settings {
         let exposure = metadata.exposure();
         Settings {
             iso: exposure.iso(),
-            exposure_time: fraction(exposure.exposure_time()),
-            f_number: fraction(exposure.f_number()),
-            focal_length: fraction(exposure.focal_length()),
+            exposure_time: exposure.exposure_time().map(Fraction::of),
+            f_number: exposure.f_number().map(Fraction::of),
+            focal_length: exposure.focal_length().map(Fraction::of),
             orientation: metadata.orientation().to_exif(),
         }
     }
-
-    /// Whether these settings are the same exposure. Fractions are compared by
-    /// their values, so `1/500` and `2/1000` are one exposure as a photographer
-    /// means it.
-    pub fn same(&self, other: &Settings) -> bool {
-        self.orientation == other.orientation
-            && self.iso == other.iso
-            && same_fraction(self.exposure_time, other.exposure_time)
-            && same_fraction(self.f_number, other.f_number)
-            && same_fraction(self.focal_length, other.focal_length)
-    }
 }
 
-/// A `Rational` as its stored numerator and denominator.
-fn fraction(value: Option<raw_files::Rational>) -> Option<(u32, u32)> {
-    value.map(|value| (value.numerator, value.denominator))
+/// A fraction as the file stored it, compared by its **value**: `1/500` and
+/// `2/1000` are one exposure as a photographer means it, though a camera may
+/// write either.
+///
+/// Equality is the number, so [`Settings`] needs no comparison method of its
+/// own — two settings are the same exposure exactly when they are equal.
+#[derive(Debug, Clone, Copy)]
+pub struct Fraction {
+    /// The number above the line, as stored.
+    pub numerator: u32,
+    /// The number below the line, as stored.
+    pub denominator: u32,
 }
 
-/// Two fractions of unknown originals: equal when their values are, or when
-/// neither was recorded. Cross-multiplied in `u64`, since `u32 * u32` overflows.
-fn same_fraction(left: Option<(u32, u32)>, right: Option<(u32, u32)>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            u64::from(left.0) * u64::from(right.1) == u64::from(right.0) * u64::from(left.1)
+impl Fraction {
+    /// The fraction a file recorded.
+    pub fn of(value: raw_files::Rational) -> Fraction {
+        Fraction {
+            numerator: value.numerator,
+            denominator: value.denominator,
         }
-        _ => false,
     }
 }
+
+impl PartialEq for Fraction {
+    fn eq(&self, other: &Fraction) -> bool {
+        // Cross-multiplied in `u64`: `u32 * u32` overflows.
+        u64::from(self.numerator) * u64::from(other.denominator)
+            == u64::from(other.numerator) * u64::from(self.denominator)
+    }
+}
+
+impl Eq for Fraction {}
 
 /// A frame's preview at 32×32 greyscale, mean subtracted and scaled to unit
 /// length: the fact two frames are compared on to decide they show one scene.
@@ -234,16 +246,14 @@ pub struct Signature(Vec<f32>);
 
 impl Signature {
     /// The signature of an upright, decoded preview.
+    ///
+    /// Exactly `SIGNATURE_EDGE` by `SIGNATURE_EDGE`, whatever shape the preview
+    /// is: the frame is resampled onto a square grid, so a 3:2 frame and a 16:9
+    /// frame are compared value for value rather than one being truncated
+    /// against the other.
     pub fn of_rgb(image: &RgbImage) -> Result<Signature> {
-        let fitted = preprocess::fit(image, SIGNATURE_EDGE)?;
-        let grey: Vec<f32> = fitted
-            .pixels()
-            .map(|pixel| {
-                0.299 * f32::from(pixel.0[0])
-                    + 0.587 * f32::from(pixel.0[1])
-                    + 0.114 * f32::from(pixel.0[2])
-            })
-            .collect();
+        let square = preprocess::resize_to(image, SIGNATURE_EDGE, SIGNATURE_EDGE)?;
+        let grey: Vec<f32> = square.pixels().map(preprocess::luma).collect();
         if grey.is_empty() {
             return Ok(Signature(Vec::new()));
         }
@@ -329,6 +339,11 @@ pub struct Grouping {
 /// capture time, or with no signature to compare, is a group of its own and
 /// comes after the timed ones, in the order it was given: a missing fact must
 /// never invent a decision.
+///
+/// Two frames whose recorded times are equal have no *fact* to order them by, so
+/// they keep the order they were given — the scan's order, which is the folder's
+/// names. Which group they land in does not depend on that: equal times are
+/// inside any gap, and the serial, settings and scene gates are blind to names.
 pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
     let timed: Vec<usize> = (0..facts.len())
         .filter(|&index| facts[index].captured.is_some() && facts[index].signature.is_some())
@@ -377,7 +392,7 @@ fn same_moment(
         return false;
     }
     let candidate = &facts[candidate];
-    if first.serial != candidate.serial || !first.settings.same(&candidate.settings) {
+    if first.serial != candidate.serial || first.settings != candidate.settings {
         return false;
     }
     let (Some(seen), Some(fresh)) = (&first.signature, &candidate.signature) else {
@@ -467,12 +482,12 @@ impl Plan {
     }
 
     /// The groups, in order, each with the frames it holds.
-    pub fn grouped(&self) -> Vec<Row<'_>> {
+    pub fn grouped(&self) -> Vec<GroupRow<'_>> {
         let mut rows = Vec::new();
         let mut start = 0;
         for (index, frame) in self.frames.iter().enumerate() {
             if frame.group != self.frames[start].group {
-                rows.push(Row {
+                rows.push(GroupRow {
                     number: self.frames[start].group,
                     frames: &self.frames[start..index],
                 });
@@ -480,7 +495,7 @@ impl Plan {
             }
         }
         if let Some(first) = self.frames.get(start) {
-            rows.push(Row {
+            rows.push(GroupRow {
                 number: first.group,
                 frames: &self.frames[start..],
             });
@@ -491,7 +506,7 @@ impl Plan {
 
 /// One group of a [`Plan`].
 #[derive(Debug, Clone)]
-pub struct Row<'a> {
+pub struct GroupRow<'a> {
     /// The group's number, from 1.
     pub number: usize,
     /// Its frames, in capture order.
@@ -504,10 +519,11 @@ pub struct Row<'a> {
 /// row with empty measures and a status, and a group of its own: one odd file
 /// never costs the photographer the other 399.
 pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
+    check(&options.thresholds)?;
     let started = Instant::now();
     let scan = ingest::scan(shoot, &options.scan)?;
 
-    let mut readings: Vec<Reading> = Vec::with_capacity(scan.files.len());
+    let mut readings: Vec<FrameRead> = Vec::with_capacity(scan.files.len());
     let mut facts: Vec<Facts> = Vec::with_capacity(scan.files.len());
     for source in &scan.files {
         let reading = read(source);
@@ -540,8 +556,26 @@ pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
     })
 }
 
+/// Refuse a similarity that is not a cosine before a single file is read: a
+/// front end may take the number from a flag, a file or a GUI, and the range is
+/// the algorithm's, not one front end's.
+fn check(thresholds: &Thresholds) -> Result<()> {
+    if !(0.0..=1.0).contains(&thresholds.similarity) {
+        return Err(Error::fatal(format!(
+            "a group similarity of {} is not a cosine; it has to lie between 0 and 1",
+            thresholds.similarity
+        )));
+    }
+    if thresholds.gap.is_zero() {
+        return Err(Error::fatal(
+            "a group gap of zero seconds would make every frame its own moment",
+        ));
+    }
+    Ok(())
+}
+
 /// What one file yielded.
-struct Reading {
+struct FrameRead {
     facts: Facts,
     measures: Measures,
     failure: Option<Failure>,
@@ -551,10 +585,10 @@ struct Reading {
 /// them. The preview is decoded once and used twice — a signature for grouping,
 /// a working image for the measures — because the spec's cost budget assumes one
 /// extraction and one decode per frame.
-fn read(source: &SourceFile) -> Reading {
+fn read(source: &SourceFile) -> FrameRead {
     let (embedded, metadata) = match preview::read(&source.path) {
         Ok(pair) => pair,
-        Err(error) => return Reading::unreadable(&error),
+        Err(error) => return FrameRead::unreadable(&error),
     };
     let af = af_point(metadata.focus().as_ref());
     let previewed = preprocess::decode(&embedded).and_then(|image| {
@@ -565,24 +599,24 @@ fn read(source: &SourceFile) -> Reading {
     let (rgb, working) = match previewed {
         Ok(pair) => pair,
         Err(error) => {
-            return Reading {
+            return FrameRead {
                 facts: Facts::of(&metadata, None),
                 measures: Measures::default(),
                 failure: Some(Failure::of(&error)),
             };
         }
     };
-    Reading {
+    FrameRead {
         facts: Facts::of(&metadata, Signature::of_rgb(&rgb).ok()),
         measures: measure::of_working(&working, af.as_ref(), embedded.orientation),
         failure: None,
     }
 }
 
-impl Reading {
+impl FrameRead {
     /// A file nothing could be read from: no facts, no measures, and the reason.
-    fn unreadable(error: &crate::error::Error) -> Reading {
-        Reading {
+    fn unreadable(error: &Error) -> FrameRead {
+        FrameRead {
             facts: Facts::default(),
             measures: Measures::default(),
             failure: Some(Failure::of(error)),
@@ -637,12 +671,12 @@ pub fn render_csv(plan: &Plan) -> String {
             frame.group.to_string(),
             frame.group_index.to_string(),
             frame.group_size.to_string(),
-            number(measures.acutance),
-            number(measures.shake),
-            number(measures.roll_deg),
-            number(measures.roll_strength),
-            number(measures.clip_hi),
-            number(measures.clip_lo),
+            measure_cell(measures.acutance),
+            measure_cell(measures.shake),
+            measure_cell(measures.roll_deg),
+            measure_cell(measures.roll_strength),
+            measure_cell(measures.clip_hi),
+            measure_cell(measures.clip_lo),
             flag(measures.af_in_focus),
             flag(measures.af_off_subject),
             frame.status().to_string(),
@@ -658,7 +692,7 @@ pub fn render_csv(plan: &Plan) -> String {
 
 /// A measure as the CSV spells it: the shortest text that round-trips, or
 /// nothing at all when the measure could not be taken.
-fn number(value: Option<f64>) -> String {
+fn measure_cell(value: Option<f64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
@@ -764,6 +798,28 @@ mod tests {
             "a ramp across is not a ramp down: {}",
             left.similarity(&turned)
         );
+    }
+
+    #[test]
+    fn a_signature_is_a_square_grid_whatever_shape_the_frame_is() {
+        // The signature is compared value for value, so every frame has to give
+        // the same number of them: a 3:2 frame and a 16:9 frame must not be
+        // truncated against each other.
+        for (width, height) in [(120, 80), (160, 90), (80, 120), (32, 32)] {
+            let image = image::ImageBuffer::from_fn(width, height, |x, y| {
+                image::Rgb([
+                    u8::try_from((x * 7) % 256).unwrap_or(0),
+                    u8::try_from((y * 5) % 256).unwrap_or(0),
+                    40,
+                ])
+            });
+            let signature = Signature::of_rgb(&image).expect("a signature");
+            assert_eq!(
+                signature.0.len(),
+                (SIGNATURE_EDGE * SIGNATURE_EDGE) as usize,
+                "{width}×{height} did not give a square signature"
+            );
+        }
     }
 
     #[test]
@@ -899,11 +955,28 @@ mod tests {
 
     #[test]
     fn a_fraction_is_compared_by_its_value_and_never_across_a_missing_one() {
-        assert!(same_fraction(Some((1, 500)), Some((2, 1000))));
-        assert!(!same_fraction(Some((1, 500)), Some((1, 250))));
-        assert!(same_fraction(None, None));
-        assert!(!same_fraction(Some((1, 500)), None));
-        assert!(!same_fraction(None, Some((1, 500))));
+        let half = |numerator, denominator| {
+            Some(Fraction {
+                numerator,
+                denominator,
+            })
+        };
+        assert_eq!(half(1, 500), half(2, 1000));
+        assert_ne!(half(1, 500), half(1, 250));
+        assert_eq!(None::<Fraction>, None);
+        assert_ne!(half(1, 500), None);
+
+        // And the settings they belong to compare the same way, which is what
+        // the gate reads.
+        let fast = Settings {
+            exposure_time: half(1, 500),
+            ..Settings::default()
+        };
+        let same = Settings {
+            exposure_time: half(2, 1000),
+            ..Settings::default()
+        };
+        assert_eq!(fast, same);
     }
 
     #[test]

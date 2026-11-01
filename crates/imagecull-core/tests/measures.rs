@@ -1,6 +1,6 @@
 //! What a frame's own pixels can say: the measure seam.
 //!
-//! Every test here builds a frame from the synthetic scene in `support::burst`,
+//! Every test here builds a frame from the synthetic scene in `support::scenes`,
 //! applies one known transform, and asserts the number that comes back. That is
 //! the only honest way to test a sharpness or horizon measurement: the answer
 //! key is the transform, not another implementation of the same formula. No
@@ -12,7 +12,7 @@ mod support;
 use image::RgbImage;
 use imagecull_core::measure::{self, AfPoint};
 use imagecull_core::preview::Embedded;
-use support::burst;
+use support::scenes;
 
 /// A preview of `image`, as a camera would have embedded it.
 fn embedded(image: &RgbImage, orientation: u16) -> Embedded {
@@ -46,8 +46,8 @@ fn roll_recovers_a_known_rotation() {
     let (width, height) = (1_600, 1_067);
     let tilt = 1.5_f64;
 
-    let tilted = measures(&burst::tilted_scene(width, height, tilt as f32));
-    let level = measures(&burst::tilted_scene(width, height, 0.0));
+    let tilted = measures(&scenes::tilted_scene(width, height, tilt as f32));
+    let level = measures(&scenes::tilted_scene(width, height, 0.0));
 
     let angled = tilted.roll_deg.expect("a scene with a horizon has a roll");
     assert!(
@@ -67,7 +67,7 @@ fn roll_recovers_a_known_rotation() {
 
 #[test]
 fn a_frame_with_no_dominant_line_reports_no_roll_rather_than_zero() {
-    let speckle = burst::noise(1_600, 1_067, 7);
+    let speckle = scenes::noise(1_600, 1_067, 7);
     let measured = measures(&speckle);
 
     assert_eq!(
@@ -84,10 +84,10 @@ fn a_frame_with_no_dominant_line_reports_no_roll_rather_than_zero() {
 #[test]
 fn shake_tells_a_moving_camera_from_a_lens_that_missed_focus() {
     let (width, height) = (1_600, 1_067);
-    let scene = burst::scene(width, height);
+    let scene = scenes::scene(width, height);
 
-    let shaken = measures(&burst::shaken(&scene, 5));
-    let softly = measures(&burst::blurred(&scene, 1.0));
+    let shaken = measures(&scenes::shaken(&scene, 5));
+    let softly = measures(&scenes::blurred(&scene, 1.0));
     let sharp = measures(&scene);
 
     let shaken_by = shaken.shake.expect("a frame with pixels has a shake");
@@ -114,13 +114,16 @@ fn shake_tells_a_moving_camera_from_a_lens_that_missed_focus() {
 }
 
 #[test]
-fn acutance_ranks_a_sharp_frame_above_a_soft_one_at_two_sensor_sizes() {
-    for (width, height) in [(1_600, 1_067), (800, 533)] {
-        let scene = burst::scene(width, height);
+fn acutance_ranks_a_sharp_frame_above_a_soft_one_at_every_sensor_size() {
+    // Straddling the 2048 px working size: 2400 is fitted down to it, 1600 and
+    // 800 are measured as they are. A crop-mode frame and a full-frame one have
+    // to rank the same way, which is the whole reason the working size is fixed.
+    for (width, height) in [(2_400, 1_600), (1_600, 1_067), (800, 533)] {
+        let scene = scenes::scene(width, height);
         let sharp = measures(&scene)
             .acutance
             .expect("a textured frame has acutance");
-        let soft = measures(&burst::blurred(&scene, 1.0))
+        let soft = measures(&scenes::blurred(&scene, 1.0))
             .acutance
             .expect("a blurred frame still has acutance");
 
@@ -134,10 +137,10 @@ fn acutance_ranks_a_sharp_frame_above_a_soft_one_at_two_sensor_sizes() {
 
 #[test]
 fn clipping_reads_the_blown_highlights_and_leaves_a_normal_frame_alone() {
-    let scene = burst::scene(1_600, 1_067);
+    let scene = scenes::scene(1_600, 1_067);
 
     let normal = measures(&scene);
-    let blown = measures(&burst::brighter(&scene, 2.0));
+    let blown = measures(&scenes::brighter(&scene, 2.0));
 
     assert!(
         normal.clip_hi.expect("clip_hi") < 1.0,
@@ -159,10 +162,10 @@ fn clipping_reads_the_blown_highlights_and_leaves_a_normal_frame_alone() {
 #[test]
 fn af_off_subject_fires_when_the_camera_focused_on_a_soft_patch() {
     let (width, height) = (1_600, 1_067);
-    let scene = burst::scene(width, height);
+    let scene = scenes::scene(width, height);
 
-    let on_the_patch = measures_with_focus(&scene, burst::soft_centre(width, height));
-    let on_the_subject = measures_with_focus(&scene, burst::sharp_centre(width, height));
+    let on_the_patch = measures_with_focus(&scene, scenes::soft_centre(width, height));
+    let on_the_subject = measures_with_focus(&scene, scenes::sharp_centre(width, height));
 
     assert_eq!(
         on_the_patch.af_off_subject,
@@ -183,7 +186,7 @@ fn af_off_subject_fires_when_the_camera_focused_on_a_soft_patch() {
 
 #[test]
 fn an_unrecorded_focus_report_is_unknown_not_excluded() {
-    let scene = burst::scene(800, 533);
+    let scene = scenes::scene(800, 533);
     let measured = measures(&scene);
 
     assert_eq!(measured.af_in_focus, None);
@@ -199,11 +202,11 @@ fn the_focus_point_is_mapped_through_the_frames_orientation() {
     // EXIF orientation 6 to turn it back. The AF point is where the soft patch
     // sits in the *stored* frame, which is the frame the camera records it in.
     let (width, height) = (1_600, 1_067);
-    let scene = burst::scene(width, height);
+    let scene = scenes::scene(width, height);
     let stored = image::imageops::rotate270(&scene);
     let (stored_width, stored_height) = stored.dimensions();
 
-    let (soft_x, soft_y) = burst::soft_centre(width, height);
+    let (soft_x, soft_y) = scenes::soft_centre(width, height);
     let upright = (soft_x as f32 / width as f32, soft_y as f32 / height as f32);
     // Orientation 8 is the turn from the upright frame back to the stored one.
     let (stored_x, stored_y) = measure::orient_point(8, upright);

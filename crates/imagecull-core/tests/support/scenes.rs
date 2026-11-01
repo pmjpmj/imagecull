@@ -1,7 +1,8 @@
-//! A synthetic burst: one scene, transformed the ways a burst goes wrong.
+//! Synthetic frames: one scene, transformed the ways a sequence of one moment
+//! goes wrong.
 //!
-//! A real burst has no ground truth about which frame is the sharpest, so the
-//! measure and grouping tests build their own. [`scene`] is the same picture
+//! A real sequence of one moment has no ground truth about which frame is the
+//! sharpest, so the measure and grouping tests build their own. [`scene`] is the same picture
 //! every time — a bright sky over a textured ground across a level horizon at
 //! [`HORIZON`], with one deliberately soft patch — and the transforms here turn
 //! it into the answer key the spec's Testing Decisions describe: `soft` (a
@@ -195,28 +196,4 @@ fn to_u8(value: f32) -> u8 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let byte = rounded as u8;
     byte
-}
-
-fn bilinear(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
-    let (width, height) = image.dimensions();
-    let max_x = i32::try_from(width).unwrap_or(1) - 1;
-    let max_y = i32::try_from(height).unwrap_or(1) - 1;
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    if x0 < 0 || y0 < 0 || x0 >= max_x || y0 >= max_y {
-        return Rgb([0, 0, 0]);
-    }
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
-    let at = |dx: i32, dy: i32| {
-        let px = u32::try_from(x0 + dx).unwrap_or(0);
-        let py = u32::try_from(y0 + dy).unwrap_or(0);
-        *image.get_pixel(px, py)
-    };
-    let blend = |index: usize| {
-        let top = f32::from(at(0, 0).0[index]) * (1.0 - fx) + f32::from(at(1, 0).0[index]) * fx;
-        let bottom = f32::from(at(0, 1).0[index]) * (1.0 - fx) + f32::from(at(1, 1).0[index]) * fx;
-        to_u8(top * (1.0 - fy) + bottom * fy)
-    };
-    Rgb([blend(0), blend(1), blend(2)])
 }

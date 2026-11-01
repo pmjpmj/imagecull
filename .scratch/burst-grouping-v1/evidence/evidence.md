@@ -92,33 +92,39 @@ numbers are here so a reader can see what the measures do before trusting them:
 
 ## Measured cost
 
-Release build, one machine (Apple silicon), 100 synthetic NEFs at 1600×1067 with
-a ~480 KB embedded preview each:
+Release build, one machine (Apple silicon). The headline case is a burst at a
+realistic *preview* size — 3000×2000, above the 2048 px working size, so the
+working fit actually runs — 60 synthetic NEFs with an ~1.4 MB embedded preview
+each:
 
 ```
-$ time imagecull groups /tmp/imagecull-burst --out /tmp/g1.csv
-groups: 1 group in 100 frames (mean 100.0, largest 100) · 2s measured, 22 ms/frame
-real 2.398s   user 2.184s   sys 0.020s
+$ time imagecull groups /tmp/ic-3000 --out /tmp/k2.csv
+groups: 1 group in 60 frames (mean 60.0, largest 60) · 4s measured, 69 ms/frame
+real 4.128s   user 4.088s   sys 0.034s
 ```
 
-**22 ms per frame** for the whole pass — preview extraction, JPEG decode,
-orientation, the 2048 px working fit, the five measures and the 32×32 signature —
-measured by the command itself and reported in its summary (`plan.elapsed`), not
-assumed. The spec budgeted ~50 ms/frame (40 ms extraction plus 10 ms of
-measures); the pass is a little over twice as fast as that, and it is four
-orders of magnitude below the model time it exists to inform.
+**69 ms per frame** for the whole pass — preview extraction, JPEG decode,
+orientation, the 2048 px Lanczos3 fit, the five measures and the 32×32 signature
+— reported by the command's own summary (`plan.elapsed`), not assumed. A
+400-frame shoot is therefore about 28 seconds of technical pass against the
+spec's 5–25 minutes of model time: two orders of magnitude below the cost it
+exists to inform, which is the claim that matters.
 
-Two runs over the same 100 frames produced byte-identical CSVs (`diff` empty),
-which is the determinism claim: every column is a function of the files and the
-two thresholds.
+The same folder drawn at 1600×1067 (below the working size, so the fit is a no-op
+and only one decode happens) measures **22 ms per frame**, which is the fastest
+end of the range. The spec budgeted ~50 ms/frame; 22–69 ms brackets it.
 
-Grouping sanity, same folder (frames one second apart):
+Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
+is the determinism claim: every column is a function of the files and the two
+thresholds.
 
-| command | result |
-|---|---|
-| default (`--group-gap 2.0`) | 1 group of 100 |
-| `--group-gap 0.5` | 91 groups — the subsecond stamps split a 1 s cadence |
-| `--group-similarity 1.0` | 1 group — identical previews are exactly 1.0 similar |
+Grouping sanity, the same 3000×2000 folder (frames one second apart):
+
+| command | result | grouping hash |
+|---|---|---|
+| default (`--group-gap 2.0`) | 1 group of 60 | `74a69240` |
+| `--group-gap 0.5` | 55 groups — the subsecond stamps split a 1 s cadence at the boundaries | `d165668f` |
+| `--group-similarity 1.0` | 1 group — identical previews are exactly 1.0 similar | `b671910f` |
 
 ## What the build taught (and changed from the spec)
 
@@ -178,3 +184,42 @@ shoot to tune to.
 - No write to an image: `roll_deg` is reported and nothing is straightened.
 - The `groups` command reads no config file. Its thresholds are the algorithm's,
   not a shoot's; where they belong in `imagecull.toml` is part of issue 02.
+
+## Two-axis review, and what it changed
+
+The work was reviewed under the repo's code-review skill before it was called
+done: a **standards** axis (documented conventions, glossary vocabulary, and the
+Fowler smell baseline) and a **spec** axis (the ticket's acceptance list), run in
+parallel with fresh contexts. Both found real things, and all of them are fixed
+in the same commit:
+
+- **The signature was not actually 32×32.** `preprocess::fit` caps the *long
+  edge* and keeps the frame's shape, so a 3:2 preview produced 32×21 values and
+  a mixed-aspect group compared two different-length vectors by `zip` truncation
+  — a meaningless cosine wearing a documented shape. The signature now resamples
+  onto a square 32×32 grid (`preprocess::resize_to`), and
+  `a_signature_is_a_square_grid_whatever_shape_the_frame_is` pins it.
+- **`"burst-grouping/1"` was glossary-avoided vocabulary inside a persisted
+  identifier** — the string is hashed into every plan, so it would have outlived
+  the prose. It is now `"grouping/1"`, and the prose and the test-fixture module
+  (`support::scenes`) follow the glossary.
+- **The AF window was scaled width-against-width**, which is the wrong axis pair
+  on a quarter-turned frame; it now scales long edge against long edge.
+- **Duplicated luma**, three names colliding inside one crate (`group::Row` vs
+  `report::Row`, a private `Reading` vs `reading::Reading`, two `number`s), and a
+  dead `bilinear` left over from the rotation approach: removed or renamed
+  (`preprocess::luma`, `GroupRow`, `FrameRead`, `measure_cell`).
+- **`Option<(u32, u32)>` fractions with a free-floating `same_fraction`** became a
+  `Fraction` whose `PartialEq` *is* value equality, so `Settings` derives its own
+  comparison and the gate reads `first.settings != candidate.settings`.
+- **Thresholds were only validated in the CLI**; `group::run` now refuses a
+  similarity outside 0..=1 and a zero gap, because a GUI is a front end too.
+- **Tests the review found missing:** acutance invariance now straddles the
+  working size (2400 px is fitted down, 1600 and 800 are not), the similarity
+  gate is exercised on both sides of its threshold, frames that share a timestamp
+  are shown to group the same whatever they are called, and the square signature
+  is pinned. The roll estimate's 0.33° drift on blurred frames is recorded above
+  as a finding for issue 02 rather than hidden.
+- **Cost re-measured above the working size** (69 ms/frame) because the first
+  figure was taken below it, where the fit does not run.
+
