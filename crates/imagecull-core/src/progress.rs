@@ -18,7 +18,7 @@ use crate::error::ErrorKind;
 use crate::ingest::ScanCounts;
 use crate::reading::Answers;
 use crate::rubric::{Builtin, RubricHash};
-use crate::scoring::{Ending, Run};
+use crate::scoring::{Ending, Groups, Run};
 use crate::sidecar::{self, Failure};
 
 /// Where a run's progress goes.
@@ -104,6 +104,9 @@ pub struct Summary {
     pub skipped: usize,
     /// How many frames reused an identical preview's outcome.
     pub duplicates: usize,
+    /// What the run made of the folder's groups: who it marked red, who it left
+    /// alone, and which groupings it could not decide.
+    pub groups: Groups,
     /// Counts by `status`: `ok` first, then the taxonomy's own order, omitting
     /// the kinds no frame hit.
     pub counts: Vec<StatusCount>,
@@ -184,6 +187,7 @@ impl Summary {
             failed: run.failed(),
             skipped,
             duplicates: run.duplicates,
+            groups: run.groups.clone(),
             counts,
             rating,
             stars,

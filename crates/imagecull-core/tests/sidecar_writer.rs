@@ -61,7 +61,9 @@ fn a_new_sidecar_is_written_beside_its_frame_and_no_temp_file_survives() {
     let dir = shoot();
     let path = frame(dir.path(), "DSC_0001.NEF");
 
-    let written = Filesystem.write(&path, DOC, None).expect("write");
+    let written = Filesystem
+        .write(&path, DOC, sidecar::Prior::Absent)
+        .expect("write");
 
     assert_eq!(written, Written::Created);
     assert_eq!(
@@ -88,7 +90,9 @@ fn replacing_a_sidecar_keeps_its_permissions() {
         fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).expect("a mode");
     }
 
-    let written = Filesystem.write(&path, DOC, Some("old")).expect("write");
+    let written = Filesystem
+        .write(&path, DOC, sidecar::Prior::Earlier("old"))
+        .expect("write");
 
     assert_eq!(written, Written::Replaced);
     assert_eq!(fs::read_to_string(&sidecar).expect("the sidecar"), DOC);
@@ -116,7 +120,7 @@ fn an_existing_sidecar_is_backed_up_once_and_never_again() {
     fs::write(&sidecar, "the original").expect("an old sidecar");
 
     Filesystem
-        .write(&path, DOC, Some("the original"))
+        .write(&path, DOC, sidecar::Prior::Earlier("the original"))
         .expect("write");
     assert_eq!(
         fs::read_to_string(sidecar.with_extension("xmp.bak")).expect("a backup"),
@@ -124,7 +128,7 @@ fn an_existing_sidecar_is_backed_up_once_and_never_again() {
     );
 
     Filesystem
-        .write(&path, DOC, Some("the original"))
+        .write(&path, DOC, sidecar::Prior::Earlier("the original"))
         .expect("write again");
     assert_eq!(
         fs::read_to_string(sidecar.with_extension("xmp.bak")).expect("the backup"),
@@ -138,7 +142,9 @@ fn a_new_sidecar_is_not_backed_up() {
     let dir = shoot();
     let path = frame(dir.path(), "DSC_0001.NEF");
 
-    Filesystem.write(&path, DOC, None).expect("write");
+    Filesystem
+        .write(&path, DOC, sidecar::Prior::Absent)
+        .expect("write");
 
     assert_eq!(
         names(dir.path()),
@@ -153,12 +159,36 @@ fn a_write_that_cannot_land_is_an_error_and_leaves_nothing_behind() {
     let path = dir.path().join("no-such-folder").join("DSC_0001.NEF");
 
     let error = Filesystem
-        .write(&path, DOC, None)
+        .write(&path, DOC, sidecar::Prior::Absent)
         .expect_err("a folder that is not there");
 
     assert!(!sidecar::path_for(&path).exists());
     assert!(
         !error.message().is_empty(),
         "the error says what went wrong"
+    );
+}
+
+#[test]
+fn a_document_this_same_run_wrote_is_replaced_without_a_backup_of_itself() {
+    let dir = shoot();
+    let path = frame(dir.path(), "DSC_0001.NEF");
+    Filesystem
+        .write(&path, DOC, sidecar::Prior::Absent)
+        .expect("the rating write");
+
+    let marked = DOC.replace("/>", " xmp:Label=\"Red\"/>");
+    Filesystem
+        .write(&path, &marked, sidecar::Prior::ThisRun(DOC))
+        .expect("the mark write");
+
+    assert_eq!(
+        fs::read_to_string(sidecar::path_for(&path)).expect("the sidecar"),
+        marked
+    );
+    assert_eq!(
+        names(dir.path()),
+        ["DSC_0001.NEF", "DSC_0001.xmp"],
+        "a frame the run judged twice owes one sidecar and no .bak clutter of its own making"
     );
 }

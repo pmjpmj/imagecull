@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use imagecull_core::error::{ErrorKind, Recovery, Result};
 use imagecull_core::ingest;
+use imagecull_core::keeper::{self, Comparison};
 use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
 use imagecull_core::progress::Silent;
@@ -715,5 +716,106 @@ fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() 
     assert!(
         posts(&stub).is_empty(),
         "no frame is sent to a server that cannot answer"
+    );
+}
+
+/// The answer a comparative request gets: one choice, by position.
+fn keeper_document(position: &str, confidence: f64) -> String {
+    json!({
+        "model": "clef-flash-oQ4e",
+        "answers": {"keeper": {"type": "choice", "choice": position, "confidence": confidence}},
+        "usage": {"input_tokens": 557, "output_tokens": 0}
+    })
+    .to_string()
+}
+
+/// A comparative request over `count` previews of one moment.
+fn comparison(count: usize) -> Comparison {
+    Comparison {
+        model: "clef-flash-oQ4e".to_string(),
+        state: State::for_frame("DSC_7956.NEF", Some("street at dusk".into())),
+        previews: (0..count).map(|_| preview(512, 341)).collect(),
+    }
+}
+
+#[test]
+fn the_comparative_request_is_one_body_of_several_images_and_a_choice_between_them() {
+    let stub = Stub::scripted(vec![(200, keeper_document("2", 0.71))]);
+
+    let response = adapter(&stub, "clef-flash-oQ4e")
+        .compare(&comparison(3))
+        .expect("a 200 is an answer");
+    let choice = keeper::read(&response, 3).expect("a readable answer");
+
+    assert_eq!(choice.position, 2);
+    assert_eq!(choice.confidence, 0.71);
+
+    let requested = posts(&stub);
+    assert_eq!(requested.len(), 1, "one request, whatever the group holds");
+    let body = &requested[0].body;
+    assert_eq!(body["model"], json!("clef-flash-oQ4e"));
+    assert_eq!(body["truncate"], json!(true), "the state is truncatable");
+    assert_eq!(body["state"]["task"], json!("photo_cull"));
+    assert_eq!(
+        body["state"]["filename"],
+        json!("DSC_7956.NEF"),
+        "the group is named by the frame it opens with"
+    );
+    assert_eq!(body["state"]["shoot_context"], json!("street at dusk"));
+
+    let images = body["images"].as_array().expect("an images array");
+    assert_eq!(images.len(), 3, "one image per compared frame");
+    assert!(
+        images.iter().all(|image| image
+            .as_str()
+            .is_some_and(|uri| uri.starts_with("data:image/jpeg;base64,"))),
+        "every image is a data URI, which is the only form the server takes: {images:?}"
+    );
+
+    let questions = body["questions"]
+        .as_object()
+        .expect("questions is a map keyed by question id");
+    let keeper = &questions["keeper"];
+    assert_eq!(keeper["type"], json!("choice"));
+    assert!(
+        keeper["instructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("which single frame")),
+        "the question says what the answer is: {keeper}"
+    );
+    let criteria = keeper["criteria"]
+        .as_object()
+        .expect("criteria is a map of option keys to descriptions");
+    assert_eq!(criteria.len(), 3);
+    assert_eq!(criteria["1"], json!("image at position 1"));
+    assert_eq!(criteria["3"], json!("image at position 3"));
+}
+
+#[test]
+fn a_group_the_model_cannot_hold_is_a_413_a_run_can_report_and_never_a_smaller_request() {
+    let stub = Stub::scripted(vec![(
+        413,
+        json!({"message": "the schema needs 19810 tokens before the state; the limit is 16384"})
+            .to_string(),
+    )]);
+
+    let error = adapter(&stub, "clef-flash-oQ4e")
+        .compare(&comparison(21))
+        .expect_err("a 413 is a failure, not an answer");
+
+    assert_eq!(error.kind(), Some(ErrorKind::Http413));
+    assert!(
+        !error.recovery().aborts_run(),
+        "one undecided group must not cost the run its other frames"
+    );
+    assert!(
+        error.message().contains("nothing was marked"),
+        "the remedy is a reported group, not a quietly smaller request: {}",
+        error.message()
+    );
+    assert_eq!(
+        posts(&stub).len(),
+        1,
+        "the request is refused once, and never retried smaller"
     );
 }

@@ -37,6 +37,7 @@
 //! rubric wording invalidates scores.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -147,6 +148,30 @@ impl Capture {
     /// The seconds from `self` to `later`, exact to the nanosecond.
     fn seconds_after(&self, later: &Capture) -> f64 {
         (later.instant() - self.instant()) as f64 / 1e9
+    }
+}
+
+impl fmt::Display for Capture {
+    /// The clock reading as ISO 8601 without a zone: the camera's own local time,
+    /// which is what the file recorded and all a group's start can honestly say.
+    ///
+    /// The fraction is written with the digits it needs — none when there is
+    /// none, else three, six or nine — so two bursts inside one second stay
+    /// distinguishable in a sidecar read a year later.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )?;
+        let digits = match self.nanosecond {
+            0 => return Ok(()),
+            nanos if nanos % 1_000_000 == 0 => 3,
+            nanos if nanos % 1_000 == 0 => 6,
+            _ => 9,
+        };
+        let nanos = format!("{:09}", self.nanosecond);
+        write!(f, ".{}", &nanos[..digits])
     }
 }
 
@@ -598,7 +623,7 @@ pub struct FrameEvent {
 impl FrameEvent {
     /// The event one finished reading is: the same status and the same failure
     /// the row carries, so a line and a CSV cell cannot disagree.
-    fn of(index: usize, total: usize, source: &SourceFile, reading: &FrameRead) -> FrameEvent {
+    fn of(index: usize, total: usize, source: &SourceFile, reading: &Reading) -> FrameEvent {
         FrameEvent {
             index: index + 1,
             total,
@@ -715,10 +740,10 @@ fn degree(asked: Option<usize>, frames: usize) -> usize {
 /// the same at any degree. Below two jobs this is a plain loop: a shoot of one
 /// file has nothing to overlap, and keeping the serial path exact is what lets a
 /// slow run be reproduced.
-fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<FrameRead> {
+fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<Reading> {
     let total = sources.len();
-    let mut readings: Vec<FrameRead> = Vec::with_capacity(total);
-    let tell = |readings: &mut Vec<FrameRead>, index: usize, reading: FrameRead| {
+    let mut readings: Vec<Reading> = Vec::with_capacity(total);
+    let tell = |readings: &mut Vec<Reading>, index: usize, reading: Reading| {
         watcher.event(Event::Frame(FrameEvent::of(
             index,
             total,
@@ -735,7 +760,7 @@ fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<F
     }
 
     let cursor = AtomicUsize::new(0);
-    let (sender, receiver) = mpsc::channel::<(usize, FrameRead)>();
+    let (sender, receiver) = mpsc::channel::<(usize, Reading)>();
     let cursor = &cursor;
     thread::scope(|scope| {
         for _ in 0..jobs {
@@ -753,7 +778,7 @@ fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<F
         }
         // Drop the pass's own handle, or the channel would never close.
         drop(sender);
-        let mut pending: BTreeMap<usize, FrameRead> = BTreeMap::new();
+        let mut pending: BTreeMap<usize, Reading> = BTreeMap::new();
         let mut due = 0;
         for (index, reading) in receiver {
             pending.insert(index, reading);
@@ -772,21 +797,31 @@ fn next(cursor: &AtomicUsize, frames: usize) -> Option<usize> {
     (index < frames).then_some(index)
 }
 
-/// What one file yielded.
-struct FrameRead {
-    facts: Facts,
-    measures: Measures,
-    failure: Option<Failure>,
+/// What one file yielded: the facts the grouping gates read, the measures the
+/// shortlist can order two equal ratings by, and why there are none when there
+/// are none.
+///
+/// The same reading serves [`run`], which builds a whole plan from it, and
+/// [`scoring`](crate::scoring), which groups the frames it has just rated and
+/// needs one frame's facts at a time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reading {
+    /// What the grouping gates compare.
+    pub facts: Facts,
+    /// What the frame's own pixels say.
+    pub measures: Measures,
+    /// Why there are no measures, when there are none.
+    pub failure: Option<Failure>,
 }
 
 /// Read one file: its largest preview, its metadata, and everything derived from
 /// them. The preview is decoded once and used twice — a signature for grouping,
 /// a working image for the measures — because the spec's cost budget assumes one
 /// extraction and one decode per frame.
-fn read(source: &SourceFile) -> FrameRead {
+pub fn read(source: &SourceFile) -> Reading {
     let (embedded, metadata) = match preview::read(&source.path) {
         Ok(pair) => pair,
-        Err(error) => return FrameRead::unreadable(&error),
+        Err(error) => return Reading::unreadable(&error),
     };
     let af = af_point(metadata.focus().as_ref());
     let previewed = preprocess::decode(&embedded).and_then(|image| {
@@ -797,24 +832,24 @@ fn read(source: &SourceFile) -> FrameRead {
     let (rgb, working) = match previewed {
         Ok(pair) => pair,
         Err(error) => {
-            return FrameRead {
+            return Reading {
                 facts: Facts::of(&metadata, None),
                 measures: Measures::default(),
                 failure: Some(Failure::of(&error)),
             };
         }
     };
-    FrameRead {
+    Reading {
         facts: Facts::of(&metadata, Signature::of_rgb(&rgb).ok()),
         measures: measure::of_working(&working, af.as_ref(), embedded.orientation),
         failure: None,
     }
 }
 
-impl FrameRead {
+impl Reading {
     /// A file nothing could be read from: no facts, no measures, and the reason.
-    fn unreadable(error: &Error) -> FrameRead {
-        FrameRead {
+    fn unreadable(error: &Error) -> Reading {
+        Reading {
             facts: Facts::default(),
             measures: Measures::default(),
             failure: Some(Failure::of(error)),

@@ -190,3 +190,156 @@ fn a_frame_with_no_sidecar_yields_a_document_carrying_only_our_properties() {
          </x:xmpmeta>\n"
     );
 }
+
+/// A verdict on a frame that lost its group, spelled the way a run hands it
+/// over: red, and every fact needed to explain the red without the folder.
+fn mark(label: Option<&'static str>) -> sidecar::Mark {
+    sidecar::Mark {
+        label,
+        keeper: label.is_none(),
+        group_start: "2026-11-02T10:00:03.25".to_string(),
+        group_size: 4,
+        grouping_hash: "2c7d90ab1f".to_string(),
+        pick_by: "comparison".to_string(),
+        pick_conf: 0.71,
+        picked_at: "2026-11-19T09:31:00Z".to_string(),
+        note: None,
+    }
+}
+
+#[test]
+fn a_losers_verdict_writes_the_red_and_the_facts_that_explain_it() {
+    let rated = sidecar::render(None, &properties()).expect("a rated document");
+
+    let document =
+        sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
+
+    assert_eq!(
+        document,
+        rated.replace(
+            "imagecull:version=\"0.1.0\"/>",
+            "imagecull:version=\"0.1.0\" \
+             xmp:Label=\"Red\" \
+             imagecull:labeledBy=\"imagecull\" \
+             imagecull:groupKeeper=\"false\" \
+             imagecull:groupStart=\"2026-11-02T10:00:03.25\" \
+             imagecull:groupSize=\"4\" \
+             imagecull:groupingHash=\"2c7d90ab1f\" \
+             imagecull:pickBy=\"comparison\" \
+             imagecull:pickConf=\"0.71\" \
+             imagecull:pickedAt=\"2026-11-19T09:31:00Z\"/>"
+        ),
+        "the verdict joins the rating without disturbing a byte of it"
+    );
+}
+
+#[test]
+fn a_keepers_verdict_leaves_the_red_a_previous_run_wrote_exactly_where_it_was() {
+    let rated = sidecar::render(None, &properties()).expect("a rated document");
+    let marked =
+        sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
+
+    let promoted = sidecar::render_mark(&marked, &mark(None)).expect("a promoted document");
+
+    assert!(
+        promoted.contains("xmp:Label=\"Red\""),
+        "a label is never removed, not even one this tool wrote: {promoted}"
+    );
+    assert!(
+        promoted.contains("imagecull:labeledBy=\"imagecull\""),
+        "and the proof that it was ours survives, so a later run can still explain it: {promoted}"
+    );
+    assert!(
+        promoted.contains("imagecull:groupKeeper=\"true\""),
+        "the verdict is not the label: the keeper's groupKeeper is true: {promoted}"
+    );
+    assert_eq!(
+        promoted.matches("imagecull:groupKeeper=").count(),
+        1,
+        "rewritten in place, not appended twice: {promoted}"
+    );
+}
+
+#[test]
+fn our_own_label_is_replaced_in_place_and_keeps_the_documents_quoting() {
+    let existing = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+                    <rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                    xmlns:imagecull=\"https://ns.imagecull.app/1.0/\" \
+                    xmp:Rating='2' xmp:Label='Red' \
+                    imagecull:labeledBy='imagecull'/></x:xmpmeta>";
+
+    let document = sidecar::render_mark(existing, &mark(Some(sidecar::RED))).expect("a document");
+
+    assert!(
+        document.contains("xmp:Label='Red'") && document.contains("xmp:Rating='2'"),
+        "the quoting and the rating survive: {document}"
+    );
+    assert!(
+        document.contains("imagecull:groupSize=\"4\""),
+        "the facts the document did not carry are appended: {document}"
+    );
+}
+
+#[test]
+fn a_rating_write_leaves_a_verdict_beside_it_alone() {
+    let marked = sidecar::render_mark(
+        &sidecar::render(None, &properties()).expect("a rated document"),
+        &mark(Some(sidecar::RED)),
+    )
+    .expect("a marked document");
+    let mut again = properties();
+    again.rating = 2;
+
+    let document = sidecar::render(Some(&marked), &again).expect("a re-rated document");
+
+    assert!(document.contains("xmp:Rating=\"2\""), "{document}");
+    assert!(
+        document.contains("xmp:Label=\"Red\"") && document.contains("imagecull:pickConf=\"0.71\""),
+        "re-rating a frame must not erase the verdict that explains its colour: {document}"
+    );
+}
+
+#[test]
+fn a_note_this_write_does_not_repeat_is_retired_and_nothing_else_is() {
+    let mut first = mark(Some(sidecar::RED));
+    first.note = Some("not_compared");
+    let marked = sidecar::render_mark(
+        &sidecar::render(None, &properties()).expect("a document"),
+        &first,
+    )
+    .expect("a marked document");
+
+    let document =
+        sidecar::render_mark(&marked, &mark(Some(sidecar::RED))).expect("a re-marked document");
+
+    assert!(
+        !document.contains("imagecull:groupNote"),
+        "a frame that was compared this time no longer carries the note that said it was not: \
+         {document}"
+    );
+    assert!(document.contains("xmp:Rating=\"4\""), "{document}");
+}
+
+#[test]
+fn a_label_that_is_not_ours_to_write_is_never_overwritten() {
+    let photographer = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+                        <rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                        xmp:Rating=\"4\" xmp:Label=\"Yellow\"/></x:xmpmeta>";
+
+    let label = sidecar::existing_label(photographer).expect("a label");
+    assert_eq!(label.value, "Yellow");
+    assert!(!label.ours, "no labeledBy, so this tool did not write it");
+    assert!(!sidecar::label_is_ours_to_write(Some(photographer)));
+
+    let ours = photographer.replace("xmp:Label=\"Yellow\"", "xmp:Label=\"Red\"");
+    let ours = sidecar::render_mark(&ours, &mark(Some(sidecar::RED))).expect("a mark");
+
+    assert!(
+        sidecar::label_is_ours_to_write(Some(&ours)),
+        "a label this tool wrote is ours to rewrite"
+    );
+    assert!(
+        sidecar::label_is_ours_to_write(None),
+        "and a frame with no label at all is the other case we may write"
+    );
+}

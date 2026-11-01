@@ -172,7 +172,7 @@ impl Writer for Refusing {
         &self,
         target: &Path,
         _document: &str,
-        _existing: Option<&str>,
+        _prior: sidecar::Prior<'_>,
     ) -> imagecull_core::Result<Written> {
         self.asked.borrow_mut().push(target.to_path_buf());
         Err(Error::new(

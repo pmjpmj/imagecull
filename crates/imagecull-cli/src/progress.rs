@@ -20,7 +20,7 @@ use std::io::Write;
 use imagecull_core::ingest::ScanCounts;
 use imagecull_core::progress::{Event, FrameEvent, Judgement, Reporter, Started, Summary, Warning};
 use imagecull_core::rubric::{Builtin, RubricHash};
-use imagecull_core::scoring::Ending;
+use imagecull_core::scoring::{Ending, Groups};
 
 /// How much of a run the photographer wants to see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +310,9 @@ fn summary_block(summary: &Summary) -> String {
         }
         out.push_str(&format!("{}\n", parts.join(" · ")));
     }
+    if let Some(groups) = groups_clause(&summary.groups) {
+        out.push_str(&format!("{groups}\n"));
+    }
     let left_out = left_out(&summary.left_out);
     if !left_out.is_empty() {
         out.push_str(&format!("left out: {}\n", left_out.join(" · ")));
@@ -347,6 +350,9 @@ fn outcome_line(summary: &Summary) -> String {
     if summary.duplicates > 0 {
         parts.push(format!("{} deduplicated", summary.duplicates));
     }
+    if let Some(groups) = groups_clause(&summary.groups) {
+        parts.push(groups);
+    }
     let left_out = left_out(&summary.left_out);
     if !left_out.is_empty() {
         parts.push(format!("left out: {}", left_out.join(" · ")));
@@ -357,6 +363,53 @@ fn outcome_line(summary: &Summary) -> String {
     ));
     parts.push(format!("model {}", summary.model));
     parts.join(" · ")
+}
+
+/// The group pass, as one clause: how many groups were judged, how many frames
+/// carry the verdict, and every way the folder disagrees with it.
+///
+/// Absent when the run judged no group, so a folder of singletons reads exactly
+/// as it did before the feature existed. A clause appears only when it is not
+/// zero, and `low confidence` is spelled out because a photographer reads it as a
+/// question about the model rather than as a count of frames.
+fn groups_clause(groups: &Groups) -> Option<String> {
+    if groups.judged_nothing() {
+        return None;
+    }
+    let mut parts = vec![format!("groups: {}", groups.groups)];
+    let mut clause = |count: usize, text: String| {
+        if count > 0 {
+            parts.push(text);
+        }
+    };
+    clause(groups.marked, format!("marked: {}", groups.marked));
+    clause(groups.red, format!("red: {}", groups.red));
+    clause(
+        groups.unmarked,
+        format!("unmarked: {} (label not ours)", groups.unmarked),
+    );
+    clause(
+        groups.stale_reds,
+        format!("red now the keeper: {}", groups.stale_reds),
+    );
+    clause(
+        groups.not_compared,
+        format!("not compared: {}", groups.not_compared),
+    );
+    clause(groups.undecided, format!("undecided: {}", groups.undecided));
+    clause(
+        groups.unwritten,
+        format!("mark failed: {}", groups.unwritten),
+    );
+    clause(
+        groups.low_confidence,
+        format!(
+            "low confidence: {} {}",
+            groups.low_confidence,
+            plural(groups.low_confidence, "group", "groups")
+        ),
+    );
+    Some(parts.join(" · "))
 }
 
 /// How a run ended, when it did not run to the end: the one thing a `--quiet`
@@ -453,7 +506,7 @@ mod tests {
     use imagecull_core::progress::{MeanMedian, PreviewShape, StatusCount, Warning};
     use imagecull_core::reading::Answers;
     use imagecull_core::rubric::Builtin;
-    use imagecull_core::scoring::Ending;
+    use imagecull_core::scoring::{Ending, Groups};
     use imagecull_core::sidecar::Failure;
 
     use super::*;
@@ -536,6 +589,7 @@ mod tests {
             failed: 3,
             skipped: 3,
             duplicates: 2,
+            groups: Groups::default(),
             counts: vec![
                 StatusCount {
                     status: "ok",
@@ -690,6 +744,78 @@ mod tests {
         );
         assert_eq!(rendered.out, expected);
         assert!(rendered.err.is_empty());
+    }
+
+    /// The summary of a run whose group pass marked some frames and left others
+    /// alone.
+    fn grouped_summary() -> Summary {
+        let mut summary = summary();
+        summary.groups = Groups {
+            groups: 3,
+            marked: 12,
+            red: 9,
+            unmarked: 3,
+            stale_reds: 2,
+            low_confidence: 2,
+            undecided: 1,
+            not_compared: 4,
+            unwritten: 0,
+        };
+        summary
+    }
+
+    #[test]
+    fn the_summary_says_who_was_marked_who_it_left_alone_and_where_it_was_unsure() {
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary: grouped_summary(),
+            })],
+            Verbosity::Normal,
+        );
+
+        assert!(
+            rendered.out.contains(
+                "groups: 3 · marked: 12 · red: 9 · unmarked: 3 (label not ours) · \
+                 red now the keeper: 2 · not compared: 4 · undecided: 1 · \
+                 low confidence: 2 groups\n"
+            ),
+            "the cull's own accounting, on one line: {}",
+            rendered.out
+        );
+        assert!(
+            !rendered.out.contains("low confidence: 2 groups\n\n"),
+            "and on one line only: {}",
+            rendered.out
+        );
+    }
+
+    #[test]
+    fn a_quiet_run_still_reports_the_groups_on_its_one_line() {
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary: grouped_summary(),
+            })],
+            Verbosity::Quiet,
+        );
+
+        assert!(
+            rendered
+                .out
+                .contains(" · low confidence: 2 groups · left out:"),
+            "a script that reads one line must not miss the frames the filter will not show: {}",
+            rendered.out
+        );
+    }
+
+    #[test]
+    fn a_run_that_judged_no_group_says_nothing_about_them() {
+        let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Normal);
+
+        assert!(
+            !rendered.out.contains("groups:"),
+            "a folder of singletons reads exactly as it did before: {}",
+            rendered.out
+        );
     }
 
     #[test]

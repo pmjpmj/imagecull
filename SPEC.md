@@ -322,6 +322,21 @@ opened read-only and never modified.
 | `imagecull:scoredAt` | RFC 3339, UTC | provenance: when |
 | `imagecull:version` | the binary's version | provenance: which build wrote it |
 
+A frame that lost its group also carries the verdict that made it red, so the
+red can be explained without the folder (ADR 0007):
+
+| property | value | why |
+|---|---|---|
+| `imagecull:groupKeeper` | `true` / `false` | whether this frame is its group's keeper — not a copy of the label, which may be missing or the photographer's |
+| `imagecull:groupStart` | the group's first frame's capture time, ISO 8601 | which moment it lost |
+| `imagecull:groupSize` | how many frames the group holds | how much of a choice it lost |
+| `imagecull:groupingHash` | the grouping hash's full hex | the thresholds the grouping was computed under, so a stale verdict is recognisable |
+| `imagecull:pickBy` | `comparison` | what chose the keeper |
+| `imagecull:pickConf` | the comparison's top-option probability | how sure the choice was, on every member |
+| `imagecull:pickedAt` | RFC 3339, UTC | when |
+| `imagecull:groupNote` | `not_compared` | why a frame of a group larger than the request could carry was not compared |
+| `imagecull:labeledBy` | `imagecull` | written with the label: the proof a later run may rewrite it |
+
 There is no `imagecull:stars`: the rating is `xmp:Rating`, and two properties
 holding one number is a disagreement waiting to happen. `xmpDM:pick` is never
 written, and `xmp:Rating=-1` (the destructive reject) is never written by this
