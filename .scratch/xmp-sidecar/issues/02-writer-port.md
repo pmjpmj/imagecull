@@ -2,7 +2,7 @@
 
 **Type:** task
 **Status:** ready-for-agent
-**Blocked by:** none
+**Blocked by:** 01
 **Spec:** [../spec.md](../spec.md) §"Modules and interfaces" (the `Writer` port),
 §"The sidecar document" (filename, atomicity), §"Statuses and exit behaviour"
 (backups), §"Implementation Decisions" (ingest)

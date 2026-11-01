@@ -52,6 +52,7 @@ pub mod reading;
 pub mod report;
 pub mod rubric;
 pub mod scoring;
+pub mod sidecar;
 pub mod systemone;
 pub mod version;
 

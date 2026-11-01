@@ -39,11 +39,14 @@ pub enum ErrorKind {
     Timeout,
     /// The answer was missing, misnamed, or of the wrong type.
     BadResponse,
+    /// The frame's existing sidecar has no description this tool can safely
+    /// write into, so the sidecar was left alone.
+    XmpUnreadable,
 }
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 10] = [
+    pub const ALL: [ErrorKind; 11] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
@@ -54,6 +57,7 @@ impl ErrorKind {
         ErrorKind::ServerUnreachable,
         ErrorKind::Timeout,
         ErrorKind::BadResponse,
+        ErrorKind::XmpUnreadable,
     ];
 
     /// The `status` string for this kind (never `"ok"`: that is the absence of
@@ -70,6 +74,7 @@ impl ErrorKind {
             ErrorKind::ServerUnreachable => "server_unreachable",
             ErrorKind::Timeout => "timeout",
             ErrorKind::BadResponse => "bad_response",
+            ErrorKind::XmpUnreadable => "xmp_unreadable",
         }
     }
 
@@ -104,6 +109,7 @@ impl ErrorKind {
                 Recovery::Continue
             }
             ErrorKind::Http413 | ErrorKind::BadResponse => Recovery::Continue,
+            ErrorKind::XmpUnreadable => Recovery::Continue,
             ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
             ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
@@ -305,6 +311,10 @@ mod tests {
                 "server_unreachable",
                 "timeout",
                 "bad_response",
+                // The sidecar's own failures: the rating's only home is the
+                // document beside the frame, so its refusals are frame statuses
+                // like any other.
+                "xmp_unreadable",
             ]
         );
         assert!(!strings.contains(&"ok"));
