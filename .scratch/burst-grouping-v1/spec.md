@@ -318,10 +318,14 @@ loudly.
   validated against a photographer's eye; a wrong metric must not be able to
   remove scores from a report.
 - **Multi-image requests.** Sending a group in one `/v1/systemone` call with a
-  `choice` question ("which of these is sharpest?") is a plausible later win —
-  one request per burst instead of N — but it breaks the one-frame-per-decision
-  attributability of SPEC §7.1 and needs a context-budget experiment (~512 px per
-  frame for eight frames). Not this slice, and not assumed by it.
+  `choice` question ("which of these is sharpest?") was out of scope for ticket
+  01's report-only slice; it is ticket 02's and 03's whole mechanism, and
+  [ADR 0008](../../docs/adr/0008-the-group-command-culls.md) makes `groups` the
+  command that spends it.
+- **A `score`-only cull.** Ticket 02 put the mark in `score`; ticket 03 moves it
+  to `groups`, so a folder needs `score` for ratings and `groups` for reds.
+  Report-only, the rule this list used to open with, is no longer true of
+  `groups`: it writes sidecars now.
 - **Straightening, cropping, retouching, or any write to an image.** Report-only.
 - **Collapsing a burst to one CSV row.** Answering SPEC §17 open question 4: no.
   One row per frame, group columns added; a filename never disappears.
@@ -336,12 +340,16 @@ loudly.
 
 ## Further Notes
 
-**Two issues, in order.**
+**Three issues, in order.**
 
 | issue | scope | done when |
 |---|---|---|
 | 01 | `group` + `measure` in core, and `imagecull groups <DIR>` — grouping and measures, model-free, no report wiring | the synthetic answer key ranks as expected, and a real shoot's groups have been eyeballed against the photographer's own picks |
 | 02 | `score` groups and measures; one comparative request per group; the keeper unmarked and every other frame `xmp:Label="Red"`; verdict in the `imagecull:` namespace; summary warnings for unmarked and stale reds | a burst-heavy shoot culls by filtering Red, and the photographer disagrees with the keeper more often than not only on frames they would have kept anyway |
+| 03 | the mark moves out of `score` and into `groups`; the comparison ignores `xmp:Rating`; groups over one request's worth are compared in rounds; our own red is retired on a promotion | `imagecull groups <DIR>` alone culls a rated folder, and `score` writes no label |
+
+Issue 03 supersedes 02's command split and its rating shortlist; see
+[ADR 0008](../../docs/adr/0008-the-group-command-culls.md).
 
 Issue 02 is `needs-info` until 01's evidence lands, because two of its inputs are
 numbers the evidence has to supply: which acutance formulation wins (`p95` local

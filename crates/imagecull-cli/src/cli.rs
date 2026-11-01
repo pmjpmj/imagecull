@@ -44,7 +44,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Score a shoot folder
     Score(ScoreArgs),
-    /// Group a shoot folder by moment and measure every frame, with no server
+    /// Group a shoot folder by moment and cull each group with clef
     Groups(GroupsArgs),
 }
 
@@ -56,8 +56,8 @@ pub struct CommonArgs {
     #[arg(long, value_name = "URL")]
     pub endpoint: Option<String>,
 
-    /// Model alias to check or score with: score defaults to the rubric's alias,
-    /// doctor and models to clef-flash-oQ4e
+    /// Model alias to ask: score defaults to the rubric's alias, doctor, groups
+    /// and models to clef-flash-oQ4e
     #[arg(short = 'm', long, value_name = "ALIAS")]
     pub model: Option<String>,
 
@@ -240,17 +240,21 @@ pub struct ScoreArgs {
     pub verbose: bool,
 }
 
-/// The model-free pass: which frames are the same moment, and what their own
-/// pixels say about them.
+/// The cull: which frames are the same moment, which frame clef chose to keep,
+/// and the red mark on the rest.
 ///
-/// Nothing here names a server, because nothing in this command asks one: the
-/// point of shipping the measures before they touch a score is that the whole
-/// technical pass runs on a shoot folder with the machine offline.
+/// The technical pass runs first and needs nothing: grouping and measuring are
+/// local CPU. The comparison is the part that asks a server, and `--no-cull`
+/// leaves it out, so the whole model-free pass is still one command on a machine
+/// with no model running.
 #[derive(Args, Debug)]
 pub struct GroupsArgs {
     /// The shoot folder to scan
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
+
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Where to write the measures CSV
     #[arg(long, value_name = "FILE", default_value = DEFAULT_GROUPS_CSV)]
@@ -284,12 +288,34 @@ pub struct GroupsArgs {
     #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
     pub jobs: Option<usize>,
 
-    /// Print only the summary, not the per-frame progress or the group lines
+    /// Group and measure only: make no request and write no label
+    #[arg(long, conflicts_with = "print_sidecars")]
+    pub no_cull: bool,
+
+    /// Ask clef, then print what each sidecar would become, writing nothing
+    #[arg(long, conflicts_with_all = ["no_cull", "quiet", "verbose"])]
+    pub print_sidecars: bool,
+
+    /// Write into a sidecar another application owns (darktable), which will
+    /// rewrite it from its own history
     #[arg(long)]
+    pub allow_foreign: bool,
+
+    /// Print only the summary, not the per-frame progress or the group lines
+    #[arg(long, conflicts_with = "verbose")]
     pub quiet: bool,
+
+    /// One line per group with the frames it compared and the keeper it found
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 impl GroupsArgs {
+    /// What this command's own flags said, for the config file to sit under.
+    pub fn overrides(&self) -> Resolved {
+        self.common.overrides()
+    }
+
     /// What this command actually runs with: the flags, over the defaults the
     /// core documents.
     pub fn options(&self) -> group::Options {
@@ -698,7 +724,7 @@ mod tests {
 
     #[test]
     fn every_command_takes_a_config_file_and_can_refuse_one() {
-        for command in ["score shoot", "doctor", "models"] {
+        for command in ["score shoot", "groups shoot", "doctor", "models"] {
             let arguments: Vec<&str> = command
                 .split(' ')
                 .chain(["--config", "mine.toml"])
@@ -708,11 +734,7 @@ mod tests {
                 Command::Score(args) => &args.common,
                 Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
-                // `groups` reads no config file: it names no server and writes
-                // one report, and its thresholds are the algorithm's, not a
-                // shoot's. It is deliberately not one of the commands a file
-                // configures.
-                Command::Groups(_) => continue,
+                Command::Groups(args) => &args.common,
             };
             assert_eq!(common.config, Some(PathBuf::from("mine.toml")), "{command}");
 
@@ -722,7 +744,7 @@ mod tests {
                 Command::Score(args) => &args.common,
                 Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
-                Command::Groups(_) => continue,
+                Command::Groups(args) => &args.common,
             };
             assert!(common.no_config, "{command}");
         }
@@ -863,10 +885,40 @@ mod tests {
     }
 
     #[test]
-    fn groups_asks_for_no_server_at_all() {
+    fn groups_takes_the_server_and_the_cull_flags() {
+        let Command::Groups(args) = parse(&[
+            "groups",
+            "shoot",
+            "--endpoint",
+            "http://127.0.0.1:9000",
+            "--model",
+            "clef-27b",
+            "--allow-foreign",
+            "--print-sidecars",
+        ]) else {
+            panic!("not a groups command");
+        };
+        assert_eq!(
+            args.common.endpoint.as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        assert_eq!(args.common.model.as_deref(), Some("clef-27b"));
+        assert!(args.allow_foreign);
+        assert!(args.print_sidecars);
+        assert!(!args.no_cull);
+
+        let Command::Groups(args) = parse(&["groups", "shoot", "--no-cull", "--verbose"]) else {
+            panic!("not a groups command");
+        };
+        assert!(args.no_cull);
+        assert!(args.verbose);
         assert!(
-            parse_result(&["groups", "shoot", "--endpoint", "http://127.0.0.1:9000"]).is_err(),
-            "a command that makes no request has no endpoint to take"
+            parse_result(&["groups", "shoot", "--no-cull", "--print-sidecars"]).is_err(),
+            "a pass that asks nothing cannot preview what an answer would write"
+        );
+        assert!(
+            parse_result(&["groups", "shoot", "--print-sidecars", "--quiet"]).is_err(),
+            "a preview run cannot also be silent about the blocks it prints"
         );
     }
 

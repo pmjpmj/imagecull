@@ -5,7 +5,6 @@
 //! temp file — and the requests are paid for exactly as a real run would pay them,
 //! because the point of the preview is to see what those requests would become.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -44,16 +43,20 @@ fn block(frame: &Path, document: &str, prior: Prior<'_>) -> String {
         "would create"
     };
     let mut out = format!("{}  {verb} {}\n", name_of(frame), name_of(&target));
-    let before: HashMap<String, String> = prior
-        .text()
-        .map(sidecar::properties_in)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    for (name, value) in sidecar::properties_in(document) {
-        match before.get(&name) {
-            Some(was) => out.push_str(&format!("  {name:<22} {value}      (was: {was})\n")),
+    let before = prior.text().map(sidecar::properties_in).unwrap_or_default();
+    let after = sidecar::properties_in(document);
+    for (name, value) in &after {
+        match before.iter().find(|(was, _)| was == name) {
+            Some((_, was)) => out.push_str(&format!("  {name:<22} {value}      (was: {was})\n")),
             None => out.push_str(&format!("  {name:<22} {value}      (was: none)\n")),
+        }
+    }
+    // A property this write removes is not in the document, so it is the one
+    // change a preview would otherwise hide: a promotion loses the red, and a
+    // reviewer has to see that before it happens.
+    for (name, was) in &before {
+        if after.iter().all(|(now, _)| now != name) {
+            out.push_str(&format!("  {name:<22} (removed)      (was: {was})\n"));
         }
     }
     out.push('\n');
@@ -136,7 +139,8 @@ mod tests {
             pick_by: "comparison".to_string(),
             pick_conf: 0.71,
             picked_at: "2026-11-19T09:31:00Z".to_string(),
-            note: None,
+            rounds: 1,
+            retire_label: false,
         }
     }
 
@@ -162,6 +166,37 @@ mod tests {
         assert!(
             block.contains("xmp:Rating             4      (was: 4)"),
             "the rating the label sits beside is unchanged, and the preview says so: {block}"
+        );
+    }
+
+    #[test]
+    fn a_removal_is_shown_with_the_colour_that_was_there_before() {
+        let rated = sidecar::render(None, &properties(4)).expect("a rated document");
+        let marked = sidecar::render_mark(&rated, &mark()).expect("a marked document");
+        let promoted = sidecar::render_mark(
+            &marked,
+            &sidecar::Mark {
+                label: None,
+                keeper: true,
+                retire_label: true,
+                ..mark()
+            },
+        )
+        .expect("a promoted document");
+
+        let block = block(
+            Path::new("/shoot/DSC_0421.NEF"),
+            &promoted,
+            Prior::Earlier(&marked),
+        );
+
+        assert!(
+            block.contains("xmp:Label              (removed)      (was: Red)\n"),
+            "a promotion removes our red, and a reviewer sees it go: {block}"
+        );
+        assert!(
+            block.contains("imagecull:labeledBy    (removed)      (was: imagecull)"),
+            "the proof goes with the label: {block}"
         );
     }
 }

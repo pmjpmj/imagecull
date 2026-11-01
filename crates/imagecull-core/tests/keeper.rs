@@ -5,13 +5,9 @@
 //! it needs a server. The one request that leaves the process is asserted in
 //! `systemone_http.rs`, where the body the adapter actually sends is recorded.
 
-use imagecull_core::keeper::{self, Budget, Candidate, Choice};
+use imagecull_core::keeper::{self, Budget, Choice};
 use imagecull_core::scoring::Response;
 use serde_json::json;
-
-fn candidate(rating: u8, acutance: Option<f64>) -> Candidate {
-    Candidate { rating, acutance }
-}
 
 /// An answer document as the server sends one, with the keeper it chose.
 fn answered(position: &str, confidence: f64) -> Response {
@@ -51,105 +47,70 @@ fn the_budget_is_the_measured_configuration_and_not_a_guess() {
 }
 
 #[test]
-fn a_group_inside_the_budget_is_compared_whole_and_in_capture_order() {
-    let group = [
-        candidate(4, Some(0.5)),
-        candidate(5, Some(0.4)),
-        candidate(3, Some(0.9)),
-    ];
+fn a_group_inside_one_request_is_one_chunk_in_capture_order() {
+    let places = [0, 1, 2];
 
     assert_eq!(
-        keeper::compared(&group, keeper::MAX),
-        [0, 1, 2],
-        "every frame of a group the budget holds is compared, in the order it was taken"
+        keeper::chunk(&places, keeper::MAX),
+        [vec![0, 1, 2]],
+        "every frame of a group the budget holds is compared in one request, in the order it was \
+         taken"
     );
 }
 
 #[test]
-fn a_group_over_the_budget_keeps_the_best_rated_frames_and_leaves_the_rest_out() {
-    let group = [
-        candidate(2, Some(0.9)),
-        candidate(5, Some(0.1)),
-        candidate(3, Some(0.5)),
-        candidate(2, Some(0.2)),
-    ];
+fn a_group_over_one_request_is_split_in_capture_order_and_drops_no_frame() {
+    let places: Vec<usize> = (0..45).collect();
+
+    let chunks = keeper::chunk(&places, keeper::MAX);
 
     assert_eq!(
-        keeper::compared(&group, 2),
-        [1, 2],
-        "the two best-rated frames are compared; the rating decides, and only the rating"
+        chunks,
+        [
+            (0..20).collect::<Vec<_>>(),
+            (20..40).collect::<Vec<_>>(),
+            (40..45).collect::<Vec<_>>()
+        ],
+        "consecutive frames of the moment, at most one request's worth each, and the remainder \
+         carried rather than dropped"
+    );
+    assert_eq!(
+        chunks.iter().flatten().count(),
+        places.len(),
+        "every frame of the group is compared by clef: no measure and no rating narrows who is \
+         looked at"
     );
 }
 
 #[test]
-fn an_equal_rating_is_broken_by_acutance_and_an_unmeasured_frame_loses_to_a_number() {
-    let group = [
-        candidate(4, Some(0.30)),
-        candidate(4, None),
-        candidate(4, Some(0.80)),
-        candidate(4, Some(0.55)),
-    ];
-
-    assert_eq!(
-        keeper::compared(&group, 2),
-        [2, 3],
-        "the two sharpest of four equal ratings: the frame nothing could be measured from sorts \
-         below every frame that has a number, however low"
-    );
+fn chunks_never_exceed_the_request_and_a_small_group_is_never_padded() {
+    for (frames, max) in [(1usize, 20usize), (20, 20), (21, 20), (0, 20), (5, 1)] {
+        let places: Vec<usize> = (0..frames).collect();
+        let chunks = keeper::chunk(&places, max);
+        assert!(
+            chunks.iter().all(|chunk| chunk.len() <= max.max(1)),
+            "{frames} frames at {max} per request: {chunks:?}"
+        );
+        assert_eq!(
+            chunks.iter().flatten().copied().collect::<Vec<_>>(),
+            places,
+            "{frames} frames at {max} per request: every place survives, in order"
+        );
+    }
 }
 
 #[test]
-fn a_shortlist_is_a_function_of_the_group_and_not_of_the_order_it_arrived_in() {
-    let first = [
-        candidate(4, Some(0.30)),
-        candidate(4, Some(0.30)),
-        candidate(4, Some(0.10)),
-    ];
-    let second = [
-        candidate(4, Some(0.10)),
-        candidate(4, Some(0.30)),
-        candidate(4, Some(0.30)),
-    ];
-
-    let left = keeper::compared(&first, 2);
-    let right = keeper::compared(&second, 2);
-
-    assert_eq!(left, [0, 1], "equal frames keep their capture order");
+fn the_lowest_confidence_on_a_winner_path_is_the_one_recorded() {
     assert_eq!(
-        right,
-        [1, 2],
-        "and the same two are chosen whatever the order"
-    );
-}
-
-#[test]
-fn a_group_of_twenty_five_is_narrowed_to_the_measured_twenty_frames() {
-    let group: Vec<Candidate> = (0..25)
-        .map(|index| {
-            candidate(
-                u8::try_from(index % 5).unwrap_or(0) + 1,
-                Some(f64::from(index)),
-            )
-        })
-        .collect();
-
-    let compared = keeper::compared(&group, keeper::MAX);
-
-    assert_eq!(
-        compared.len(),
-        20,
-        "20 previews at 512 px is a quarter of the 16,384-token budget: the cap is the rule, not a \
-         limit discovered from a 413"
-    );
-    assert!(
-        compared.iter().all(|&index| group[index].rating > 1),
-        "and what is left out is chosen by the rating: only the two weakest frames are: \
-         {compared:?}"
+        keeper::shakiest([0.83, 0.55, 0.91]),
+        0.55,
+        "a tournament's last call can be certain about two frames whose membership in the final \
+         was itself a coin flip"
     );
     assert_eq!(
-        compared.len(),
-        group.iter().filter(|frame| frame.rating > 1).count(),
-        "nothing rated above the weakest five is left out"
+        keeper::shakiest([0.9]),
+        0.9,
+        "a group compared in one request records that request's confidence"
     );
 }
 

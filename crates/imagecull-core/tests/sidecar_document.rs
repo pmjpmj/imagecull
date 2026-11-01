@@ -203,7 +203,8 @@ fn mark(label: Option<&'static str>) -> sidecar::Mark {
         pick_by: "comparison".to_string(),
         pick_conf: 0.71,
         picked_at: "2026-11-19T09:31:00Z".to_string(),
-        note: None,
+        rounds: 1,
+        retire_label: false,
     }
 }
 
@@ -227,6 +228,7 @@ fn a_non_keepers_verdict_writes_the_red_and_the_facts_that_explain_it() {
              imagecull:groupingHash=\"2c7d90ab1f\" \
              imagecull:pickBy=\"comparison\" \
              imagecull:pickConf=\"0.71\" \
+             imagecull:pickRounds=\"1\" \
              imagecull:pickedAt=\"2026-11-19T09:31:00Z\"/>"
         ),
         "the verdict joins the rating without disturbing a byte of it"
@@ -300,24 +302,111 @@ fn a_rating_write_leaves_a_verdict_beside_it_alone() {
 }
 
 #[test]
-fn a_note_this_write_does_not_repeat_is_retired_and_nothing_else_is() {
-    let mut first = mark(Some(sidecar::RED));
-    first.note = Some("not_compared");
-    let marked = sidecar::render_mark(
-        &sidecar::render(None, &properties()).expect("a document"),
-        &first,
-    )
-    .expect("a marked document");
+fn a_note_an_older_build_wrote_is_retired_and_nothing_else_is() {
+    let rated = sidecar::render(None, &properties()).expect("a document");
+    // What ticket 02's build left on a frame the request could not carry: the
+    // property is gone from this build, and ours are ours to retire.
+    let older = rated.replace(
+        "imagecull:version=\"0.1.0\"/>",
+        "imagecull:version=\"0.1.0\" imagecull:groupNote=\"not_compared\"/>",
+    );
 
-    let document =
-        sidecar::render_mark(&marked, &mark(Some(sidecar::RED))).expect("a re-marked document");
+    let document = sidecar::render_mark(&older, &mark(Some(sidecar::RED))).expect("a mark");
 
     assert!(
         !document.contains("imagecull:groupNote"),
-        "a frame that was compared this time no longer carries the note that said it was not: \
-         {document}"
+        "an older build's note is not left behind: {document}"
     );
     assert!(document.contains("xmp:Rating=\"4\""), "{document}");
+    assert!(document.contains("xmp:Label=\"Red\""), "{document}");
+}
+
+#[test]
+fn a_verdict_names_how_many_rounds_it_took() {
+    let rated = sidecar::render(None, &properties()).expect("a document");
+    let mut two_rounds = mark(Some(sidecar::RED));
+    two_rounds.rounds = 2;
+
+    let document = sidecar::render_mark(&rated, &two_rounds).expect("a marked document");
+
+    assert!(
+        document.contains("imagecull:pickRounds=\"2\""),
+        "a group compared in batches says so, so a verdict is never read as one request's \
+         certainty: {document}"
+    );
+}
+
+#[test]
+fn a_promoted_keeper_loses_the_red_this_tool_wrote() {
+    let rated = sidecar::render(None, &properties()).expect("a rated document");
+    let marked =
+        sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
+    let mut promoted = mark(None);
+    promoted.retire_label = true;
+
+    let document = sidecar::render_mark(&marked, &promoted).expect("a promoted document");
+
+    assert!(
+        !document.contains("xmp:Label"),
+        "the red this tool wrote is gone: a repeatable cull may not leave the new keeper red: \
+         {document}"
+    );
+    assert!(
+        !document.contains("imagecull:labeledBy"),
+        "and the proof goes with it, so a colour the photographer sets next is theirs: {document}"
+    );
+    assert!(
+        document.contains("imagecull:groupKeeper=\"true\""),
+        "the verdict this run reached is still recorded: {document}"
+    );
+    assert!(document.contains("xmp:Rating=\"4\""), "{document}");
+}
+
+#[test]
+fn a_red_without_our_proof_survives_a_promotion() {
+    let theirs = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+                  <rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                  xmp:Rating=\"4\" xmp:Label=\"Red\"/></x:xmpmeta>";
+    let mut promoted = mark(None);
+    promoted.retire_label = true;
+
+    let document = sidecar::render_mark(theirs, &promoted).expect("a promoted document");
+
+    assert!(
+        document.contains("xmp:Label=\"Red\""),
+        "a red this tool did not write is never removed, whatever the verdict says: {document}"
+    );
+    assert!(
+        !document.contains("imagecull:labeledBy"),
+        "and the run does not claim it: {document}"
+    );
+}
+
+#[test]
+fn a_singleton_retirement_removes_our_red_and_the_verdict_and_keeps_the_rating() {
+    let rated = sidecar::render(None, &properties()).expect("a rated document");
+    let marked =
+        sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
+
+    let document = sidecar::retire_label(&marked).expect("a retired document");
+
+    assert!(!document.contains("xmp:Label"), "{document}");
+    assert!(!document.contains("imagecull:labeledBy"), "{document}");
+    assert!(
+        !document.contains("imagecull:groupKeeper") && !document.contains("imagecull:pickConf"),
+        "a frame that is no longer in a group carries no verdict about one: {document}"
+    );
+    assert!(
+        document.contains("xmp:Rating=\"4\"") && document.contains("imagecull:version="),
+        "everything the rating owns is untouched: {document}"
+    );
+
+    let theirs = marked.replace("imagecull:labeledBy=\"imagecull\" ", "");
+    let kept = sidecar::retire_label(&theirs).expect("a kept document");
+    assert!(
+        kept.contains("xmp:Label=\"Red\""),
+        "a red without our proof is the photographer's, group or no group: {kept}"
+    );
 }
 
 #[test]

@@ -33,7 +33,7 @@
 //! the two thresholds. [`grouping_hash`] covers the algorithm version, the
 //! signature parameters and the thresholds, and nothing else — never a
 //! filename, never the order the scan happened to list. Change a threshold and
-//! every group rank computed under the old hash is invalid, exactly as changing
+//! every verdict computed under the old hash is invalid, exactly as changing
 //! rubric wording invalidates scores.
 
 use std::collections::BTreeMap;
@@ -486,6 +486,9 @@ pub struct Planned {
     pub group_index: usize,
     /// How many frames the group holds.
     pub group_size: usize,
+    /// When the camera's clock says it was taken: the group's start when this
+    /// frame opens one, and what a verdict records.
+    pub captured: Option<Capture>,
     /// What its pixels said; all `None` when they could not be read.
     pub measures: Measures,
     /// Why there are no measures, when there are none.
@@ -689,6 +692,7 @@ pub fn run_with(shoot: &Path, options: &Options, watcher: &dyn Watcher) -> Resul
                 group: number + 1,
                 group_index: place + 1,
                 group_size: grouping.members.len(),
+                captured: reading.facts.captured,
                 measures: reading.measures,
                 failure: reading.failure.clone(),
             });

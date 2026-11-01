@@ -22,12 +22,13 @@ orientation.
 _Avoid_: thumbnail, resized image, payload
 
 **Run**:
-One invocation of scoring over a shoot folder, from the scan to the summary.
+One invocation over a shoot folder, from the scan to the summary: a `score` run
+rates frames, a `groups` run groups them and marks the ones it would not keep.
 _Avoid_: session, job, batch, process
 
 **Cull**:
-The act of deciding which frames to keep. The tool rates; the photographer
-culls.
+The act of deciding which frames to keep. The tool rates every frame and marks
+the ones that lost their group; the photographer decides what to do about them.
 
 ### How frames relate
 
@@ -54,17 +55,6 @@ model — acutance, shake, roll, clipping, the camera's focus report. Comparable
 between frames of one group, never a score out of ten.
 _Avoid_: metric, score, technical score, quality score
 
-**Ranking rule**:
-The ordered criteria over named measures that names a group's best frame —
-exclusions first, then the model's rating among survivors. Declared in full,
-never a weighted composite.
-_Avoid_: ranking score, picker, weighting
-
-**Group rank**:
-A frame's place within its group under the ranking rule, 1 being the group's
-best. Not comparable between groups, and not a score.
-_Avoid_: winner score, rating, position
-
 **Keeper**:
 The frame of a group the group's comparison chose to keep, when the group has
 more than one. A judgement about a set of frames, made once for the group, never
@@ -77,11 +67,24 @@ Every other frame of a group. The frame the cull has to get past, not a frame th
 tool has judged bad.
 _Avoid_: loser, reject, reject flag, duplicate, outtake
 
+**Comparison**:
+The one relative question a group asks the model — which of these frames to
+keep — carrying a preview of every frame it covers. Never a rating, and never
+narrowed by one.
+_Avoid_: ranking, vote, tournament
+
+**Round**:
+One comparison per batch of a group too large for a single request. The batches'
+winners are compared again until one frame survives, so every frame of the group
+enters a request.
+_Avoid_: pass, stage, heat
+
 **Red mark**:
 The `xmp:Label` value `Red`, written to a group's non-keepers so the cull can
 filter for them. A statement about the group, not a rating and not a reject:
-written only where the label is ours to write, and never removed, because a
-label this tool did not write is not a label it may delete.
+written only where the label is ours to write, and removed only when our own
+later verdict promotes that frame to keeper — a red this tool did not write is
+never touched.
 _Avoid_: flag, reject, colour label, label (unqualified)
 
 ### What a run reads
@@ -158,7 +161,6 @@ _Avoid_: cache hit, skip
 The one-line record a run prints as each frame is judged: where the frame sits
 in the run, its answer, what the request cost, and when the run will finish.
 One per frame and ended by a newline, so a redirected log reads the same as a
-terminal. The model-free pass prints one too, as each frame is measured: where
-it sits, its name, and its status, in the pass's own order, because the frame's
-group is not known until the last frame has been read.
+terminal. A `groups` run prints one as each frame is measured, and one per group
+as each group is compared: `group 3 · 12 frames · keeper DSC_0104.NEF · 11 red`.
 _Avoid_: progress line, status line, log line, spinner

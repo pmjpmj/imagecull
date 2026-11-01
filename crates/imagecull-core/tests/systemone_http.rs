@@ -26,8 +26,8 @@ use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::systemone::Adapter;
 use serde_json::{Value, json};
+use support::ExifFacts;
 use support::stub::Stub;
-use support::{ExifFacts, Warnings};
 use tempfile::TempDir;
 
 /// A complete, well-formed answer: one choice for the one question.
@@ -851,66 +851,69 @@ fn moment() -> TempDir {
 }
 
 #[test]
-fn a_group_that_413s_names_its_status_in_the_warning_a_photographer_reads() {
+fn a_group_that_413s_is_undecided_and_marks_nothing() {
     let shoot = moment();
     let stub = Stub::serving(
-        vec![
-            (200, answer_document()),
-            (200, answer_document()),
-            (
-                413,
-                json!({"message": "the schema needs 19810 tokens before the state; the limit is 16384"})
-                    .to_string(),
-            ),
-        ],
+        vec![(
+            413,
+            json!({"message": "the schema needs 19810 tokens before the state; the limit is 16384"})
+                .to_string(),
+        )],
         &["clef-flash-oQ4e"],
     );
-    let config = Config::new(
-        Builtin::General.rubric().expect("parse"),
-        None,
-        Params::default(),
-        ingest::ScanOptions::default(),
-        None,
-        support::unwatched(),
-    );
-    let warnings = Warnings::default();
-
-    let run = scoring::run(
+    let plan = imagecull_core::group::run(
         shoot.path(),
+        &imagecull_core::group::Options {
+            scan: ingest::ScanOptions::default(),
+            thresholds: imagecull_core::group::Thresholds::default(),
+            jobs: Some(1),
+        },
+    )
+    .expect("a plan");
+    let config = imagecull_core::cull::Config {
+        model: "clef-flash-oQ4e",
+        shoot_context: None,
+        budget: keeper::Budget::default(),
+        params: Params::default(),
+        grouping_hash: &plan.hash,
+        allow_foreign: false,
+        retry: scoring::RetryPolicy::without_waiting(),
+    };
+
+    let culled = imagecull_core::cull::run(
+        &plan,
         &config,
-        &adapter(&stub, &config.model),
+        &adapter(&stub, config.model),
         &imagecull_core::sidecar::Filesystem,
-        &warnings,
-        &Cancel::new(),
+        &imagecull_core::cull::Silent,
     )
     .expect("a rejected group is not a rejected run");
 
-    assert_eq!(posts(&stub).len(), 3, "two frames and one comparison");
-    assert_eq!(run.groups.undecided, 1);
+    assert_eq!(posts(&stub).len(), 1, "one group, one comparison");
+    assert_eq!(culled.undecided, 1);
     assert_eq!(
-        run.groups.non_keepers, 0,
+        culled.non_keepers, 0,
         "a group with no answer marks nothing"
     );
-    let messages = warnings.messages();
-    assert_eq!(messages.len(), 1, "{messages:?}");
-    assert!(
-        messages[0].contains(ErrorKind::Http413.as_str()),
-        "the group path names the status the frame path's rows carry — `{}` — so a photographer \
-         and a script read the same word: {}",
-        ErrorKind::Http413.as_str(),
-        messages[0]
+    let failure = culled.verdicts[0]
+        .failure
+        .as_ref()
+        .expect("the group says why it has no keeper");
+    assert_eq!(
+        failure.kind,
+        ErrorKind::Http413,
+        "the group names the status the frame path's rows carry, so a photographer and a script \
+         read the same word"
     );
     assert!(
-        messages[0].contains("nothing was marked"),
-        "and says that nothing was filtered: {}",
-        messages[0]
+        failure.message.contains("413") && failure.message.contains("nothing was marked"),
+        "the message carries the status and says nothing was filtered: {}",
+        failure.message
     );
     for name in ["DSC_0001.NEF", "DSC_0002.NEF"] {
-        let text = fs::read_to_string(imagecull_core::sidecar::path_for(&shoot.path().join(name)))
-            .expect("a sidecar");
         assert!(
-            !text.contains("xmp:Label") && !text.contains("imagecull:groupKeeper"),
-            "{name} keeps its rating and gets no verdict: {text}"
+            !imagecull_core::sidecar::path_for(&shoot.path().join(name)).exists(),
+            "{name} was never rated and a refused group writes no verdict"
         );
     }
 }

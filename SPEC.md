@@ -290,8 +290,9 @@ and how a skipped frame can be explained: changing wording means a re-score need
 
 ## 9. Output — one sidecar per frame
 
-A run writes the rating into an XMP sidecar beside the frame it judged, and
-nothing else. `DSC_0001.NEF` → `DSC_0001.xmp`: the base name with the extension
+A `score` run writes the rating into an XMP sidecar beside the frame it judged,
+and nothing else; an `imagecull groups` run writes the group's verdict and the
+red mark that follows from it, and no rating. `DSC_0001.NEF` → `DSC_0001.xmp`: the base name with the extension
 replaced, never `DSC_0001.NEF.xmp`, which is darktable's history file. The raws are
 opened read-only and never modified.
 
@@ -323,7 +324,7 @@ opened read-only and never modified.
 | `imagecull:version` | the binary's version | provenance: which build wrote it |
 
 A frame that lost its group also carries the verdict that made it red, so the
-red can be explained without the folder (ADR 0007):
+red can be explained without the folder (ADR 0008):
 
 | property | value | why |
 |---|---|---|
@@ -334,16 +335,18 @@ red can be explained without the folder (ADR 0007):
 | `imagecull:pickBy` | `comparison` | what chose the keeper |
 | `imagecull:pickConf` | the comparison's top-option probability | how sure the choice was, on every member |
 | `imagecull:pickedAt` | RFC 3339, UTC | when |
-| `imagecull:groupNote` | `not_compared` | why a frame of a group larger than the request could carry was not compared |
-| `imagecull:labeledBy` | `imagecull` | written with the label: the proof a later run may rewrite it |
+| `imagecull:pickRounds` | how many comparative requests the verdict took | a group compared in batches never reads as one request's certainty |
+| `imagecull:labeledBy` | `imagecull` | written with the label: the proof a later run may rewrite or retire it |
 
 There is no `imagecull:stars`: the rating is `xmp:Rating`, and two properties
 holding one number is a disagreement waiting to happen. `xmpDM:pick` is never
 written, and `xmp:Rating=-1` (the destructive reject) is never written by this
 tool. `xmp:Label` is written in exactly one case — `Red` on a group's
-non-keepers, and only where the label is absent or was written by a previous run
-([ADR 0007](docs/adr/0007-the-red-label-marks-the-non-keepers.md)); every other
-label, on every other frame, stays the photographer's.
+non-keepers, and only where the label is absent or was written by a previous run;
+a red this tool wrote is retired when a later run promotes the frame to keeper,
+and a label without `imagecull:labeledBy` is never touched
+([ADR 0008](docs/adr/0008-the-group-command-culls.md)). Every other label, on
+every other frame, stays the photographer's.
 
 ### 9.2 Merge, not replace
 
@@ -452,12 +455,13 @@ imagecull score <DIR> [OPTIONS]
         --config <FILE>         read this config file instead of the discovered one
         --no-config             ignore any config file; built-in defaults only
 
+imagecull groups <DIR>         # group by moment, cull each group with clef, mark the reds
 imagecull models               # GET /v1/models, flag decision models
 imagecull doctor [FILE.nef]    # server reachability + preview extraction self-test
 imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:Rating
 ```
 
-`--config` and `--no-config` are on all three subcommands (`§11.1`).
+`--config` and `--no-config` are on every subcommand (`§11.1`).
 
 One line per frame — `142/400  DSC_0555.NEF  4★  812ms  eta 3m10s`, `5★ kept` for a
 frame whose sidecar already had a rating, and `duplicate of DSC_0540.NEF` when an

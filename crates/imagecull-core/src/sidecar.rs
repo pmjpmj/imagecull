@@ -45,10 +45,6 @@ const DESCRIPTION: &str = "<rdf:Description";
 /// keeper", never "bad". A 4★ frame that lost to a 5★ is correctly red.
 pub const RED: &str = "Red";
 
-/// The note a frame carries when it was left out of its group's comparison:
-/// the request could not carry every frame, and this one was not compared.
-pub const NOT_COMPARED: &str = "not_compared";
-
 /// The value of `imagecull:labeledBy` on a frame whose label this tool wrote:
 /// the proof a later run needs before it may touch that label, and the only
 /// thing that makes a red attributable to us rather than to the photographer.
@@ -105,8 +101,8 @@ fn shape() -> (Vec<Property>, Vec<Property>) {
         version: String::new(),
     };
     let mark = Mark {
-        // A label and a note are set, so the properties only a marked or a
-        // narrowed frame carries are named too.
+        // A label is set, so the properties only a marked frame carries are
+        // named too.
         label: Some(RED),
         keeper: false,
         group_start: String::new(),
@@ -115,7 +111,8 @@ fn shape() -> (Vec<Property>, Vec<Property>) {
         pick_by: String::new(),
         pick_conf: 0.0,
         picked_at: String::new(),
-        note: Some(NOT_COMPARED),
+        rounds: 2,
+        retire_label: false,
     };
     (our_properties(&properties), mark_properties(&mark))
 }
@@ -171,8 +168,17 @@ pub struct Mark {
     pub pick_conf: f64,
     /// When the verdict was reached, RFC 3339 in UTC.
     pub picked_at: String,
-    /// Why this frame was not compared, when it was not.
-    pub note: Option<&'static str>,
+    /// How many comparative requests stood between the group and this verdict:
+    /// one for a group a single request could carry, more when it was compared
+    /// in batches.
+    pub rounds: usize,
+    /// Whether this write removes the label a previous run of this tool put
+    /// here: the promotion case, where a red would otherwise sit on the group's
+    /// keeper forever.
+    ///
+    /// Only a label carrying our `labeledBy` proof is ever removed; a red with
+    /// no proof is the photographer's, whatever this flag says.
+    pub retire_label: bool,
 }
 
 /// The document to write for one frame's rating: `existing` when there is one to
@@ -194,7 +200,59 @@ pub fn render(existing: Option<&str>, properties: &Properties) -> Result<String>
 /// ever added to a frame this run has just rated, so a merge with nothing to
 /// merge into is a caller's bug and not a document this module has to invent.
 pub fn render_mark(rated: &str, mark: &Mark) -> Result<String> {
-    merge(rated, &mark_properties(mark), retirable_by_mark())
+    debug_assert!(
+        !(mark.retire_label && mark.label.is_some()),
+        "a write either puts a label on a frame or takes ours off, never both"
+    );
+    let mut retirable = retirable_by_mark().to_vec();
+    if mark.retire_label && label_is_ours(rated) {
+        retirable.push("xmp:Label");
+        retirable.push(LABELED_BY_NAME);
+    }
+    merge(rated, &mark_properties(mark), &retirable)
+}
+
+/// The document to write for one frame's verdict, whether or not the frame has
+/// a sidecar: a rated frame's document is merged into, and a frame this tool has
+/// never written gets one holding the verdict and nothing else.
+pub fn mark_document(existing: Option<&str>, mark: &Mark) -> Result<String> {
+    match existing {
+        Some(text) => render_mark(text, mark),
+        None => Ok(new_document(&mark_properties(mark))),
+    }
+}
+
+/// Whether this document carries a group's verdict: what makes a frame a
+/// candidate for retirement when it is no longer in any group.
+pub fn has_verdict(document: &str) -> bool {
+    properties_in(document).iter().any(|(name, _)| {
+        name.starts_with("imagecull:group")
+            || name.starts_with("imagecull:pick")
+            || name == LABELED_BY_NAME
+    })
+}
+
+/// The document to write when a frame keeps no group's verdict: every property
+/// a verdict owns is retired, and the red this tool wrote goes with them.
+///
+/// A frame that was a group's non-keeper and is now alone in its group would
+/// otherwise keep a red for a comparison that no longer exists. Nothing the
+/// rating owns is touched, and a label this tool did not write is left exactly
+/// where the photographer put it.
+pub fn retire_label(document: &str) -> Result<String> {
+    let mut retirable = retirable_by_mark().to_vec();
+    if label_is_ours(document) {
+        retirable.push("xmp:Label");
+        retirable.push(LABELED_BY_NAME);
+    }
+    merge(document, &[], &retirable)
+}
+
+/// Whether the label this document carries was written by this tool: the proof
+/// `labeledBy` exists to give, asked in one place so a write and a removal
+/// cannot disagree about whose red it is.
+fn label_is_ours(document: &str) -> bool {
+    existing_label(document).is_some_and(|label| label.ours)
 }
 
 /// A whole new sidecar for a frame that has none, holding `owned` and nothing
@@ -325,10 +383,8 @@ fn mark_properties(mark: &Mark) -> Vec<Property> {
     owned.push(("imagecull:groupingHash", mark.grouping_hash.clone()));
     owned.push(("imagecull:pickBy", mark.pick_by.clone()));
     owned.push(("imagecull:pickConf", mark.pick_conf.to_string()));
+    owned.push(("imagecull:pickRounds", mark.rounds.to_string()));
     owned.push(("imagecull:pickedAt", mark.picked_at.clone()));
-    if let Some(note) = mark.note {
-        owned.push(("imagecull:groupNote", note.to_string()));
-    }
     owned
 }
 
@@ -348,8 +404,13 @@ fn is_current(attributes: &[Attribute], ours: &[Property], retirable: &[&str]) -
 /// Whether a merge retires `name`: a property of ours that this build does not
 /// write at all, or one this write owns and did not produce.
 fn retires(name: &str, ours: &[Property], retirable: &[&str]) -> bool {
-    if !name.starts_with("imagecull:") || ours.iter().any(|(owned, _)| *owned == name) {
+    if ours.iter().any(|(owned, _)| *owned == name) {
         return false;
+    }
+    if !name.starts_with("imagecull:") {
+        // The one property outside our namespace this tool may remove is the
+        // label it wrote itself, and only when the write in hand asks for it.
+        return name == "xmp:Label" && retirable.contains(&name);
     }
     retirable.contains(&name) || !written().contains(&name)
 }

@@ -1,8 +1,9 @@
-//! Which frame of a group to keep: one comparative request, and the verdict.
+//! Which frame of a group to keep: one comparative request per round, and the
+//! verdict.
 //!
 //! The question a group asks is *relative* — "of these twelve, which one" — and
 //! the only thing that can answer it is a request that shows the model all of
-//! them at once. So a group of two or more gets one
+//! them at once. So a group of two or more gets a
 //! [`Comparison`](crate::keeper::Comparison): several previews of one moment, a
 //! `choice` question keyed by position, and one answer naming the frame to keep.
 //!
@@ -12,19 +13,27 @@
 //! pixel area: 1,639 at 1568 px, 696 at 1024, 201 at 512. Over the cap it answers
 //! `413` and drops nothing, so a whole-group answer or a reported failure are the
 //! only two outcomes — but a request that 413s has already been built, paid for
-//! and refused. So the request is built to fit: previews at [`EDGE`] px, at most
-//! [`MAX`] of them (4,154 tokens, a quarter of the budget, measured), and a group
-//! that holds more is narrowed to the [`MAX`] frames most worth comparing —
-//! highest rating first, ties broken by [`acutance`](crate::measure) because the
-//! rating is the model's judgement and the measure is the only other thing that
-//! can order two equally-rated frames. That narrowing chooses **who is compared**,
-//! never a rating, and the frames it leaves out are still marked as non-keepers.
+//! and refused. So the request is built to fit: previews at [`EDGE`] px and at
+//! most [`MAX`] of them (4,154 tokens, a quarter of the budget, measured).
+//!
+//! # A group larger than one request is compared in rounds
+//!
+//! Nothing narrows a group before the model has seen it. A group the budget holds
+//! is compared whole; a larger one is split by [`chunk`] into consecutive batches
+//! of at most [`MAX`] frames, each batch answered by one request, and the batch
+//! winners compared again, until one survives. Every frame of the group enters a
+//! request, which is the point: the per-frame rating cannot see the alternatives,
+//! so it is not allowed to decide who is compared — and neither is a measure.
+//!
+//! Rounds cost requests: a 60-frame burst is three batches and one final, where a
+//! shortlist would have paid one. That is the price of the model answering about
+//! every frame, and [`shakiest`] is how the run keeps the price visible.
 //!
 //! # What this module does not do
 //!
 //! Nothing here prints, writes a file, or knows about a sidecar. The verdict is
 //! returned as data — who won, how sure the answer was — and
-//! [`scoring`](crate::scoring) records it. The one model call goes through
+//! [`cull`](crate::cull) records it. The one model call goes through
 //! [`Decider::compare`](crate::scoring::Decider::compare), the same seam every
 //! per-frame request goes through, so the whole feature is testable with no
 //! server running.
@@ -101,48 +110,34 @@ impl Default for Budget {
     }
 }
 
-/// One frame of a group, as the choice among them is made: the judgement it
-/// already carries, and the one measure that can order two equal judgements.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Candidate {
-    /// The rating the frame was given, 1–5.
-    pub rating: u8,
-    /// How sharp it is, when it could be measured.
-    pub acutance: Option<f64>,
-}
-
-/// Which of a group's frames enter its comparison, as indices into
-/// `candidates`, in capture order.
+/// How a group larger than one request is compared: consecutive batches of at
+/// most `max` places, in capture order.
 ///
-/// A group no larger than the budget is compared whole. A larger one keeps the
-/// best-rated frames, breaks a rating tie on acutance, and leaves the rest out:
-/// the rating is the judgement the model is good at, and acutance is the only
-/// other fact in hand. A frame with no acutance sorts below one that has a
-/// number — a measure that failed is not a sharp frame.
-pub fn compared(candidates: &[Candidate], max: usize) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_by(|&left, &right| {
-        let (first, second) = (&candidates[left], &candidates[right]);
-        second
-            .rating
-            .cmp(&first.rating)
-            .then_with(|| sharpness(second.acutance).total_cmp(&sharpness(first.acutance)))
-            // Equal judgements and equal measures: the earlier frame first, so
-            // the shortlist is a function of the group and not of a sort's mood.
-            .then_with(|| left.cmp(&right))
-    });
-    order.truncate(max.max(1));
-    // Back into capture order: the criteria the model reads are positions in a
-    // group, not a ranking, and the answer has to be a frame rather than a
-    // order the model was silently handed.
-    order.sort_unstable();
-    order
+/// The batches of one round hold every place exactly once, and the last batch
+/// carries the remainder rather than dropping it. The caller compares each batch
+/// and passes the winners back through the same function, so a group of any size
+/// is reduced to one frame without a frame ever leaving the comparison.
+///
+/// `max` is `0` only through a caller's bug; one place per request is the floor,
+/// because a batch nothing can be sent with would lose the group rather than
+/// compare it.
+pub fn chunk(places: &[usize], max: usize) -> Vec<Vec<usize>> {
+    let width = max.max(1);
+    places.chunks(width).map(<[usize]>::to_vec).collect()
 }
 
-/// A frame's acutance as a sort key, with "could not be measured" below every
-/// number rather than at zero.
-fn sharpness(acutance: Option<f64>) -> f64 {
-    acutance.unwrap_or(f64::NEG_INFINITY)
+/// The shakiest call a verdict depended on: the lowest top-option probability on
+/// the winner's path through the rounds.
+///
+/// A tournament's final call can be a near-certainty about two frames whose
+/// membership in the final was itself a coin flip. Recording the final round's
+/// confidence alone would report a group as sure that was not, so every round the
+/// winner survived contributes, and the weakest one is what the sidecar carries.
+/// An empty path is `1.0`: a verdict is never reached without a call.
+pub fn shakiest(confidences: impl IntoIterator<Item = f64>) -> f64 {
+    confidences
+        .into_iter()
+        .fold(1.0_f64, |lowest, value| lowest.min(value))
 }
 
 /// One group's comparative request: several frames of one moment, and the

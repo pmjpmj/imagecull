@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, ErrorKind, ExitCode, Result};
-use crate::group::{self, Thresholds};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
-use crate::keeper::{self, Choice, Comparison};
+use crate::keeper::Comparison;
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::progress::{
@@ -218,14 +217,6 @@ pub struct Config {
     pub model: String,
     /// How much picture to send.
     pub params: Params,
-    /// How close two frames have to be to be one moment.
-    ///
-    /// The algorithm's own defaults: `score` groups with the same thresholds
-    /// `imagecull groups` reports, and the hash those thresholds make is what a
-    /// sidecar records.
-    pub grouping: Thresholds,
-    /// What one comparative request may carry, and how sure its answer has to be.
-    pub comparison: keeper::Budget,
     /// Which files a run covers.
     pub scan: ScanOptions,
     /// The photographer's framing of the shoot, when they gave one.
@@ -272,8 +263,6 @@ impl Config {
             rubric,
             model,
             params,
-            grouping: Thresholds::default(),
-            comparison: keeper::Budget::default(),
             scan,
             shoot_context,
             retry: RetryPolicy::default(),
@@ -311,9 +300,6 @@ pub struct Run {
     /// How many frames reused an identical preview's outcome instead of costing
     /// a request.
     pub duplicates: usize,
-    /// What the run made of the folder's groups: who it marked, who it left
-    /// alone, and which groupings it could not decide.
-    pub groups: Groups,
     /// From the scan to the last write: the wall time the summary reports.
     pub elapsed: Duration,
     /// How the run ended, which is also what it exits as.
@@ -394,11 +380,6 @@ pub struct Frame {
     pub outcome: Outcome,
     /// What became of the sidecar, when the run got that far.
     pub persisted: Persisted,
-    /// The document this run's rating write left beside the frame, when it left
-    /// one: what the group's verdict is merged into. A writer that prints rather
-    /// than writes leaves nothing on disk, so without this the verdict would be
-    /// merged into an earlier run's rating.
-    pub rating_document: Option<String>,
 }
 
 /// The two ways a frame leaves the model: asked, or left alone.
@@ -624,23 +605,6 @@ pub fn run(
                 .to_string(),
         }));
     }
-    // The groups are judged last, once every rating this run produced is on
-    // disk: a mark is a fact about a group, so it can only be written when the
-    // group is complete, and a frame is never marked before it is rated. A run
-    // that stopped is not a folder whose groups are known, so it writes no
-    // marks rather than marks for a folder half seen.
-    let groups = if ending == Ending::Completed {
-        GroupPass {
-            frames: &account.frames,
-            config,
-            decider,
-            writer: sidecars,
-            reporter,
-        }
-        .run()
-    } else {
-        Groups::default()
-    };
     sidecar::write_json(&account.rows, &config.outputs)?;
     let Account {
         frames, duplicates, ..
@@ -653,7 +617,6 @@ pub fn run(
         total,
         frames,
         duplicates,
-        groups,
         elapsed: began.elapsed(),
         ending,
         source: config.source.clone(),
@@ -706,415 +669,8 @@ fn persist(
         }
     };
     match writer.write(&frame.source.path, &document, Prior::earlier(existing)) {
-        Ok(_) => {
-            frame.persisted = Persisted::Written;
-            frame.rating_document = Some(document);
-        }
+        Ok(_) => frame.persisted = Persisted::Written,
         Err(error) => frame.persisted = Persisted::Failed(Failure::of(&error)),
-    }
-}
-
-/// What a run made of the folder's groups: the frames it marked, the frames it
-/// could not, and the groupings nothing could decide.
-///
-/// Every count counts frames except the four that say otherwise: `groups`,
-/// `low_confidence`, `undecided` and `unwritten` count groupings or verdicts.
-/// The three that describe non-keepers — `non_keepers`, `red` and `unmarked` —
-/// count the same population, so `non_keepers` is `red` plus `unmarked` and the
-/// summary's arithmetic adds up.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Groups {
-    /// How many groups of two or more frames the run judged.
-    pub groups: usize,
-    /// How many non-keepers carry this run's verdict: every frame it wrote a
-    /// losing verdict beside, whether red or left to the photographer's colour.
-    pub non_keepers: usize,
-    /// How many frames this run wrote `Red` on.
-    pub red: usize,
-    /// How many non-keepers the run left unmarked because the label on the frame
-    /// is the photographer's.
-    pub unmarked: usize,
-    /// How many keepers still wear a red an earlier run wrote: the folder
-    /// disagrees with this grouping, and nothing is deleted to hide it.
-    pub stale_reds: usize,
-    /// How many groups the comparison was less sure of than
-    /// [`keeper::FLOOR`] — and marked anyway.
-    pub low_confidence: usize,
-    /// How many groups no comparison could decide.
-    pub undecided: usize,
-    /// How many frames were left out of their group's comparison because the
-    /// request could not carry them.
-    pub not_compared: usize,
-    /// How many verdicts could not be written beside their frame.
-    pub unwritten: usize,
-}
-
-impl Groups {
-    /// Whether the run has nothing to say about groups: a folder of singletons,
-    /// a run that scored nothing, or one that stopped before it could judge.
-    pub fn judged_nothing(&self) -> bool {
-        *self == Groups::default()
-    }
-}
-
-/// A frame this run rated, and so a frame a group can be made of.
-#[derive(Clone, Copy)]
-struct Rated<'a> {
-    source: &'a SourceFile,
-    stars: u8,
-    /// The document the rating write left, and so the document the verdict is
-    /// merged into.
-    document: &'a str,
-}
-
-/// One moment under judgement: the frames of a group, what their own pixels said
-/// about them, and the hash the grouping was computed under.
-///
-/// A group's frames have two index spaces, and they are never interchangeable:
-/// a **place** is a frame's position in this group's capture order, `0..size()`,
-/// which is what [`keeper::compared`] returns and what a comparative answer
-/// names; a **member** is an index into `rated`/`readings`, which hold the run's
-/// whole rated folder. [`Moment::member`] is the only conversion between them —
-/// the two spaces coincide only for the folder's first group, so a line that
-/// compares one to the other is right for group one and wrong for every group
-/// after it.
-struct Moment<'a> {
-    rated: &'a [Rated<'a>],
-    readings: &'a [group::Reading],
-    hash: &'a str,
-    members: &'a [usize],
-}
-
-impl Moment<'_> {
-    /// The frame at `place` in the group's capture order, as an index into the
-    /// run's `rated` and `readings`.
-    fn member(&self, place: usize) -> usize {
-        self.members[place]
-    }
-
-    /// The group's frames, in capture order.
-    fn size(&self) -> usize {
-        self.members.len()
-    }
-
-    /// What the frame at `place` looks like, to the comparison's shortlist.
-    fn candidate(&self, place: usize) -> keeper::Candidate {
-        let member = self.member(place);
-        keeper::Candidate {
-            rating: self.rated[member].stars,
-            acutance: self.readings[member].measures.acutance,
-        }
-    }
-}
-
-/// Whether the group's comparison carried the frame at `place`.
-///
-/// `compared` holds places, never members. This is the one place the question is
-/// asked, so the note a frame carries and the summary's `not_compared` count are
-/// always the same comparison.
-fn carried_by_comparison(compared: &[usize], place: usize) -> bool {
-    compared.contains(&place)
-}
-
-/// What writing a frame's verdict does to its colour label.
-#[derive(Clone, Copy)]
-enum Marking {
-    /// The label was written, under this tool's name: the frame is red.
-    Red,
-    /// The label is the photographer's, so nothing was written and the frame
-    /// stays out of the delete set.
-    Unmarked,
-    /// The keeper, still wearing a red an earlier run wrote.
-    StaleRed,
-    /// The keeper, whose mark is its rating.
-    Keeper,
-}
-
-impl Marking {
-    /// What this frame's verdict does to its colour label, from the two facts that
-    /// decide it: whether the frame is the keeper, and what the folder already
-    /// says.
-    ///
-    /// The colour is the marking's own, so no caller can pair a verdict with the
-    /// wrong label.
-    fn of(keeper: bool, existing: Option<&str>) -> Marking {
-        let carried = existing.and_then(sidecar::existing_label);
-        if keeper {
-            // The keeper's mark is its rating. This run writes no label on it and
-            // removes none: a red it still wears is a red a later grouping
-            // disagrees with, and the summary is the only remedy the decision
-            // allows.
-            let stale = carried
-                .as_ref()
-                .is_some_and(|label| label.ours && label.value == sidecar::RED);
-            return if stale {
-                Marking::StaleRed
-            } else {
-                Marking::Keeper
-            };
-        }
-        if sidecar::label_is_ours_to_write(existing) {
-            Marking::Red
-        } else {
-            // The photographer's colour stays and the frame stays out of the
-            // delete set: the verdict is recorded, the label is not ours.
-            Marking::Unmarked
-        }
-    }
-
-    /// The label this verdict writes, when it writes one.
-    fn label(self) -> Option<&'static str> {
-        match self {
-            Marking::Red => Some(sidecar::RED),
-            Marking::Unmarked | Marking::StaleRed | Marking::Keeper => None,
-        }
-    }
-}
-
-/// The run's group pass: one comparative request per group of two or more
-/// frames, and the verdict written beside every member.
-///
-/// It runs after the per-frame pass, over the frames this run rated and nothing
-/// else: a kept frame's rating is not this run's judgement, and an already-rated
-/// folder is left exactly as it was found — which is what makes labels a
-/// first-pass artefact rather than something a cheap re-run churns.
-struct GroupPass<'a> {
-    frames: &'a [Frame],
-    config: &'a Config,
-    decider: &'a dyn Decider,
-    writer: &'a dyn sidecar::Writer,
-    reporter: &'a dyn Reporter,
-}
-
-impl GroupPass<'_> {
-    /// Judge every group and return what the run made of them.
-    fn run(&self) -> Groups {
-        let rated: Vec<Rated<'_>> = self
-            .frames
-            .iter()
-            .filter_map(|frame| {
-                let answers = frame.answers()?;
-                // A frame whose rating reached the sidecar has the document it
-                // reached it in: the rating write and the answer are two faces of
-                // the same success.
-                let document = frame.rating_document.as_deref()?;
-                Some(Rated {
-                    source: &frame.source,
-                    stars: answers.stars,
-                    document,
-                })
-            })
-            .collect();
-        // Fewer than two rated frames is no group at all, and finding that out
-        // costs no preview extraction: a re-run over a rated folder stays free.
-        if rated.len() < 2 {
-            return Groups::default();
-        }
-        let readings: Vec<group::Reading> = rated
-            .iter()
-            .map(|frame| group::read(frame.source))
-            .collect();
-        // A frame that cannot be read a second time is a group of its own, and
-        // gets no verdict: saying so beats a folder that quietly has one frame
-        // fewer in its groups than it has frames.
-        for (frame, reading) in rated.iter().zip(&readings) {
-            if let Some(failure) = &reading.failure {
-                self.reporter.event(Event::Warning(Warning {
-                    message: format!(
-                        "{} could not be read for grouping: {}: {} — it has no verdict",
-                        display_name(frame.source),
-                        failure.kind.as_str(),
-                        failure.message,
-                    ),
-                }));
-            }
-        }
-        let facts: Vec<group::Facts> = readings
-            .iter()
-            .map(|reading| reading.facts.clone())
-            .collect();
-        let hash = group::grouping_hash(&self.config.grouping);
-        let mut counts = Groups::default();
-        for grouping in group::assign(&facts, &self.config.grouping) {
-            if grouping.members.len() < 2 {
-                continue;
-            }
-            counts.groups += 1;
-            self.judge(
-                &Moment {
-                    rated: &rated,
-                    readings: &readings,
-                    hash: &hash,
-                    members: &grouping.members,
-                },
-                &mut counts,
-            );
-        }
-        counts
-    }
-
-    /// One group: narrow it to what the request can carry, ask once, and mark
-    /// every member — or mark nothing and say the group is undecided.
-    fn judge(&self, moment: &Moment<'_>, counts: &mut Groups) {
-        let candidates: Vec<keeper::Candidate> = (0..moment.size())
-            .map(|place| moment.candidate(place))
-            .collect();
-        let compared = keeper::compared(&candidates, self.config.comparison.max);
-        let mut previews = Vec::with_capacity(compared.len());
-        for &position in &compared {
-            match prepare(
-                moment.rated[moment.member(position)].source,
-                &self.comparison_params(),
-            ) {
-                Ok(preview) => previews.push(preview),
-                Err(error) => {
-                    // A frame of the group that cannot be rendered is a group no
-                    // whole-group answer exists for: the run never sends a
-                    // smaller request in its place.
-                    self.undecided(moment, &Failure::of(&error));
-                    counts.undecided += 1;
-                    return;
-                }
-            }
-        }
-        let comparison = Comparison {
-            model: self.config.model.clone(),
-            state: State::for_frame(
-                display_name(moment.rated[moment.member(0)].source),
-                self.config.shoot_context.clone(),
-            ),
-            previews,
-        };
-        let choice = match self
-            .decider
-            .compare(&comparison)
-            .and_then(|response| keeper::read(&response, compared.len()))
-        {
-            Ok(choice) => choice,
-            Err(error) => {
-                self.undecided(moment, &Failure::of(&error));
-                counts.undecided += 1;
-                return;
-            }
-        };
-        counts.not_compared += (0..moment.size())
-            .filter(|&place| !carried_by_comparison(&compared, place))
-            .count();
-        if choice.confidence < self.config.comparison.floor {
-            counts.low_confidence += 1;
-        }
-        self.mark(moment, &compared, choice, counts);
-    }
-
-    /// Write the verdict beside every frame of the group, keeper and non-keeper
-    /// alike.
-    fn mark(&self, moment: &Moment<'_>, compared: &[usize], choice: Choice, counts: &mut Groups) {
-        // The keeper, as a place: the answer counted positions in the request,
-        // which carries `compared`, which holds places.
-        let keeper = compared[choice.index()];
-        let start = moment.readings[moment.member(0)]
-            .facts
-            .captured
-            .map_or_else(String::new, |captured| captured.to_string());
-        let picked_at = crate::time::now_rfc3339();
-        for place in 0..moment.size() {
-            let member = moment.member(place);
-            let frame = moment.rated[member];
-            let path = sidecar::path_for(&frame.source.path);
-            let existing = match read_sidecar(&path) {
-                Ok(existing) => existing,
-                Err(error) => {
-                    self.unwritten(frame.source, &error);
-                    counts.unwritten += 1;
-                    continue;
-                }
-            };
-            let keeper_here = place == keeper;
-            let marking = Marking::of(keeper_here, existing.as_deref());
-            let label = marking.label();
-            // The verdict is merged into the document this run's rating write
-            // left, never into what the folder holds: a preview run writes
-            // nothing, so the sidecar on disk still carries an earlier run's
-            // rating, and a verdict previewed on top of that would show a rating
-            // no run would leave.
-            let rated = frame.document;
-            let mark = sidecar::Mark {
-                label,
-                keeper: keeper_here,
-                group_start: start.clone(),
-                group_size: moment.size(),
-                grouping_hash: moment.hash.to_string(),
-                pick_by: keeper::BY_COMPARISON.to_string(),
-                pick_conf: choice.confidence,
-                picked_at: picked_at.clone(),
-                note: (!carried_by_comparison(compared, place)).then_some(sidecar::NOT_COMPARED),
-            };
-            let document = match sidecar::render_mark(rated, &mark) {
-                Ok(document) => document,
-                Err(error) => {
-                    self.unwritten(frame.source, &error);
-                    counts.unwritten += 1;
-                    continue;
-                }
-            };
-            // What this write replaces is this run's own text — the rating it
-            // wrote a moment ago — so no `.bak` is owed for it.
-            let prior = Prior::ThisRun(rated);
-            match self.writer.write(&frame.source.path, &document, prior) {
-                Ok(_) => match marking {
-                    // Red and unmarked are the two ways a non-keeper carries the
-                    // verdict, and they are the population the summary adds up.
-                    Marking::Red => {
-                        counts.non_keepers += 1;
-                        counts.red += 1;
-                    }
-                    Marking::Unmarked => {
-                        counts.non_keepers += 1;
-                        counts.unmarked += 1;
-                    }
-                    Marking::StaleRed => counts.stale_reds += 1,
-                    Marking::Keeper => {}
-                },
-                Err(error) => {
-                    self.unwritten(frame.source, &error);
-                    counts.unwritten += 1;
-                }
-            }
-        }
-    }
-
-    /// The parameters a comparison preview is rendered at: the measured edge,
-    /// and the run's own JPEG quality.
-    fn comparison_params(&self) -> Params {
-        Params {
-            max_edge: self.config.comparison.edge,
-            jpeg_quality: self.config.params.jpeg_quality,
-        }
-    }
-
-    /// Say that a group has no keeper, with the status that stopped it: nothing
-    /// was marked, and the photographer has to be able to see why.
-    fn undecided(&self, moment: &Moment<'_>, failure: &Failure) {
-        self.reporter.event(Event::Warning(Warning {
-            message: format!(
-                "no keeper for the group of {} starting at {}: {}: {} — nothing was marked",
-                moment.size(),
-                display_name(moment.rated[moment.member(0)].source),
-                failure.kind.as_str(),
-                failure.message,
-            ),
-        }));
-    }
-
-    /// Say that a verdict did not reach its sidecar: the red it would have
-    /// written is missing, and silence would make the delete set look complete.
-    fn unwritten(&self, source: &SourceFile, error: &Error) {
-        self.reporter.event(Event::Warning(Warning {
-            message: format!(
-                "the verdict on {} could not be written: {error}",
-                display_name(source)
-            ),
-        }));
     }
 }
 
@@ -1158,7 +714,6 @@ impl<'a> Account<'a> {
             source: source.clone(),
             outcome: Outcome::Kept { rating },
             persisted: Persisted::NotAttempted,
-            rating_document: None,
         };
         self.record(index, frame, None, None);
     }
@@ -1294,7 +849,6 @@ impl Judged {
                 source: source.clone(),
                 outcome: Outcome::Refused(error),
                 persisted: Persisted::NotAttempted,
-                rating_document: None,
             },
             preview: None,
             duplicate_of: None,
@@ -1340,7 +894,6 @@ fn judge(
                     source: source.clone(),
                     outcome: Outcome::Asked(Err(error)),
                     persisted: Persisted::NotAttempted,
-                    rating_document: None,
                 },
                 preview: None,
                 duplicate_of: None,
@@ -1373,7 +926,6 @@ fn judge(
                 document: reused.document.clone(),
             })),
             persisted: Persisted::NotAttempted,
-            rating_document: None,
         };
         return Judged {
             frame,
@@ -1410,7 +962,6 @@ fn judge(
             source: source.clone(),
             outcome: Outcome::Asked(outcome),
             persisted: Persisted::NotAttempted,
-            rating_document: None,
         },
         preview: Some(preview),
         duplicate_of: None,
@@ -1460,14 +1011,24 @@ fn dedupe_key(
 }
 
 /// Ask the model one frame's question, retrying only the transient failures
-/// (spec §10): a connection failure, a timeout and a 5xx are worth another
-/// attempt, with the policy's backoff between them. The failure that ends the
-/// attempts names how many were spent, so the row explains itself.
+/// (spec §10).
 fn decide(decider: &dyn Decider, request: &Request<'_>, retry: &RetryPolicy) -> Result<Response> {
+    retrying(|| decider.decide(request), retry)
+}
+
+/// Run one request, retrying only the transient failures (spec §10): a
+/// connection failure, a timeout and a 5xx are worth another attempt, with the
+/// policy's backoff between them. The failure that ends the attempts names how
+/// many were spent, so the row explains itself.
+///
+/// The per-frame question and the group's comparative question are both asked
+/// through here, so the two paths cannot drift about what is worth another
+/// attempt or how many attempts were paid for.
+pub(crate) fn retrying<T>(mut ask: impl FnMut() -> Result<T>, retry: &RetryPolicy) -> Result<T> {
     let mut waited = 0;
     loop {
-        match decider.decide(request) {
-            Ok(response) => return Ok(response),
+        match ask() {
+            Ok(value) => return Ok(value),
             Err(error) => {
                 if !error.recovery().is_retried() || waited == retry.backoff.len() {
                     return Err(error.with_attempts(waited + 1));
