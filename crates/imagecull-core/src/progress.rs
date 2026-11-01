@@ -172,7 +172,6 @@ pub struct Summary {
 impl Summary {
     /// Summarise a run that has finished, stopped, or been interrupted.
     pub fn of(run: &Run) -> Summary {
-        let mut ok = 0;
         let mut failures: BTreeMap<ErrorKind, usize> = BTreeMap::new();
         let mut overall = Vec::new();
         let mut technical = Vec::new();
@@ -188,7 +187,6 @@ impl Summary {
                     continue;
                 }
             };
-            ok += 1;
             overall.push(answers.overall);
             technical.push(answers.technical);
             composition.push(answers.composition);
@@ -199,12 +197,15 @@ impl Summary {
                 disagreements += 1;
             }
         }
-        let scored = ok;
+        // How many frames have answers is the run's own count, not a second
+        // tally kept here: the exit code and the printed summary must never
+        // disagree about how much of the shoot was scored.
+        let scored = run.scored();
         let mut counts = Vec::with_capacity(1 + ErrorKind::ALL.len());
-        if ok > 0 {
+        if scored > 0 {
             counts.push(StatusCount {
                 status: report::OK,
-                count: ok,
+                count: scored,
             });
         }
         for kind in ErrorKind::ALL {
@@ -231,7 +232,7 @@ impl Summary {
             total: run.total,
             judged: run.frames.len(),
             scored,
-            failed: run.frames.len() - scored,
+            failed: run.failed(),
             resumed: run.resumed,
             duplicates: run.duplicates,
             counts,

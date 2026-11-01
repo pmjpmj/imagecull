@@ -47,7 +47,7 @@ pub mod version;
 
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
-pub use ledger::{FileIdentity, Ledger, LedgerMode, Record, ResumeKey};
+pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
     DISAGREEMENT_RULE, Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter,
