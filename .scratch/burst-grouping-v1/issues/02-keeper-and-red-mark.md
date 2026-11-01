@@ -23,23 +23,54 @@ Yellow), and the verdict still exists.
 
 **Blocked by:** 01
 
-**Status:** needs-info — two inputs are missing, and writing either down before
-measuring would be the invented weighting `SPEC.md` §8.4 refuses:
+**Status:** ready-for-agent — the two open inputs are answered (see
+**Measured** below), and the confidence decision is taken: a low-confidence
+comparison still marks the losers and is warned about.
 
-- **The context budget of the comparative call.** Several previews go into one
-  request. How many frames, at what preview size, before the request is too large
-  for the model to answer — and what happens to a 20-frame burst. The spec's
-  guess was ~512 px per frame for eight frames; that has to be measured, not
-  assumed. If the cap binds, the measures supply the shortlist (see Notes), which
-  is why issue 01's blind review still matters.
-- **Where `do not compare` is drawn.** §Out of Scope of the burst spec forbade
-  gating model requests on measures. Choosing which frames enter the *comparison*
-  is not gating a *rating*, but it is the same machine, so the line needs to be
-  written deliberately.
+## Measured — the needs-info, answered
+
+Against `clef-flash-oQ4e` on `http://127.0.0.1:8000`; the harnesses, raw rows and
+the request/response pair are recorded in
+`.scratch/burst-grouping-v1/evidence/comparison-budget.md` (and the shape-only
+pair beside it).
+
+- **The cap is tokens, not frames: 16,384 image tokens, hard.** Tokens scale with
+  pixel area — 1,639/frame at 1568 px, 696 at 1024, 201 at 512 — so one request
+  holds **9 frames at 1568 px, 23 at 1024, 80 at 512**.
+- **Over the cap is a 413, never a silent drop.** Images are outside `truncate`
+  (only `state` is truncatable), so a group either gets a whole-group answer or
+  an error the run can report as undecided. The feared "truncated burst answers
+  about a subset" does not exist.
+- **The answer follows the image, not the position**, and 512 px is decisive on a
+  real difference (sharp vs. soft: 0.98, both orders). On a genuine burst
+  near-tie it is a coin flip: the pick flips between orderings and preview
+  sizes at 0.55 against 0.43.
+- **The server serialises `/v1/systemone`**, confirmed; a parallel group fan-out
+  buys nothing (SPEC §7.1 stands).
+
+Consequences taken:
+
+- **Comparison previews are rendered at 512 px** (`comparison_edge`, default 512)
+  and up to **20 candidates** (`comparison_max`) go in one call — 4,154 tokens,
+  25% of the budget, 11.5 s, measured. The cap is not reached at 512 px until 81
+  frames.
+- **No measure-based shortlist for context reasons.** There is no shortlist; a
+  group of 21+ frames is narrowed to 20 by the rating, ties broken by acutance —
+  the only place this ticket lets a measure choose anything, and it chooses who
+  is *compared*, never a rating.
+- **A low-confidence comparison marks anyway.** `pickConf` is recorded on every
+  member; a group below `pick_conf_floor` (0.60) is marked and reported on one
+  summary line. The measurement is the reason the floor is a warning and not a
+gate: the near-tie case is the common case, and refusing to mark a burst would
+  make the feature useless exactly where a burst is.
 
 ## Acceptance
 
 - [ ] A group of two or more gets exactly one comparative request; a group of one gets none
+- [ ] The comparative request never exceeds the measured budget: `comparison_edge` (default 512) and `comparison_max` (default 20), enforced before the request is built, never by reading a 413
+- [ ] A group of 21+ frames is narrowed to 20 by rating, ties broken by acutance, and every frame left out is red with `groupNote="not_compared"`
+- [ ] `pickConf` is recorded on every member of a marked group; a group below `pick_conf_floor` (0.60) is still marked and counted on a summary line (`low confidence: 2 groups`)
+- [ ] A 413 is a failed frame with its own status, never a panic and never a silently smaller request
 - [ ] The keeper carries no `xmp:Label` write; every other frame of the group carries `Red`
 - [ ] A frame whose label is the photographer's is left alone, its verdict still recorded, and counted on a summary line (`unmarked: 3` — label not ours)
 - [ ] A frame whose label was written by a previous run is rewritten only if that run recorded `imagecull:labeledBy="imagecull"`

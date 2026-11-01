@@ -96,6 +96,17 @@ this ADR resolves it rather than working around it.
   are recorded: without them a red cannot be explained or audited, and the
   sidecar feature's promise that a number never travels without its provenance
   would be broken by the first group.
+- **The comparison is a coin flip on a true near-tie, and marks anyway.** Measured
+  on a real burst: 0.55 against 0.43, flipping between orderings and preview
+  sizes. A confidence floor would therefore silence the feature on exactly the
+  bursts it exists for, so the losers are marked and `pickConf` is written on
+  every member; a group below 0.60 is counted on a summary line. The photographer
+  sees which groups the model was unsure about instead of a filter that quietly
+  omits them.
+- **The comparison renders its own 512 px previews.** The 16,384-token image cap
+  holds 9 frames at the run's 1568 px and 81 at 512 px, and 512 px loses nothing
+  on a real quality difference. Up to 20 candidates go in one call; beyond that
+  the rating narrows the field.
 - **Labels are a first-pass artefact.** The skip rule leaves an already-rated
   frame alone, so a second run over the same folder writes no labels at all. The
   reds are what the first pass thought; only `--force` (which re-pays every

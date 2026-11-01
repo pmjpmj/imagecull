@@ -1,0 +1,19 @@
+{
+  "model": "clef-flash-oQ4e",
+  "answers": {
+    "keeper": {
+      "type": "choice",
+      "choice": "1",
+      "confidence": 0.5483,
+      "probabilities": {
+        "1": 0.5483,
+        "2": 0.427,
+        "3": 0.0247
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 2243,
+    "output_tokens": 0
+  }
+}
