@@ -17,12 +17,13 @@
 #
 # What a config file cannot set, because it describes this invocation rather
 # than this shoot: the shoot folder itself, `--dry-run`, `--force`,
-# `--allow-foreign`, `--print-sidecars`, `--limit`, `--quiet`/`--verbose`.
+# `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`,
+# `--quiet`/`--verbose`.
 
 [server]
 # Base URL of the local oMLX server. Default: http://127.0.0.1:8000
 endpoint = "http://127.0.0.1:8000"
-# Model alias to score with. Default: the rubric's own alias.
+# Model alias to ask. `score` defaults to the rubric's own alias; `groups`,
 # `doctor` and `models` default to clef-flash-oQ4e when neither this nor
 # `--model` is given. Changing the alias changes the rubric hash, and two runs
 # with different hashes are not comparable.
@@ -33,15 +34,35 @@ endpoint = "http://127.0.0.1:8000"
 [preview]
 # Cap on the longest edge of the preview sent to the model, in pixels.
 # Smaller is faster and cheaper in context; below ~1000 px fine detail stops
-# being judgeable. Default: 1568
+# being judgeable. `score` and `doctor` only: `groups` renders each comparison
+# at its own measured budget edge, so this key does not change a cull.
+# Default: 1568
 # max_edge = 1568
-# JPEG quality of the sent preview, 1-100. Default: 88
+# JPEG quality of the preview, 1-100: the one `score` sends, and the one
+# `groups` encodes each comparison image at. Default: 88
 # jpeg_quality = 88
 
 [scan]
-# Also scan subdirectories. Hidden directories are never scanned.
-# Default: false (the shoot folder only)
+# Also scan subdirectories, in `score` and in `groups` alike. Hidden
+# directories are never scanned. Default: false (the shoot folder only)
 # recursive = false
+
+[group]
+# What counts as one moment. `groups` reads these and `score` ignores them;
+# changing one changes the grouping hash, so verdicts computed under another
+# value are not comparable.
+#
+# The most seconds between two frames of one group, measured from the previous
+# frame rather than from the group's first. Default: 2.0
+# gap = 2.0
+# The least cosine similarity between a frame and its group's first frame: 1.0
+# is the same scene and 0.0 is unrelated. Lower it to group a subject who moved
+# a little; raise it to keep a pan in the compositions it actually produced.
+# Default: 0.90
+# similarity = 0.90
+# The most brightness drift, in stops, between two frames of one group; `0`
+# asks for one exposure exactly. Default: 2.0
+# exposure_stops = 2.0
 
 [outputs]
 # Ratings do not come out of a report: a run writes each one into an XMP sidecar
@@ -49,6 +70,7 @@ endpoint = "http://127.0.0.1:8000"
 # darktable can read it. There is nothing to configure about that.
 #
 # Every raw model answer, as JSON, so a surprising score loses nothing.
+# `score`'s record, not `groups`, which writes its measures to `--out`.
 # Default: not written
 # json_scores = "scores.json"
 
@@ -65,8 +87,10 @@ endpoint = "http://127.0.0.1:8000"
 # A rubric of your own: a path, relative to this file's directory.
 # rubric = "mine.toml"
 # Free text about the shoot, passed to the model as state.shoot_context, so a
-# dim, high-ISO street shoot is judged as that.
+# dim, high-ISO street shoot is judged as that. `groups` passes it to the
+# comparison too, since a dim, high-ISO burst deserves the same framing.
 # shoot_context = "night street, pushed two stops"
 # Reuse the outcome of a frame whose preview is byte-identical to another.
-# Default: true
+# `score` only: a group's frames are different pictures of one moment, never
+# duplicates. Default: true
 # dedupe = true

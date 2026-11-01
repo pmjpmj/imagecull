@@ -781,7 +781,7 @@ fn the_comparative_request_is_one_body_of_several_images_and_a_choice_between_th
     assert!(
         keeper["instructions"]
             .as_str()
-            .is_some_and(|text| text.contains("which single frame")),
+            .is_some_and(|text| text.contains("Answer with the key of that frame")),
         "the question says what the answer is: {keeper}"
     );
     let criteria = keeper["criteria"]

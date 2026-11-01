@@ -103,3 +103,10 @@ one row per judged frame rather than rewritten on an interval, so the key had
 nothing left to control. The strict loader is the whole deprecation: a file that
 still sets it fails as an unknown key, naming it. The section map above is
 otherwise unchanged.
+
+**ADR 0010 added a sixth section, `[group]`** (`gap`, `similarity`,
+`exposure_stops` → `group::Thresholds`), and `groups` joined the file's readers
+for `[server]`, `[preview] jpeg_quality`, `[scan] recursive`, `[run]
+shoot_context` and `[group]`. The decision this ADR records — TOML, one file,
+flag > file > default, strict, core-side resolution — is unchanged; only the
+section list and the reader list grew.

@@ -1,5 +1,5 @@
 //! The config file: the values that stay true across runs, where a run looks
-//! for them, and how they merge with the flags (spec §11.1, ADR 0003).
+//! for them, and how they merge with the flags (spec §11.1, ADR 0003, ADR 0010).
 //!
 //! A config file is a *source* of config, never the effective config itself:
 //! [`Resolved`] holds only the keys a file actually set, so "the file did not
@@ -13,10 +13,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::group::{self, Thresholds};
 use crate::ingest::ScanOptions;
 use crate::omlx;
 use crate::preprocess::Params;
@@ -78,7 +80,7 @@ fn variable(name: &str) -> Option<PathBuf> {
 }
 
 /// A config file that was found, and the path it was found at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
     /// The absolute path that was read.
     pub path: PathBuf,
@@ -166,7 +168,7 @@ fn read(path: &Path) -> Result<ConfigFile> {
 /// Every section and every key is optional, and an unknown one is an error
 /// rather than a warning: a typo'd `max_edeg` would otherwise cost a whole run
 /// at the wrong resolution.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigFile {
     server: ServerSection,
@@ -174,6 +176,7 @@ pub struct ConfigFile {
     scan: ScanSection,
     outputs: OutputsSection,
     run: RunSection,
+    group: GroupSection,
 }
 
 impl ConfigFile {
@@ -198,6 +201,9 @@ impl ConfigFile {
             rubric: self.run.rubric.clone().map(|source| source.anchored(base)),
             shoot_context: self.run.shoot_context.clone(),
             dedupe: self.run.dedupe,
+            group_gap: self.group.gap,
+            group_similarity: self.group.similarity,
+            group_exposure_stops: self.group.exposure_stops,
         }
     }
 
@@ -235,6 +241,28 @@ impl ConfigFile {
             return Err(Error::fatal(
                 "server.timeout must be at least 1 second, or no request could be waited for",
             ));
+        }
+        if let Some(gap) = self.group.gap
+            && !(gap > 0.0 && gap.is_finite())
+        {
+            return Err(Error::fatal(
+                "group.gap must be a positive number of seconds, or a group could never hold \
+                 two frames",
+            ));
+        }
+        if let Some(similarity) = self.group.similarity
+            && !(0.0..=1.0).contains(&similarity)
+        {
+            return Err(Error::fatal(format!(
+                "group.similarity is a cosine between 0 and 1, not {similarity}"
+            )));
+        }
+        if let Some(stops) = self.group.exposure_stops
+            && !(stops.is_finite() && stops >= 0.0)
+        {
+            return Err(Error::fatal(format!(
+                "group.exposure_stops must be zero or more stops, not {stops}"
+            )));
         }
         for (key, value) in [
             ("server.endpoint", self.server.endpoint.as_deref()),
@@ -291,6 +319,16 @@ struct OutputsSection {
     json_scores: Option<PathBuf>,
 }
 
+/// `[group]`: how close two frames have to be to be one moment, as
+/// [`Thresholds`]. Read by `groups`, which is the only command that groups.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GroupSection {
+    gap: Option<f64>,
+    similarity: Option<f64>,
+    exposure_stops: Option<f64>,
+}
+
 /// `[run]`: the rest of what a run needs to know.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -320,7 +358,7 @@ where
 /// Every field is an `Option` on purpose: this is the only place that can tell
 /// "unset" from "set to the value that happens to be the default", and the merge
 /// depends on it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Resolved {
     pub endpoint: Option<String>,
     pub model: Option<String>,
@@ -333,6 +371,12 @@ pub struct Resolved {
     pub rubric: Option<RubricSource>,
     pub shoot_context: Option<String>,
     pub dedupe: Option<bool>,
+    /// The most seconds between two frames of one group.
+    pub group_gap: Option<f64>,
+    /// The least cosine similarity between a frame and its group's first frame.
+    pub group_similarity: Option<f64>,
+    /// The most brightness drift, in stops, between two frames of one group.
+    pub group_exposure_stops: Option<f64>,
 }
 
 impl Resolved {
@@ -352,6 +396,9 @@ impl Resolved {
             rubric: flags.rubric.or(self.rubric),
             shoot_context: flags.shoot_context.or(self.shoot_context),
             dedupe: flags.dedupe.or(self.dedupe),
+            group_gap: flags.group_gap.or(self.group_gap),
+            group_similarity: flags.group_similarity.or(self.group_similarity),
+            group_exposure_stops: flags.group_exposure_stops.or(self.group_exposure_stops),
         }
     }
 
@@ -381,12 +428,21 @@ impl Resolved {
             rubric: self.rubric,
             shoot_context: self.shoot_context,
             dedupe: self.dedupe.unwrap_or(true),
+            thresholds: Thresholds {
+                gap: self
+                    .group_gap
+                    .map_or(group::DEFAULT_GAP, Duration::from_secs_f64),
+                similarity: self.group_similarity.unwrap_or(group::DEFAULT_SIMILARITY),
+                exposure_stops: self
+                    .group_exposure_stops
+                    .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
+            },
         }
     }
 }
 
 /// A run's effective config: what is left once every source has been resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Effective {
     /// The config file that contributed, when one did. Provenance only.
     pub source: Option<PathBuf>,
@@ -410,6 +466,9 @@ pub struct Effective {
     pub shoot_context: Option<String>,
     /// Whether an identical preview may reuse an earlier frame's outcome.
     pub dedupe: bool,
+    /// How close two frames have to be to be one moment. `groups` decides with
+    /// them; `score` rates every frame alone and never asks.
+    pub thresholds: Thresholds,
 }
 
 impl Effective {

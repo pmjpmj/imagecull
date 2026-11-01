@@ -40,7 +40,7 @@ pub fn run(args: &GroupsArgs) -> u8 {
         quiet: args.quiet,
         verbose: args.verbose,
     };
-    let plan = match group::run_with(&args.dir, &args.options(), &console) {
+    let plan = match group::run_with(&args.dir, &args.options(&effective), &console) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("error: {error}");

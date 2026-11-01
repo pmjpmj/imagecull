@@ -80,3 +80,52 @@ fn a_folder_with_no_group_asks_no_server_for_a_question_it_cannot_ask() {
         "the cull says it had no group to judge, and the summary counts it: {report}"
     );
 }
+
+#[test]
+fn a_shoot_configs_scan_section_reaches_the_groups_scan() {
+    let shoot = tempfile::tempdir().expect("a temp dir");
+    let sub = shoot.path().join("sub");
+    fs::create_dir(&sub).expect("a subdirectory");
+    fs::write(sub.join("DSC_0002.NEF"), b"not a NEF").expect("a broken frame");
+    fs::write(
+        shoot.path().join("imagecull.toml"),
+        "[scan]\nrecursive = true\n",
+    )
+    .expect("a shoot config");
+
+    // `./imagecull.toml` is discovered in the working directory, so the shoot
+    // folder is the working directory here.
+    let csv = shoot.path().join("groups.csv");
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_imagecull"))
+            .arg("groups")
+            .arg(shoot.path())
+            .arg("--out")
+            .arg(&csv)
+            .arg("--no-cull")
+            .args(extra)
+            .current_dir(shoot.path())
+            .output()
+            .expect("the binary runs")
+    };
+    let relative = Path::new("sub")
+        .join("DSC_0002.NEF")
+        .to_string_lossy()
+        .into_owned();
+
+    let output = run(&[]);
+    let measures = fs::read_to_string(&csv).expect("the CSV is written");
+    assert!(
+        measures.contains(&relative),
+        "the file's [scan] recursive has to reach the scan: {} {measures}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let output = run(&["--no-config"]);
+    let measures = fs::read_to_string(&csv).expect("the CSV is written");
+    assert!(
+        !measures.contains(&relative) && !measures.contains("DSC_0002.NEF"),
+        "--no-config leaves the folder alone, which is what proves the file did it: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
