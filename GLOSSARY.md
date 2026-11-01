@@ -34,7 +34,10 @@ the ones that lost their group; the photographer decides what to do about them.
 
 **Group**:
 The frames of one shoot that are the same moment: close in capture time, the
-same body and settings, and the same scene by signature.
+same body and the same picture — the same frame and optics, at an exposure
+within a tolerance — and the same scene by signature. An exposure that drifted
+inside that tolerance is still one moment; a zoom, a turn or a bracket past it
+is not.
 _Avoid_: burst, cluster, stack, set, duplicate group
 
 **Signature**:

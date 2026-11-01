@@ -4,8 +4,16 @@
 //! body, at one exposure, of one scene. The four gates run in that order and a
 //! candidate is out as soon as one fails: capture time within
 //! [`Thresholds::gap`] of the previous frame in the group, the same body serial,
-//! the same exposure settings and orientation, and a preview signature within
-//! [`Thresholds::similarity`] of the group's first frame.
+//! the same optics and frame at an exposure within
+//! [`Thresholds::exposure_stops`] of the group's first, and a preview signature
+//! within [`Thresholds::similarity`] of it.
+//!
+//! The settings gate tolerates a drifted exposure on purpose. A burst whose auto
+//! ISO walked two stops, or that was bracketed, is one moment: the frames are
+//! the same picture brighter or darker, which the signature is built to survive,
+//! and refusing to group them costs the photographer the comparison that would
+//! have answered them (ADR 0009). What is *not* tolerated is the picture moving:
+//! orientation and focal length are asked for exactly.
 //!
 //! The similarity gate is what makes this safe. Without it, "a second apart"
 //! merges a subject who stepped behind a tree, a hat that came off, a pan. With
@@ -30,7 +38,7 @@
 //! # Determinism
 //!
 //! The plan is a pure function of the files' metadata, their preview pixels and
-//! the two thresholds. [`grouping_hash`] covers the algorithm version, the
+//! the thresholds. [`grouping_hash`] covers the algorithm version, the
 //! signature parameters and the thresholds, and nothing else — never a
 //! filename, never the order the scan happened to list. Change a threshold and
 //! every verdict computed under the old hash is invalid, exactly as changing
@@ -64,7 +72,7 @@ use crate::sidecar::{self, Failure};
 ///
 /// The word is *group*, not *burst*: this string is hashed into every plan, and
 /// a persisted identifier outlives the prose around it.
-pub const ALGORITHM: &str = "grouping/1";
+pub const ALGORITHM: &str = "grouping/2";
 
 /// The side of a [`Signature`], in pixels.
 pub const SIGNATURE_EDGE: u32 = 32;
@@ -75,6 +83,23 @@ pub const DEFAULT_GAP: Duration = Duration::from_secs(2);
 /// The default similarity: a cosine of 0.90 between two preview signatures.
 pub const DEFAULT_SIMILARITY: f64 = 0.90;
 
+/// The default exposure tolerance: two stops of brightness drift between two
+/// frames of one group.
+///
+/// Two stops covers the auto-ISO walk and the one-stop-per-frame bracket a
+/// photographer actually shoots, and stops well short of a scene lit differently
+/// (a flash going off, a light switched on) counting as the same exposure. Zero
+/// asks for one exposure exactly.
+pub const DEFAULT_EXPOSURE_STOPS: f64 = 2.0;
+
+/// What two brightnesses may differ by and still be one exposure: a sliver of a
+/// stop, so that `--group-exposure-stops 0` means "the same exposure" rather
+/// than "bit-identical logarithms".
+///
+/// `log2` of two equal products can differ in the last place, and a tolerance is
+/// a photographer's number — two stops, not two stops and four ulps.
+const BRIGHTNESS_EPSILON: f64 = 1e-9;
+
 /// How close two frames have to be to be the same moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Thresholds {
@@ -84,6 +109,12 @@ pub struct Thresholds {
     /// The least similarity between a frame's signature and the group's first
     /// frame's. A cosine, so `1.0` is the same scene and `0.0` is unrelated.
     pub similarity: f64,
+    /// The most brightness drift between two frames of one group, in stops.
+    ///
+    /// A tolerance rather than an equality: see [`Settings::within`]. `0.0` asks
+    /// for one exposure exactly, and a very large value stops the gate having an
+    /// opinion about exposure at all.
+    pub exposure_stops: f64,
 }
 
 impl Default for Thresholds {
@@ -91,6 +122,7 @@ impl Default for Thresholds {
         Thresholds {
             gap: DEFAULT_GAP,
             similarity: DEFAULT_SIMILARITY,
+            exposure_stops: DEFAULT_EXPOSURE_STOPS,
         }
     }
 }
@@ -192,15 +224,17 @@ fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// The exposure settings two frames must share to be one moment.
+/// What two frames must share to be one moment: their optics, their frame and
+/// their exposure.
 ///
 /// Every field is optional because a file may record none of them; two frames
 /// that both record nothing have not been shown to differ, so the gate passes.
-/// Equality *is* the gate — a [`Fraction`] compares by its value, so two
-/// settings are one exposure exactly when they are equal.
 /// That is the same treatment the serial number gets, and the opposite of what a
 /// *measure* does with a missing value: a gate asks "may these be one moment",
 /// a measure asks "what is true".
+///
+/// The two halves of the gate answer different questions, which is why equality
+/// is not it. [`Settings::within`] is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Settings {
     /// The sensor sensitivity the camera set.
@@ -209,7 +243,8 @@ pub struct Settings {
     pub exposure_time: Option<Fraction>,
     /// The aperture.
     pub f_number: Option<Fraction>,
-    /// The focal length.
+    /// The focal length: a zoom is a different picture, so this is asked for
+    /// exactly rather than tolerated.
     pub focal_length: Option<Fraction>,
     /// The EXIF orientation: a frame turned on its side is not the same
     /// composition as the one before it.
@@ -228,14 +263,54 @@ impl Settings {
             orientation: metadata.orientation().to_exif(),
         }
     }
+
+    /// Whether these settings are the same moment's as `other` — the settings
+    /// gate.
+    ///
+    /// **The picture is asked for exactly; the exposure is tolerated within
+    /// `stops`.** A burst whose auto ISO walked a stop, or that was bracketed,
+    /// is still one moment, and the photographer still wants the comparison that
+    /// picks between its frames; a zoom, a lens change or a camera turned on its
+    /// side during the burst is not one moment, and no amount of tolerance makes
+    /// it one (ADR 0009).
+    ///
+    /// Equality is deliberately *not* this question: it is the gate that ADR 0009
+    /// replaced, and reading `==` here again would silently reintroduce it.
+    pub fn within(self, other: Settings, stops: f64) -> bool {
+        if self.orientation != other.orientation || self.focal_length != other.focal_length {
+            return false;
+        }
+        match (self.brightness(), other.brightness()) {
+            (Some(left), Some(right)) => (left - right).abs() <= stops + BRIGHTNESS_EPSILON,
+            // One side does not record what it would take to tell them apart.
+            _ => true,
+        }
+    }
+
+    /// The brightness these settings produce, in stops above ISO 100 at f/1 for
+    /// one second: `log2(t · ISO / 100 / N²)`.
+    ///
+    /// Two frames with the same number are one exposure as a photographer means
+    /// it, however the camera arrived at it — ISO 400 at 1/1000 and ISO 200 at
+    /// 1/500 are one exposure, and the difference between two of these numbers
+    /// *is* the drift in stops that [`Settings::within`] tolerates.
+    ///
+    /// `None` when the file does not record all three, or records a zero: a
+    /// frame that cannot be placed cannot be shown to differ.
+    fn brightness(self) -> Option<f64> {
+        let speed = self.iso?;
+        let time = self.exposure_time?.value()?;
+        let aperture = self.f_number?.value()?;
+        if speed == 0 || time <= 0.0 || aperture <= 0.0 {
+            return None;
+        }
+        Some((time * (f64::from(speed) / 100.0) / (aperture * aperture)).log2())
+    }
 }
 
 /// A fraction as the file stored it, compared by its **value**: `1/500` and
 /// `2/1000` are one exposure as a photographer means it, though a camera may
 /// write either.
-///
-/// Equality is the number, so [`Settings`] needs no comparison method of its
-/// own — two settings are the same exposure exactly when they are equal.
 #[derive(Debug, Clone, Copy)]
 pub struct Fraction {
     /// The number above the line, as stored.
@@ -251,6 +326,15 @@ impl Fraction {
             numerator: value.numerator,
             denominator: value.denominator,
         }
+    }
+
+    /// The number the fraction stands for, or `None` for a zero denominator —
+    /// a corrupt tag rather than a very fast shutter.
+    pub fn value(self) -> Option<f64> {
+        if self.denominator == 0 {
+            return None;
+        }
+        Some(f64::from(self.numerator) / f64::from(self.denominator))
     }
 }
 
@@ -428,7 +512,11 @@ fn same_moment(
         return false;
     }
     let candidate = &facts[candidate];
-    if first.serial != candidate.serial || first.settings != candidate.settings {
+    if first.serial != candidate.serial
+        || !first
+            .settings
+            .within(candidate.settings, thresholds.exposure_stops)
+    {
         return false;
     }
     let (Some(seen), Some(fresh)) = (&first.signature, &candidate.signature) else {
@@ -455,6 +543,7 @@ pub fn grouping_hash(thresholds: &Thresholds) -> String {
     );
     hasher.update(format!("\ngap={:.6}", thresholds.gap.as_secs_f64()).as_bytes());
     hasher.update(format!("\nsimilarity={:.6}", thresholds.similarity).as_bytes());
+    hasher.update(format!("\nexposure_stops={:.6}", thresholds.exposure_stops).as_bytes());
     hex(hasher.finalize())
 }
 
@@ -962,14 +1051,32 @@ mod tests {
         Signature(values)
     }
 
+    /// One exposure as a camera records it, so that a test varying one field is
+    /// varying that field and not silently clearing the other two.
+    fn exposure() -> Settings {
+        Settings {
+            iso: Some(200),
+            exposure_time: Some(Fraction {
+                numerator: 1,
+                denominator: 500,
+            }),
+            f_number: Some(Fraction {
+                numerator: 28,
+                denominator: 10,
+            }),
+            focal_length: Some(Fraction {
+                numerator: 50,
+                denominator: 1,
+            }),
+            orientation: 1,
+        }
+    }
+
     fn facts(second: u8, serial: &str, at: usize) -> Facts {
         Facts {
             captured: Some(capture(second, 0)),
             serial: Some(serial.to_string()),
-            settings: Settings {
-                iso: Some(200),
-                ..Settings::default()
-            },
+            settings: exposure(),
             signature: Some(signature(at)),
         }
     }
@@ -1115,18 +1222,40 @@ mod tests {
         let two_bodies = vec![facts(0, "1", 0), facts(1, "2", 0)];
         assert_eq!(sizes(&assign(&two_bodies, &thresholds)), vec![1, 1]);
 
-        // The settings gate: the same second and the same body, a stop apart.
-        let two_exposures = vec![
+        // The settings gate tolerates brightness drift up to the threshold and
+        // no further: the same second, the same body, two stops apart groups at
+        // the default and three stops apart does not.
+        let two_stops = vec![
             facts(0, "1", 0),
             Facts {
                 settings: Settings {
                     iso: Some(800),
-                    ..Settings::default()
+                    ..exposure()
                 },
                 ..facts(1, "1", 0)
             },
         ];
-        assert_eq!(sizes(&assign(&two_exposures, &thresholds)), vec![1, 1]);
+        assert_eq!(sizes(&assign(&two_stops, &thresholds)), vec![2]);
+
+        let three_stops = vec![
+            facts(0, "1", 0),
+            Facts {
+                settings: Settings {
+                    iso: Some(1600),
+                    ..exposure()
+                },
+                ..facts(1, "1", 0)
+            },
+        ];
+        assert_eq!(sizes(&assign(&three_stops, &thresholds)), vec![1, 1]);
+
+        // And the threshold is the flag's: what the default tolerates, zero
+        // stops refuses.
+        let exact = Thresholds {
+            exposure_stops: 0.0,
+            ..Thresholds::default()
+        };
+        assert_eq!(sizes(&assign(&two_stops, &exact)), vec![1, 1]);
 
         // And an orientation that changed mid-group is not the same
         // composition.
@@ -1135,7 +1264,7 @@ mod tests {
             Facts {
                 settings: Settings {
                     orientation: 6,
-                    ..Settings::default()
+                    ..exposure()
                 },
                 ..facts(1, "1", 0)
             },
@@ -1145,6 +1274,109 @@ mod tests {
         // The scene gate.
         let two_scenes = vec![facts(0, "1", 0), facts(1, "1", 500)];
         assert_eq!(sizes(&assign(&two_scenes, &thresholds)), vec![1, 1]);
+    }
+
+    #[test]
+    fn one_exposure_is_one_brightness_however_the_camera_got_there() {
+        let fraction = |numerator, denominator| {
+            Some(Fraction {
+                numerator,
+                denominator,
+            })
+        };
+        let exposed = Settings {
+            iso: Some(200),
+            exposure_time: fraction(1, 500),
+            f_number: fraction(28, 10),
+            focal_length: fraction(50, 1),
+            orientation: 1,
+        };
+        // A stop of ISO for a stop of shutter: the same picture, brighter by
+        // nothing at all.
+        let equivalent = Settings {
+            iso: Some(400),
+            exposure_time: fraction(1, 1000),
+            ..exposed
+        };
+        assert!(exposed.within(equivalent, 0.0), "one exposure, exactly");
+
+        // f/2.8 to f/5.6 is two stops darker, and the gate reads the numbers a
+        // camera writes rather than the clicks a lens makes: f/2.8 to f/4 is
+        // 1.03 stops, not 1.
+        let stopped_down = Settings {
+            f_number: fraction(56, 10),
+            ..exposed
+        };
+        let drift = (stopped_down.brightness().expect("an exposure")
+            - exposed.brightness().expect("an exposure"))
+        .abs();
+        assert!(
+            (drift - 2.0).abs() < 1e-6,
+            "f/2.8 to f/5.6 is two stops of light: {drift}"
+        );
+        assert!(exposed.within(stopped_down, drift));
+        assert!(
+            !exposed.within(stopped_down, 1.5),
+            "two stops is not one and a half"
+        );
+
+        // A number the gate cannot take the log of is not a difference.
+        let corrupt = Settings {
+            f_number: fraction(28, 0),
+            ..exposed
+        };
+        assert_eq!(corrupt.brightness(), None);
+        assert!(
+            exposed.within(corrupt, 0.0),
+            "a zero denominator is unknown"
+        );
+    }
+
+    #[test]
+    fn the_exposure_gate_tolerates_brightness_and_nothing_else() {
+        let fraction = |numerator, denominator| {
+            Some(Fraction {
+                numerator,
+                denominator,
+            })
+        };
+        let wide = Settings {
+            iso: Some(200),
+            exposure_time: fraction(1, 500),
+            f_number: fraction(28, 10),
+            focal_length: fraction(50, 1),
+            orientation: 1,
+        };
+
+        // The tolerant half: any drift at all.
+        let darker = Settings {
+            iso: Some(1600),
+            ..wide
+        };
+        assert!(
+            wide.within(darker, 3.5),
+            "three stops, when three and a half is allowed"
+        );
+        assert!(
+            wide.within(darker, 1e9),
+            "a gate with no opinion about exposure"
+        );
+
+        // The exact half: a zoom and a turn are different pictures, whatever the
+        // tolerance says.
+        let zoomed = Settings {
+            focal_length: fraction(85, 1),
+            ..wide
+        };
+        assert!(!wide.within(zoomed, 1e9), "a zoom is a different picture");
+        let turned = Settings {
+            orientation: 6,
+            ..wide
+        };
+        assert!(
+            !wide.within(turned, 1e9),
+            "a turned frame is a different composition"
+        );
     }
 
     #[test]
@@ -1165,6 +1397,31 @@ mod tests {
             },
         ];
         assert_eq!(sizes(&assign(&unknown, &thresholds)), vec![2]);
+
+        // A frame that records no exposure at all is not shown to differ from
+        // one that does.
+        let half_recorded = vec![
+            Facts {
+                settings: Settings {
+                    iso: Some(400),
+                    exposure_time: Some(Fraction {
+                        numerator: 1,
+                        denominator: 60,
+                    }),
+                    f_number: Some(Fraction {
+                        numerator: 2,
+                        denominator: 1,
+                    }),
+                    ..Settings::default()
+                },
+                ..facts(0, "1", 0)
+            },
+            Facts {
+                settings: Settings::default(),
+                ..facts(1, "1", 0)
+            },
+        ];
+        assert_eq!(sizes(&assign(&half_recorded, &thresholds)), vec![2]);
 
         // A file with no capture time is its own group, wherever it sorts.
         let undated = vec![
@@ -1203,17 +1460,21 @@ mod tests {
         assert_eq!(None::<Fraction>, None);
         assert_ne!(half(1, 500), None);
 
-        // And the settings they belong to compare the same way, which is what
-        // the gate reads.
+        // And the settings they belong to read the same way: `1/500` and
+        // `2/1000` are one exposure, so no threshold can tell them apart.
         let fast = Settings {
+            iso: Some(200),
             exposure_time: half(1, 500),
+            f_number: half(28, 10),
             ..Settings::default()
         };
         let same = Settings {
             exposure_time: half(2, 1000),
-            ..Settings::default()
+            ..fast
         };
         assert_eq!(fast, same);
+        assert!(fast.within(same, 0.0));
+        assert_eq!(fast.brightness(), same.brightness());
     }
 
     #[test]
@@ -1234,6 +1495,15 @@ mod tests {
                 similarity: 0.900001,
                 ..Thresholds::default()
             })
+        );
+        assert_ne!(
+            base,
+            grouping_hash(&Thresholds {
+                exposure_stops: 1.0,
+                ..Thresholds::default()
+            }),
+            "two runs that tolerated different exposure drift did not group the \
+             same way"
         );
     }
 }

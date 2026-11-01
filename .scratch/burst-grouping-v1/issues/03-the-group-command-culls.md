@@ -201,3 +201,12 @@ fixed on the branch.
 - **One open question remains open.** The tournament is still unmeasured; see
   below. The ticket is resolved for the behaviour the ADR decided, and the
   evidence work is a follow-up on a real burst.
+
+## Comments
+
+**2026-11-26 — a third threshold joins the flags.** ADR 0009 turned grouping's
+settings gate into an exposure tolerance, so `GroupsArgs` now also carries
+`--group-exposure-stops` (default 2.0, `0` for one exposure exactly). The
+`--out`/`--recursive`/`--limit`/`--jobs`/`--quiet`/`--verbose`/`--no-cull`/
+`--print-sidecars`/`--allow-foreign` surface described above is otherwise
+unchanged.

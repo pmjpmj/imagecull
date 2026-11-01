@@ -283,6 +283,11 @@ pub struct GroupsArgs {
     #[arg(long, value_name = "SIMILARITY", value_parser = similarity)]
     pub group_similarity: Option<f64>,
 
+    /// The most brightness drift, in stops, between two frames of one group
+    /// (default 2.0); `0` asks for one exposure exactly
+    #[arg(long, value_name = "STOPS", value_parser = exposure_stops)]
+    pub group_exposure_stops: Option<f64>,
+
     /// How many frames to read at once, on this machine's own cores
     /// (default: one per core)
     #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
@@ -329,6 +334,9 @@ impl GroupsArgs {
                     .group_gap
                     .map_or(group::DEFAULT_GAP, std::time::Duration::from_secs_f64),
                 similarity: self.group_similarity.unwrap_or(group::DEFAULT_SIMILARITY),
+                exposure_stops: self
+                    .group_exposure_stops
+                    .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
             },
             jobs: self.jobs,
         }
@@ -353,6 +361,18 @@ fn similarity(text: &str) -> Result<f64, String> {
         .map_err(|_| format!("'{text}' is not a similarity"))?;
     if !(0.0..=1.0).contains(&value) {
         return Err("a similarity is a cosine between 0 and 1".to_string());
+    }
+    Ok(value)
+}
+
+/// An exposure tolerance in stops: any number from zero up, because "the same
+/// exposure" is a legitimate answer and a negative drift is not a thing.
+fn exposure_stops(text: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .parse()
+        .map_err(|_| format!("'{text}' is not a number of stops"))?;
+    if !(value.is_finite() && value >= 0.0) {
+        return Err("the exposure tolerance has to be zero or more stops".to_string());
     }
     Ok(value)
 }
@@ -814,6 +834,7 @@ mod tests {
         assert_eq!(args.limit, None);
         assert_eq!(args.group_gap, None);
         assert_eq!(args.group_similarity, None);
+        assert_eq!(args.group_exposure_stops, None);
         assert_eq!(args.jobs, None);
 
         let options = args.options();
@@ -837,6 +858,8 @@ mod tests {
             "0.75",
             "--group-similarity",
             "0.96",
+            "--group-exposure-stops",
+            "1.5",
             "--jobs",
             "4",
         ]) else {
@@ -849,6 +872,7 @@ mod tests {
             std::time::Duration::from_secs_f64(0.75)
         );
         assert_eq!(options.thresholds.similarity, 0.96);
+        assert_eq!(options.thresholds.exposure_stops, 1.5);
         assert!(options.scan.recursive);
         assert_eq!(options.scan.limit, Some(40));
         assert_eq!(options.jobs, Some(4), "the degree is the flag's");
@@ -862,6 +886,8 @@ mod tests {
             &["groups", "shoot", "--group-gap", "-1"][..],
             &["groups", "shoot", "--group-similarity", "1.5"][..],
             &["groups", "shoot", "--group-similarity", "-0.1"][..],
+            &["groups", "shoot", "--group-exposure-stops", "-1"][..],
+            &["groups", "shoot", "--group-exposure-stops", "nan"][..],
             &["groups", "shoot", "--limit", "0"][..],
             &["groups", "shoot", "--jobs", "0"][..],
         ] {

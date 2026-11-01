@@ -168,20 +168,33 @@ fn a_gap_longer_than_the_threshold_starts_a_new_group() {
 }
 
 #[test]
-fn a_different_body_or_a_different_exposure_is_a_different_moment() {
+fn a_different_body_is_a_different_moment_and_so_is_a_drift_past_the_tolerance() {
     let image = scene();
     let dir = shoot(vec![
         moment("DSC_0001.NEF", &image, 0, "00"),
         frame("DSC_0002.NEF", &image, 0, "10", "3002", 200),
-        frame("DSC_0003.NEF", &image, 0, "20", "3002", 800),
+        frame("DSC_0003.NEF", &image, 0, "20", "3002", 1600),
     ]);
 
-    let plan = plan(dir.path(), Thresholds::default());
+    // The body gate splits the first frame from the other two; the exposure gate
+    // then splits those two, three stops apart against a two-stop tolerance.
+    let strict = plan(dir.path(), Thresholds::default());
 
-    assert_eq!(plan.groups, 3, "{:?}", groups_by_name(&plan));
-    for frame in &plan.frames {
+    assert_eq!(strict.groups, 3, "{:?}", groups_by_name(&strict));
+    for frame in &strict.frames {
         assert_eq!(frame.group_size, 1);
     }
+
+    // And the tolerance is the reason: widen it past three stops and the two
+    // frames of one body are one moment again.
+    let tolerant = plan(
+        dir.path(),
+        Thresholds {
+            exposure_stops: 3.5,
+            ..Thresholds::default()
+        },
+    );
+    assert_eq!(tolerant.groups, 2, "{:?}", groups_by_name(&tolerant));
 }
 
 #[test]
@@ -303,6 +316,68 @@ fn two_runs_over_the_same_folder_agree_column_for_column() {
 }
 
 #[test]
+fn a_burst_that_drifted_its_exposure_is_still_one_moment() {
+    // The same second, the same body, the same picture: only the exposure walked.
+    // Two stops apart is one moment by default and two by `--group-exposure-stops
+    // 0`, which is the tolerance doing exactly one thing (ADR 0009).
+    let image = scene();
+    let exposed = |name: &'static str, iso: u16, shutter: (u32, u32), focal: (u32, u32)| Frame {
+        name,
+        image: image.clone(),
+        facts: ExifFacts {
+            captured: Some("2026:11:02 10:00:00".to_string()),
+            subsecond: Some("00".to_string()),
+            serial: Some("3001".to_string()),
+            iso: Some(iso),
+            exposure_time: Some(shutter),
+            f_number: Some((28, 10)),
+            focal_length: Some(focal),
+        },
+    };
+
+    let drifted = shoot(vec![
+        exposed("DSC_0001.NEF", 200, (1, 500), (50, 1)),
+        exposed("DSC_0002.NEF", 400, (1, 500), (50, 1)),
+    ]);
+    assert_eq!(
+        plan(drifted.path(), Thresholds::default()).groups,
+        1,
+        "a stop of ISO drift is one moment at the default tolerance"
+    );
+    assert_eq!(
+        plan(
+            drifted.path(),
+            Thresholds {
+                exposure_stops: 0.0,
+                ..Thresholds::default()
+            }
+        )
+        .groups,
+        2,
+        "zero stops asks for one exposure exactly"
+    );
+
+    // And the tolerance is a tolerance, not a blindfold: a zoom is a different
+    // picture however much drift is allowed.
+    let zoomed = shoot(vec![
+        exposed("DSC_0001.NEF", 200, (1, 500), (50, 1)),
+        exposed("DSC_0002.NEF", 200, (1, 500), (85, 1)),
+    ]);
+    assert_eq!(
+        plan(
+            zoomed.path(),
+            Thresholds {
+                exposure_stops: 1e9,
+                ..Thresholds::default()
+            }
+        )
+        .groups,
+        2,
+        "a zoom is not one moment, whatever the exposure tolerance says"
+    );
+}
+
+#[test]
 fn the_grouping_hash_moves_with_a_threshold_and_not_with_a_name() {
     let default = Thresholds::default();
     let wider = Thresholds {
@@ -311,6 +386,10 @@ fn the_grouping_hash_moves_with_a_threshold_and_not_with_a_name() {
     };
     let stricter = Thresholds {
         similarity: 0.99,
+        ..Thresholds::default()
+    };
+    let tolerant = Thresholds {
+        exposure_stops: 0.5,
         ..Thresholds::default()
     };
 
@@ -322,6 +401,12 @@ fn the_grouping_hash_moves_with_a_threshold_and_not_with_a_name() {
     assert_ne!(
         group::grouping_hash(&default),
         group::grouping_hash(&stricter)
+    );
+    assert_ne!(
+        group::grouping_hash(&default),
+        group::grouping_hash(&tolerant),
+        "a sidecar verdict computed under one tolerance is not readable under \
+         another"
     );
 }
 
