@@ -74,6 +74,35 @@ pub struct DoctorArgs {
     /// A RAW file to run the preview pipeline on, as a self-test
     #[arg(value_name = "FILE")]
     pub file: Option<PathBuf>,
+
+    /// Cap on the longest edge of the sent preview, in pixels
+    #[arg(
+        long,
+        value_name = "PX",
+        default_value_t = Params::DEFAULT_MAX_EDGE,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub max_edge: u32,
+
+    /// JPEG quality of the sent preview, 1-100
+    #[arg(
+        long,
+        value_name = "QUALITY",
+        default_value_t = Params::DEFAULT_JPEG_QUALITY,
+        value_parser = clap::value_parser!(u8).range(1..=100)
+    )]
+    pub jpeg_quality: u8,
+}
+
+impl DoctorArgs {
+    /// How the preview should be rendered — the same knobs a run would use, so
+    /// the self-test proves the pipeline the photographer is about to use.
+    pub fn params(&self) -> Params {
+        Params {
+            max_edge: self.max_edge,
+            jpeg_quality: self.jpeg_quality,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -237,6 +266,16 @@ mod tests {
         assert_eq!(args.file, Some(PathBuf::from("DSC_0001.NEF")));
         assert_eq!(args.server.endpoint, "http://127.0.0.1:9000");
         assert_eq!(args.server.model, "clef-27b");
+        assert_eq!(args.params().max_edge, Params::DEFAULT_MAX_EDGE);
+    }
+
+    #[test]
+    fn doctor_takes_the_same_render_flags_as_a_run() {
+        let Command::Doctor(args) = parse(&["doctor", "DSC_0001.NEF", "--max-edge", "1024"]) else {
+            panic!("not a doctor command");
+        };
+        assert_eq!(args.params().max_edge, 1024);
+        assert_eq!(args.params().jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
     }
 
     #[test]

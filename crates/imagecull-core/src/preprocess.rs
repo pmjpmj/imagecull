@@ -83,6 +83,10 @@ pub fn render(embedded: &Embedded, params: &Params) -> Result<Encoded> {
 ///
 /// An unknown tag is left alone: `raw-files` reports 0 and 9-and-above as 1
 /// already, and a preview with no orientation is stored upright.
+///
+/// The turn happens **exactly once**: `raw-files` reports the file's orientation
+/// for every preview it finds, and `image`'s decoders return pixels as stored,
+/// never applying an orientation tag of their own.
 fn apply_orientation(image: &mut DynamicImage, exif_orientation: u16) {
     if let Some(orientation) = u8::try_from(exif_orientation)
         .ok()

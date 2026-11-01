@@ -43,7 +43,7 @@ fn raw_extensions_are_accepted_in_any_case_and_the_rest_are_counted() {
 
     assert_eq!(accepted(&scan), ["a.NEF", "b.nrw", "c.DnG"]);
     assert_eq!(
-        scan.skipped_extension, 4,
+        scan.counts.skipped_extension, 4,
         "every non-RAW file is skipped and counted, never an error"
     );
 }
@@ -67,15 +67,15 @@ fn finder_noise_is_ignored_and_counted_and_hidden_directories_are_never_descende
 
     assert_eq!(accepted(&scan), ["keep.NEF"]);
     assert_eq!(
-        scan.ignored, 4,
+        scan.counts.ignored, 4,
         "AppleDouble, .DS_Store and the two files under __MACOSX are ignored and counted"
     );
     assert_eq!(
-        scan.hidden_directories, 1,
+        scan.counts.hidden_directories, 1,
         ".trash is hidden and never descended; __MACOSX is counted as ignored instead"
     );
     assert_eq!(
-        scan.skipped_extension, 0,
+        scan.counts.skipped_extension, 0,
         "Finder noise is ignored, not counted as a foreign extension"
     );
 }
@@ -100,7 +100,7 @@ fn recursion_is_opt_in_and_still_never_descends_into_hidden_directories() {
     .expect("scan");
 
     assert_eq!(accepted(&deep), ["a.NEF", "sub/nested.NEF"]);
-    assert_eq!(deep.hidden_directories, 2, ".cache and sub/.hidden hold no shoot");
+    assert_eq!(deep.counts.hidden_directories, 2, ".cache and sub/.hidden hold no shoot");
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn the_limit_keeps_the_first_files_in_scan_order() {
 
     assert_eq!(accepted(&scan), ["a.NEF", "b.NEF"]);
     assert_eq!(
-        scan.skipped_extension, 1,
+        scan.counts.skipped_extension, 1,
         "the limit applies to accepted files, not to what the scan counts"
     );
 }

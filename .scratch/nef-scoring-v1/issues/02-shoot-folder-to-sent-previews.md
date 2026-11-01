@@ -95,3 +95,52 @@ machine, 3–4 of its 9 tests intermittently fail with `Connection reset` /
 green). Pre-existing, untouched by this ticket, but the stub wants a longer
 accept window or a per-test single-connection design.
 
+
+### Review round (two axes: standards, spec)
+
+Both axes ran green on the substance — the .dng gap and the seam question below
+were the only findings above P2 — and the cheap ones were fixed in the same
+ticket:
+
+- `Export` and `Scan` carried the same ordered file list twice (`Scan.files` and
+  `frames[i].source`). The counts now travel as `ingest::ScanCounts`
+  (`Scan { files, counts }`), so `Export { previews, counts, frames }` has one
+  copy of the order and the counts question has one home.
+- The duplicated "cannot create the previews directory" message in `dry_run` is
+  one helper, and the file-name-for-a-message code lives in `preview::file_name`
+  and is reused by `doctor` instead of being written twice.
+- **`.dng` behaviour is now pinned**: `a_dng_gets_a_row_that_says_this_build_cannot_read_it`
+  builds a DNG-shaped TIFF (`DNGVersion` set, as a camera-native or
+  Adobe-converted DNG has) and asserts the row is accepted and classified
+  `unreadable`. The day `raw-files` grows DNG previews, that test is the thing
+  that must change.
+- **`doctor <FILE>` takes `--max-edge` and `--jpeg-quality`**, so the self-test
+  proves the pipeline the photographer is about to actually run rather than one
+  with hard-coded defaults.
+- `apply_orientation` now documents why the turn happens exactly once
+  (`raw-files` reports the file's tag for each preview; `image`'s decoders never
+  apply one themselves), since the fixture set cannot carry a preview with its
+  own APP1 orientation.
+- `tests/fixtures/README.md` documents the real captures the spec's Testing
+  Decisions ask for (landscape, portrait 6/8, high-ISO, blurred, a burst pair
+  with identical previews, a truncated file), how to place them, and the
+  skip-loudly convention for tests that need them. None are committed.
+
+Two findings are recorded and deliberately not fixed here:
+
+- **The spec's "one seam" rule is only partly honoured in M1.** "No other seam
+  is introduced… preview extraction, orientation, downscaling are observable
+  through `Decider`" — but `Decider` arrives in ticket 03, so M1's tests enter at
+  `preview::extract`, `preprocess::render` and `dry_run::render_previews`. That
+  is a deliberate ordering compromise, not an oversight: those are public module
+  interfaces, not internals. Ticket 03 must fold `dry_run`'s per-file step under
+  the one scoring entry point, so `--dry-run` and a real run share it, and
+  re-point the orientation tests at the bytes the `Decider` sees.
+- **The shoot-folder guard is stricter than the spec's literal wording**, and
+  deliberately so. Story 43 says v1 writes nothing into the photo folder except
+  the CSV, and story 14 says previews go into a directory in the *working*
+  directory — so `cd ~/shoots/wedding && imagecull score . --dry-run` is now a
+  fatal error naming the fix rather than quietly writing `./previews` into the
+  shot. If that friction turns out to matter, the change is one `if` in
+  `dry_run::guard_outside_shoot`, but it should be a decision about the safety
+  rule, not a convenience patch.

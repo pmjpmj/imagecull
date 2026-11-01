@@ -19,6 +19,14 @@ pub struct SourceFile {
 pub struct Scan {
     /// The accepted files, in ingest order.
     pub files: Vec<SourceFile>,
+    /// What the scan left out, and why.
+    pub counts: ScanCounts,
+}
+
+/// The files a scan saw and did not accept. Reported, never an error: a shoot
+/// folder holding JPEGs, movies or Finder noise still works (spec §8.2–8.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounts {
     /// How many files were skipped because their extension is not a RAW one.
     pub skipped_extension: usize,
     /// How many files were ignored as Finder noise: `._*` AppleDouble files,
@@ -137,16 +145,16 @@ fn collect(dir: &Path, base: &Path, options: &ScanOptions, scan: &mut Scan) -> R
         let is_dir = entry.file_type().is_ok_and(|file_type| file_type.is_dir());
         if is_dir {
             if name == MACOSX_DIRECTORY {
-                scan.ignored += count_files(&entry.path())?;
+                scan.counts.ignored += count_files(&entry.path())?;
             } else if name.starts_with('.') {
-                scan.hidden_directories += 1;
+                scan.counts.hidden_directories += 1;
             } else if options.recursive {
                 collect(&entry.path(), base, options, scan)?;
             }
             continue;
         }
         if is_finder_noise(&name) {
-            scan.ignored += 1;
+            scan.counts.ignored += 1;
         } else if has_accepted_extension(&name) {
             let relative = entry.path().strip_prefix(base).map_or_else(
                 |_| PathBuf::from(&name),
@@ -157,7 +165,7 @@ fn collect(dir: &Path, base: &Path, options: &ScanOptions, scan: &mut Scan) -> R
                 relative,
             });
         } else {
-            scan.skipped_extension += 1;
+            scan.counts.skipped_extension += 1;
         }
     }
     Ok(())

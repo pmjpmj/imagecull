@@ -83,24 +83,24 @@ fn summary(export: &dry_run::Export) -> String {
     if failed > 0 {
         parts.push(format!("{failed} failed"));
     }
-    if export.scan.skipped_extension > 0 {
+    if export.counts.skipped_extension > 0 {
         parts.push(format!(
             "{} skipped (not RAW)",
-            export.scan.skipped_extension
+            export.counts.skipped_extension
         ));
     }
-    if export.scan.ignored > 0 {
+    if export.counts.ignored > 0 {
         parts.push(format!(
             "{} ignored (Finder noise)",
-            export.scan.ignored
+            export.counts.ignored
         ));
     }
-    if export.scan.hidden_directories > 0 {
+    if export.counts.hidden_directories > 0 {
         parts.push(format!(
             "{} {} not scanned",
-            export.scan.hidden_directories,
+            export.counts.hidden_directories,
             plural(
-                export.scan.hidden_directories,
+                export.counts.hidden_directories,
                 "hidden directory",
                 "hidden directories"
             )
@@ -123,7 +123,7 @@ mod tests {
     use std::path::PathBuf;
 
     use imagecull_core::error::{Error, ErrorKind};
-    use imagecull_core::ingest::{Scan, SourceFile};
+    use imagecull_core::ingest::{ScanCounts, SourceFile};
     use imagecull_core::ExitCode;
 
     use super::*;
@@ -138,8 +138,7 @@ mod tests {
     fn export(frames: Vec<dry_run::Frame>) -> dry_run::Export {
         dry_run::Export {
             previews: PathBuf::from("/out"),
-            scan: Scan {
-                files: frames.iter().map(|frame| frame.source.clone()).collect(),
+            counts: ScanCounts {
                 skipped_extension: 3,
                 ignored: 2,
                 hidden_directories: 1,

@@ -91,6 +91,17 @@ pub fn padded(jpeg: &[u8], filler: usize) -> Vec<u8> {
 /// IFD0 declares the first preview the way a camera does
 /// (`JPEGInterchangeFormat`); the rest hang off SubIFDs.
 pub fn nef(orientation: u16, previews: &[Vec<u8>]) -> Vec<u8> {
+    tiff(orientation, previews, false)
+}
+
+/// A DNG-shaped file: the same TIFF container, marked with `DNGVersion` so that
+/// `raw-files` stops calling it a NEF, exactly as an Adobe-converted or
+/// camera-native DNG does.
+pub fn dng(orientation: u16, previews: &[Vec<u8>]) -> Vec<u8> {
+    tiff(orientation, previews, true)
+}
+
+fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     const TYPE_ASCII: u16 = 2;
     const TYPE_SHORT: u16 = 3;
     const TYPE_LONG: u16 = 4;
@@ -99,12 +110,17 @@ pub fn nef(orientation: u16, previews: &[Vec<u8>]) -> Vec<u8> {
     const SUB_IFDS: u16 = 0x014A;
     const JPEG_OFFSET: u16 = 0x0201;
     const JPEG_LENGTH: u16 = 0x0202;
+    const DNG_VERSION: u16 = 0xC612;
+    const TYPE_BYTE: u16 = 1;
 
     let make: &[u8] = b"NIKON CORPORATION\0";
     let sub_count = previews.len().saturating_sub(1);
 
     let mut entries: Vec<(u16, u16, u32, [u8; 4])> = Vec::new();
-    let entry_count = 2 + usize::from(sub_count > 0) + if previews.is_empty() { 0 } else { 2 };
+    let entry_count = 2
+        + usize::from(dng)
+        + usize::from(sub_count > 0)
+        + if previews.is_empty() { 0 } else { 2 };
     let ifd0_size = 2 + 12 * entry_count + 4;
 
     // Lay the file out: header, IFD0, out-of-line values, SubIFDs, then the
@@ -169,6 +185,10 @@ pub fn nef(orientation: u16, previews: &[Vec<u8>]) -> Vec<u8> {
                 .expect("a small preview")
                 .to_le_bytes(),
         ));
+    }
+    if dng {
+        // DNGVersion 1.4.0.0, stored inline: four bytes need no offset.
+        entries.push((DNG_VERSION, TYPE_BYTE, 4, [1, 4, 0, 0]));
     }
     entries.sort_by_key(|entry| entry.0);
 

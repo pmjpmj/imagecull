@@ -29,4 +29,4 @@ pub mod version;
 
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
-pub use ingest::{Scan, ScanOptions, SourceFile};
+pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};

@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::ingest::{self, Scan, ScanOptions, SourceFile};
+use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::preprocess::{self, Params};
 use crate::preview;
 
@@ -21,8 +21,8 @@ use crate::preview;
 pub struct Export {
     /// Where the previews were written.
     pub previews: PathBuf,
-    /// What the scan found, including what it ignored and skipped.
-    pub scan: Scan,
+    /// What the scan left out, and why.
+    pub counts: ScanCounts,
     /// One entry per accepted file, in ingest order.
     pub frames: Vec<Frame>,
 }
@@ -76,14 +76,9 @@ pub fn render_previews(
     options: &ScanOptions,
     params: &Params,
 ) -> Result<Export> {
-    let scan = ingest::scan(shoot, options)?;
     guard_outside_shoot(shoot, previews)?;
-    fs::create_dir_all(previews).map_err(|error| {
-        Error::fatal(format!(
-            "cannot create the previews directory {}: {error}",
-            previews.display()
-        ))
-    })?;
+    create_previews_dir(previews)?;
+    let scan = ingest::scan(shoot, options)?;
 
     let mut frames = Vec::with_capacity(scan.files.len());
     for source in &scan.files {
@@ -95,7 +90,7 @@ pub fn render_previews(
     }
     Ok(Export {
         previews: previews.to_path_buf(),
-        scan,
+        counts: scan.counts,
         frames,
     })
 }
@@ -108,12 +103,7 @@ fn render_one(source: &SourceFile, previews: &Path, params: &Params) -> Result<W
     let jpeg = encoded.jpeg;
     let target = preview_path(previews, &source.relative);
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::fatal(format!(
-                "cannot create the previews directory {}: {error}",
-                parent.display()
-            ))
-        })?;
+        create_previews_dir(parent)?;
     }
     fs::write(&target, &jpeg).map_err(|error| {
         Error::fatal(format!(
@@ -127,6 +117,16 @@ fn render_one(source: &SourceFile, previews: &Path, params: &Params) -> Result<W
         width: encoded.width,
         height: encoded.height,
         jpeg_bytes: jpeg.len(),
+    })
+}
+
+/// Create `dir` and any missing parents, or say why the run cannot write.
+fn create_previews_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).map_err(|error| {
+        Error::fatal(format!(
+            "cannot create the previews directory {}: {error}",
+            dir.display()
+        ))
     })
 }
 

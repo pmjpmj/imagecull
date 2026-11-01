@@ -76,10 +76,13 @@ fn every_accepted_file_gets_exactly_one_preview_and_the_folder_shape_is_mirrored
     )
     .expect("dry run");
 
-    assert_eq!(export.scan.files.len(), 2, "one row per accepted file");
-    assert_eq!(export.frames.len(), 2);
+    assert_eq!(
+        export.frames.len(),
+        2,
+        "one entry per accepted file, files and frames in step"
+    );
     assert_eq!(export.written(), 2);
-    assert_eq!(export.scan.skipped_extension, 1);
+    assert_eq!(export.counts.skipped_extension, 1);
 
     let dsc1 = previews.path().join("DSC_0001.jpg");
     let dsc2 = previews.path().join("sub/DSC_0002.jpg");
@@ -162,6 +165,41 @@ fn garbage_and_truncated_files_are_classified_failures_not_panics() {
         ],
         "in file order: garbage, a cut header, a cut preview"
     );
+}
+
+#[test]
+fn a_dng_gets_a_row_that_says_this_build_cannot_read_it() {
+    // `raw-files 0.6.0` reads NEF, ARW and JPEG, and has no DNG reader at all,
+    // so a Z body set to DNG produces rows marked `unreadable` rather than
+    // scores. The extension is accepted (spec §8.1) and the gap is reported,
+    // never silently dropped — pinning it here so the day DNG support arrives,
+    // this test is the thing that has to change.
+    let (shoot_dir, previews) = shoot();
+    write(
+        shoot_dir.path(),
+        "DSC_0001.DNG",
+        &support::dng(1, &[support::jpeg(64, 48, 80)]),
+    );
+    write(
+        shoot_dir.path(),
+        "DSC_0002.NEF",
+        &nef_with_preview(1, 32, 24),
+    );
+
+    let export = dry_run::render_previews(
+        shoot_dir.path(),
+        previews.path(),
+        &ScanOptions::default(),
+        &Params::default(),
+    )
+    .expect("an unreadable format is a row, not a stopped run");
+
+    assert_eq!(export.frames.len(), 2, "the .DNG is accepted and gets its row");
+    assert_eq!(export.written(), 1, "the NEF still scores");
+    let dng = &export.frames[0];
+    assert_eq!(dng.source.relative.to_string_lossy(), "DSC_0001.DNG");
+    let error = dng.outcome.as_ref().expect_err("a classified error");
+    assert_eq!(error.kind(), Some(ErrorKind::Unreadable));
 }
 
 #[test]

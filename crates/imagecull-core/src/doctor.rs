@@ -186,13 +186,7 @@ impl FileCheck {
 
     /// One sentence: what the pipeline produced, or why it could not.
     pub fn message(&self) -> String {
-        let name = self
-            .path
-            .file_name()
-            .map_or_else(
-                || self.path.display().to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            );
+        let name = preview::file_name(&self.path);
         match &self.outcome {
             Ok(facts) => format!(
                 "{name}: embedded preview {}x{} shown upright by orientation {}, sent as {}x{} {}, \

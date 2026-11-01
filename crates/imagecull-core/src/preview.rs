@@ -77,7 +77,7 @@ fn largest_by_area(previews: &[Preview]) -> Option<Preview> {
 }
 
 /// The file's name alone, for messages that end up in a CSV cell.
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
