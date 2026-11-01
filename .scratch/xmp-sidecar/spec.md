@@ -1,6 +1,6 @@
 # Spec — the rating lives in the sidecar
 
-**Status:** ready-for-agent
+**Status:** landed (2026-11-19) — five tickets, all resolved, plus review fixes
 **Date:** 2026-11-19
 **Source:** `SPEC.md` §9, §12, §15; `GLOSSARY.md`; the grilling session of 2026-11-19. Builds the
 sidecars `SPEC.md` §12 specced as v2, and retires the ledger §9.2 specced by deleting it
