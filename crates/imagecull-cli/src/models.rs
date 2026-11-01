@@ -8,11 +8,19 @@
 use imagecull_core::ExitCode;
 use imagecull_core::omlx::{Catalog, MIN_DECISION_VERSION};
 
-use crate::cli::ServerArgs;
+use crate::cli::CommonArgs;
+use crate::progress::plural;
 
 /// Run the command and return the process exit code.
-pub fn run(args: &ServerArgs) -> u8 {
-    let client = match args.client() {
+pub fn run(args: &CommonArgs) -> u8 {
+    let effective = match args.effective(args.overrides()) {
+        Ok(effective) => effective,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::Fatal.code();
+        }
+    };
+    let client = match args.client(&effective) {
         Ok(client) => client,
         Err(message) => {
             eprintln!("error: {message}");
@@ -32,7 +40,7 @@ pub fn run(args: &ServerArgs) -> u8 {
                     &catalog,
                     version.as_deref(),
                     client.endpoint().as_str(),
-                    args.model()
+                    args.alias(&effective)
                 )
             );
             ExitCode::Ok.code()
@@ -101,18 +109,20 @@ pub fn render(
             "\n* a decision model: answers /v1/systemone, which is what imagecull scores with\n",
         );
     }
-    if !catalog.types_reported() {
+    if let Some(http_status) = catalog.types_unavailable() {
+        out.push_str(&format!(
+            "\n! this server answered GET /v1/models/status with HTTP {http_status}, so what each \
+             model is could not be read and none of the above could be marked — scoring may still \
+             work: try `imagecull doctor` or a one-file run\n"
+        ));
+    } else if !catalog.types_reported() {
         out.push_str(&format!(
             "\n! this server does not report model types (GET /v1/models/status is missing), \
-             so none of the above could be marked — upgrade oMLX to {MIN_DECISION_VERSION} or \
-             later to score photos\n"
+             so none of the above could be marked — a run may still score against it; upgrade \
+             to oMLX {MIN_DECISION_VERSION} or later to have decision models marked\n"
         ));
     }
     out
-}
-
-fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { one } else { many }
 }
 
 #[cfg(test)]
@@ -173,6 +183,23 @@ mod tests {
         assert!(rendered.contains("/v1/models/status is missing"));
         assert!(rendered.contains(MIN_DECISION_VERSION));
         assert!(!rendered.contains("* a decision model"));
+    }
+
+    #[test]
+    fn a_keyed_type_report_says_so_and_does_not_blame_the_version() {
+        let catalog = Catalog::new(
+            vec![model("clef-flash-oQ4e", ModelKind::Unreported, None)],
+            false,
+        )
+        .with_types_unavailable(401);
+        let rendered = render(&catalog, None, "http://127.0.0.1:8000", "clef-flash-oQ4e");
+
+        assert!(rendered.contains("HTTP 401"), "{rendered}");
+        assert!(rendered.contains("scoring may still work"), "{rendered}");
+        assert!(
+            !rendered.contains(MIN_DECISION_VERSION),
+            "upgrading will not lift an API key: {rendered}"
+        );
     }
 
     #[test]

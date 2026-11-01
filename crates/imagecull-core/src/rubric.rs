@@ -3,14 +3,16 @@
 //!
 //! A rubric is a file a photographer edits between shoots, so it is loaded,
 //! validated and turned into an identity before a single request goes out
-//! (spec §8). The four `score` questions are independent — never combined,
-//! never rescaled — and the two `choice` questions carry the star rating and
-//! the keep/drop verdict. Criteria are ordered arrays rather than tables
-//! because the order is part of the legend the model reads.
+//! (spec §8). Three of them are compiled into the binary ([`Builtin`]) and
+//! selected by name; any other is a file selected by path ([`RubricSource`]).
+//! The four `score` questions are independent — never combined, never rescaled —
+//! and the two `choice` questions carry the star rating and the keep/drop
+//! verdict. Criteria are ordered arrays rather than tables because the order is
+//! part of the legend the model reads.
 
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -51,50 +53,56 @@ const VERDICT_KEYS: [&str; 3] = ["dislike", "neutral", "like"];
 /// levels would silently shift every score.
 const SCORE_KEYS: [&str; 11] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
 
-/// The rubric shipped inside the binary (spec §8).
-const EMBEDDED: &str = include_str!("../rubrics/default.toml");
+/// The rubrics compiled into the binary, one file each, each of which stays in
+/// the tree as the copy a photographer can read and start a rubric of their own
+/// from.
+const GENERAL: &str = include_str!("../rubrics/general.toml");
+const PRESS: &str = include_str!("../rubrics/press.toml");
+const HOLIDAY: &str = include_str!("../rubrics/holiday.toml");
 
 /// A loaded, validated rubric.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rubric {
+    /// Which built-in this rubric was selected as, when a name selected it.
+    /// Provenance only: two rubrics with the same words are the same judgement,
+    /// however a run reached one (spec §8.3).
+    builtin: Option<Builtin>,
     model: String,
     questions: Vec<Question>,
 }
 
 impl Rubric {
-    /// The rubric compiled into the binary.
-    ///
-    /// Parsed on every call rather than cached: it is a few kilobytes of TOML,
-    /// and a cached copy would be one more thing to invalidate.
-    pub fn embedded() -> Result<Rubric> {
-        Self::from_toml(EMBEDDED).map_err(|error| {
+    /// The rubric a run judges by: the one selected, or the default built-in
+    /// when nothing selected another — `--rubric` and `[run] rubric`.
+    pub fn select(source: Option<&RubricSource>) -> Result<Rubric> {
+        match source {
+            None => Builtin::DEFAULT.rubric(),
+            Some(RubricSource::Builtin(builtin)) => builtin.rubric(),
+            Some(RubricSource::File(path)) => Self::load(path),
+        }
+    }
+
+    /// Load the rubric file at `path`.
+    pub fn load(path: &Path) -> Result<Rubric> {
+        let text = fs::read_to_string(path).map_err(|error| {
             Error::fatal(format!(
-                "the embedded rubric is broken: {}",
+                "cannot read the rubric file {}: {error}{}",
+                path.display(),
+                built_in_hint(path)
+            ))
+        })?;
+        Self::from_toml(&text).map_err(|error| {
+            Error::fatal(format!(
+                "the rubric file {} is not usable: {}",
+                path.display(),
                 error.message()
             ))
         })
     }
 
-    /// Load `path`, or the embedded rubric when there is no path — `--rubric`.
-    pub fn load(path: Option<&Path>) -> Result<Rubric> {
-        match path {
-            None => Self::embedded(),
-            Some(path) => {
-                let text = fs::read_to_string(path).map_err(|error| {
-                    Error::fatal(format!(
-                        "cannot read the rubric file {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                Self::from_toml(&text).map_err(|error| {
-                    Error::fatal(format!(
-                        "the rubric file {} is not usable: {}",
-                        path.display(),
-                        error.message()
-                    ))
-                })
-            }
-        }
+    /// Which built-in a name selected this rubric as; `None` for a file.
+    pub fn builtin(&self) -> Option<Builtin> {
+        self.builtin
     }
 
     /// Parse and validate rubric TOML.
@@ -156,14 +164,172 @@ impl Rubric {
         field("imagecull-rubric-v1");
         field(model);
         field(&self.questions_json().to_string());
-        let bytes = digest.finalize();
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        RubricHash(hex)
+        RubricHash(hex(digest.finalize()))
     }
+}
+
+/// A rubric compiled into the binary, named the way a photographer names it.
+///
+/// The three differ only in wording: the same six ids, the same 0-10 legends and
+/// the same star/verdict keys, so their reports share a shape and never share a
+/// hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    /// No assumed genre: what a run uses when nothing selects another.
+    General,
+    /// A photo editor culling a photojournalistic shoot.
+    Press,
+    /// A family album from a trip.
+    Holiday,
+}
+
+impl Builtin {
+    /// The built-in a run uses when nothing selects another.
+    pub const DEFAULT: Builtin = Builtin::General;
+
+    /// Every built-in, in the order help text and error messages list them.
+    pub const ALL: [Builtin; 3] = [Builtin::General, Builtin::Press, Builtin::Holiday];
+
+    /// The name a photographer types after `--rubric`.
+    pub fn name(self) -> &'static str {
+        self.entry().0
+    }
+
+    /// The built-in `name` names, matched exactly: three words, spelled as they
+    /// are. `None` means "not a built-in", which leaves the value a path.
+    pub fn from_name(name: &str) -> Option<Builtin> {
+        Self::ALL.into_iter().find(|builtin| builtin.name() == name)
+    }
+
+    /// This rubric, parsed from the copy compiled into the binary.
+    ///
+    /// Parsed on every call rather than cached: it is a few kilobytes of TOML,
+    /// and a cached copy would be one more thing to invalidate.
+    pub fn rubric(self) -> Result<Rubric> {
+        let mut rubric = Rubric::from_toml(self.toml()).map_err(|error| {
+            Error::fatal(format!(
+                "the built-in rubric `{}` is broken: {}",
+                self.name(),
+                error.message()
+            ))
+        })?;
+        rubric.builtin = Some(self);
+        Ok(rubric)
+    }
+
+    /// The TOML compiled in from this rubric's file.
+    fn toml(self) -> &'static str {
+        self.entry().1
+    }
+
+    /// This built-in's name and its TOML, in one place: adding a rubric is a
+    /// variant, a file and a row here, and nothing that can drift apart.
+    fn entry(self) -> (&'static str, &'static str) {
+        match self {
+            Builtin::General => ("general", GENERAL),
+            Builtin::Press => ("press", PRESS),
+            Builtin::Holiday => ("holiday", HOLIDAY),
+        }
+    }
+}
+
+impl fmt::Display for Builtin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// How a run was told which rubric to judge by: one setting, two forms.
+///
+/// A bare `general`, `press` or `holiday` names a built-in; anything else is a
+/// path to a file. Selection never consults the filesystem, so a bare name is a
+/// built-in however the working directory happens to be named, and `./holiday`
+/// is unambiguously the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RubricSource {
+    /// A rubric compiled into the binary.
+    Builtin(Builtin),
+    /// A rubric file.
+    File(PathBuf),
+}
+
+impl RubricSource {
+    /// Read a value that may be a built-in's name or a path: `--rubric` and
+    /// `[run] rubric` both hold one.
+    ///
+    /// The only failure is a selection that names nothing at all; a path that
+    /// does not exist is [`Rubric::load`]'s failure, where the file is opened.
+    pub fn parse(text: &str) -> std::result::Result<RubricSource, String> {
+        if text.trim().is_empty() {
+            return Err(format!(
+                "no rubric named: use one of the built-in rubrics — {} — or a path to a rubric file",
+                builtin_names()
+            ));
+        }
+        Ok(match Builtin::from_name(text) {
+            Some(builtin) => RubricSource::Builtin(builtin),
+            None => RubricSource::File(PathBuf::from(text)),
+        })
+    }
+
+    /// This selection with its path anchored to `base`, when it is a path: a
+    /// config file's paths are relative to the file, its names are not.
+    pub fn anchored(self, base: Option<&Path>) -> RubricSource {
+        match (self, base) {
+            (RubricSource::File(path), Some(base)) if path.is_relative() => {
+                RubricSource::File(base.join(path))
+            }
+            (source, _) => source,
+        }
+    }
+}
+
+/// `general`, `press` and `holiday`, as a message spells them.
+fn builtin_names() -> String {
+    let mut names = String::new();
+    for (position, builtin) in Builtin::ALL.iter().enumerate() {
+        if position > 0 {
+            names.push_str(if position + 1 == Builtin::ALL.len() {
+                " and "
+            } else {
+                ", "
+            });
+        }
+        names.push('`');
+        names.push_str(builtin.name());
+        names.push('`');
+    }
+    names
+}
+
+/// A path with no directory and no extension is a bare word, and a bare word
+/// that could not be opened is more often a mistyped built-in name than a file,
+/// so name the three the run does know.
+fn built_in_hint(path: &Path) -> String {
+    let bare = path.extension().is_none()
+        && path
+            .parent()
+            .is_none_or(|parent| parent.as_os_str().is_empty());
+    if bare {
+        let names = builtin_names();
+        format!(" — built-in rubrics are {names}; pass one by name, or a path to a rubric file")
+    } else {
+        String::new()
+    }
+}
+
+/// A digest as this crate spells it: 64 lowercase hex characters.
+///
+/// The rubric hash, the SHA-256 of the bytes that were sent and the dedupe key
+/// are all SHA-256 digests that end up in a CSV cell or a ledger line, so they
+/// are spelled here, once.
+pub(crate) fn hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    use fmt::Write as _;
+    let mut out = String::new();
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// A rubric's identity, as 64 lowercase hex characters.
@@ -365,7 +531,11 @@ impl RubricFile {
             )));
         }
 
-        Ok(Rubric { model, questions })
+        Ok(Rubric {
+            builtin: None,
+            model,
+            questions,
+        })
     }
 }
 

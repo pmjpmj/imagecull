@@ -57,11 +57,11 @@ pub struct Encoded {
 pub fn render(embedded: &Embedded, params: &Params) -> Result<Encoded> {
     let mut image = image::load_from_memory_with_format(&embedded.jpeg, image::ImageFormat::Jpeg)
         .map_err(|error| {
-            Error::new(
-                ErrorKind::PreviewBroken,
-                format!("the embedded preview does not decode as JPEG: {error}"),
-            )
-        })?;
+        Error::new(
+            ErrorKind::PreviewBroken,
+            format!("the embedded preview does not decode as JPEG: {error}"),
+        )
+    })?;
     apply_orientation(&mut image, embedded.orientation);
 
     let mut rgb = image.to_rgb8();

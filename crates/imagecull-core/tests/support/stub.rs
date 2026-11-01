@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use imagecull_core::omlx::Endpoint;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// One canned answer, matched on the request path.
 pub struct Route {
@@ -73,6 +73,59 @@ impl Stub {
     /// Answer each request in turn from `script`, whatever its path.
     pub fn scripted(script: Vec<(u16, String)>) -> Stub {
         Stub::start(Vec::new(), script)
+    }
+
+    /// A server that passes a run's preflight — `GET /health` ready and every
+    /// alias in `aliases` served as a decision model — and then answers the
+    /// decision requests in turn from `script`.
+    pub fn serving(script: Vec<(u16, String)>, aliases: &[&str]) -> Stub {
+        let listed: Vec<Value> = aliases.iter().map(|alias| json!({"id": alias})).collect();
+        let typed: Vec<Value> = aliases
+            .iter()
+            .map(|alias| json!({"id": alias, "model_type": "decision"}))
+            .collect();
+        Stub::start(
+            vec![
+                Route::new(
+                    "/health",
+                    200,
+                    json!({"status": "ok", "version": "0.7.1.dev1"}).to_string(),
+                ),
+                Route::new("/v1/models", 200, json!({"data": listed}).to_string()),
+                Route::new(
+                    "/v1/models/status",
+                    200,
+                    json!({"models": typed}).to_string(),
+                ),
+            ],
+            script,
+        )
+    }
+
+    /// A server that lists its aliases but never answers `/v1/models/status`: an
+    /// install older than that endpoint, or one that guards it. It is still a
+    /// server a run may score against, which is why the fixture exists.
+    pub fn untyped(script: Vec<(u16, String)>, aliases: &[&str]) -> Stub {
+        let listed: Vec<Value> = aliases.iter().map(|alias| json!({"id": alias})).collect();
+        Stub::start(
+            vec![
+                Route::new(
+                    "/health",
+                    200,
+                    json!({"status": "ok", "version": "0.7.1.dev1"}).to_string(),
+                ),
+                Route::new("/v1/models", 200, json!({"data": listed}).to_string()),
+                // The old endpoint 404s, as an install without it does. Routed
+                // rather than left to fall through, so the script stays for the
+                // decision requests.
+                Route::new(
+                    "/v1/models/status",
+                    404,
+                    json!({"detail": "Not Found"}).to_string(),
+                ),
+            ],
+            script,
+        )
     }
 
     /// Wait this long before answering, so a client timeout can be exercised.

@@ -38,7 +38,7 @@ pub struct ScanCounts {
 }
 
 /// How to scan a folder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanOptions {
     /// Descend into subdirectories. Hidden ones are never descended either way.
     pub recursive: bool,
@@ -156,10 +156,10 @@ fn collect(dir: &Path, base: &Path, options: &ScanOptions, scan: &mut Scan) -> R
         if is_finder_noise(&name) {
             scan.counts.ignored += 1;
         } else if has_accepted_extension(&name) {
-            let relative = entry.path().strip_prefix(base).map_or_else(
-                |_| PathBuf::from(&name),
-                std::path::Path::to_path_buf,
-            );
+            let relative = entry
+                .path()
+                .strip_prefix(base)
+                .map_or_else(|_| PathBuf::from(&name), std::path::Path::to_path_buf);
             scan.files.push(SourceFile {
                 path: entry.path(),
                 relative,
@@ -192,9 +192,8 @@ fn is_finder_noise(name: &str) -> bool {
 
 /// The entries of `dir`, or the fatal error explaining why there are none.
 fn read_dir(dir: &Path) -> Result<Vec<fs::DirEntry>> {
-    let entries = fs::read_dir(dir).map_err(|error| {
-        Error::fatal(format!("cannot read {}: {error}", dir.display()))
-    })?;
+    let entries = fs::read_dir(dir)
+        .map_err(|error| Error::fatal(format!("cannot read {}: {error}", dir.display())))?;
     entries
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| Error::fatal(format!("cannot read {}: {error}", dir.display())))

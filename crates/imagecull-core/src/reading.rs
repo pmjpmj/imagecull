@@ -7,6 +7,7 @@
 //! mistyped becomes a classified `bad_response` rather than a guess, and the
 //! raw document is carried along either way so nothing is lost.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, ErrorKind, Result};
@@ -37,7 +38,10 @@ impl Reading {
 /// The four scores are kept apart on purpose: never combined, never rescaled
 /// to 100. `stars` is the model's own five-way choice, not a threshold over the
 /// scores, and `verdict` is its keep/drop opinion.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialised as-is into a ledger record, so a resumed frame's answers are the
+/// ones the model gave and not a re-reading of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Answers {
     /// The keeper judgement, framed around photojournalistic keepers.
     pub overall: f64,
@@ -57,7 +61,7 @@ pub struct Answers {
 }
 
 /// The top-option probability of each answer.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Confidences {
     /// Confidence in `overall`.
     pub overall: f64,
@@ -102,6 +106,25 @@ impl Verdict {
             "like" => Some(Verdict::Like),
             _ => None,
         }
+    }
+}
+
+/// A verdict in a ledger record is the key the rubric and the CSV use, and the
+/// same spellings [`Verdict::as_str`] and [`Verdict::from_key`] give: one
+/// spelling per concept, not a second serde-derived one.
+impl Serialize for Verdict {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Verdict {
+    fn deserialize<D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Verdict, D::Error> {
+        let key = String::deserialize(deserializer)?;
+        Verdict::from_key(&key)
+            .ok_or_else(|| serde::de::Error::custom(format!("`{key}` is not a verdict")))
     }
 }
 

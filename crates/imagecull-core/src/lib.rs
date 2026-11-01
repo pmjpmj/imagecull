@@ -11,7 +11,18 @@
 //! ([`preprocess`]), and the `--dry-run` export that puts them together
 //! ([`dry_run`]) from M1; and the rubric ([`rubric`]), the `/v1/systemone`
 //! client ([`systemone`]) and the one-frame scoring entry point ([`scoring`])
-//! from M2.
+//! from M2, with the CSV deliverable ([`report`]) on top of them. M3 adds the
+//! rules that keep a long run honest: the taxonomy's retries and its aborting
+//! kinds ([`error`]), the preflight that runs before the first frame, the
+//! cancellation flag between files ([`scoring::Cancel`]) and the run's own exit
+//! classification ([`scoring::Ending`]). The ledger beside the CSV ([`ledger`])
+//! is what lets a run be interrupted: each frame is recorded and flushed as it
+//! is judged, `--resume` skips what is already there, and the CSV is rendered
+//! from those records. Ticket 07 adds the run's own account of itself
+//! ([`progress`]): the events a front end draws a frame line and a summary
+//! from, still with no terminal in the core. The config file ([`config`]) is the
+//! last source of values a run reads: what stays true across runs, resolved into
+//! the same effective config the flags produce.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -20,22 +31,35 @@
     clippy::exit
 )]
 
+pub mod config;
 pub mod doctor;
 pub mod dry_run;
 pub mod error;
 pub mod ingest;
+pub mod ledger;
 pub mod omlx;
 pub mod preprocess;
 pub mod preview;
+pub mod progress;
 pub mod reading;
+pub mod report;
 pub mod rubric;
 pub mod scoring;
 pub mod systemone;
 pub mod version;
 
+pub use config::{ConfigFile, Effective, Env, Loaded, Resolved};
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
+pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
+pub use progress::{
+    DISAGREEMENT_RULE, Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter,
+    Scores, Silent, Started, StatusCount, Summary, Warning, agrees, implied_stars,
+};
 pub use reading::{Answers, Confidences, Reading, Verdict};
-pub use rubric::{Question, QuestionKind, Rubric, RubricHash};
-pub use scoring::{Config, Decider, Request, Response, Run, State, Usage};
+pub use report::Outputs;
+pub use rubric::{Builtin, Question, QuestionKind, Rubric, RubricHash, RubricSource};
+pub use scoring::{
+    Cancel, Config, Decider, Ending, Request, Response, RetryPolicy, Run, State, Usage,
+};

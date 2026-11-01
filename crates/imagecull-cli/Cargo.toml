@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 imagecull-core = { workspace = true }
 clap = { workspace = true }
+# SIGINT -> the core's cancel flag: the signal belongs to the front end, the
+# decision to stop belongs to the run.
+ctrlc = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

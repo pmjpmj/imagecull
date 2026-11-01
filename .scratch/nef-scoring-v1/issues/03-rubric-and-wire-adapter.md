@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Scoring a single RAW yields all six answers for it, observable at the `Decider` seam and reported to the caller
 - [x] Embedded default rubric plus `--rubric <FILE>` override; changing whitespace or key order does not change the rubric hash, changing any instruction, criterion or the model alias does
@@ -171,3 +171,7 @@ Three findings are recorded and deliberately not fixed here:
   unconditionally, with no TTY gate and no `--quiet`. That is the minimum for
   "reported to the caller"; ticket 07 replaces them with the `Reporter` seam
   rather than extending them.
+
+### Resolution
+
+Merged to `feat/nef-scoring-v1`. The branch is green: `cargo test --locked` (204 tests), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.

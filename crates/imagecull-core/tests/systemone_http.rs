@@ -15,13 +15,14 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use imagecull_core::error::{ErrorKind, Result};
+use imagecull_core::error::{ErrorKind, Recovery, Result};
 use imagecull_core::ingest;
 use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
+use imagecull_core::progress::Silent;
 use imagecull_core::reading::{self, Verdict};
-use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{self, Config, Decider, Request, Response, State};
+use imagecull_core::rubric::{Builtin, Rubric};
+use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::systemone::Adapter;
 use serde_json::{Value, json};
 use support::stub::Stub;
@@ -72,15 +73,27 @@ fn request<'a>(
     }
 }
 
+/// The decision requests the stub received, in order: a run's preflight GETs
+/// come first and are not frames.
+fn posts(stub: &Stub) -> Vec<support::stub::Received> {
+    stub.requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/systemone")
+        .collect()
+}
+
 /// The real adapter, pointed at the stub, with the timeouts a run would use.
-fn adapter(stub: &Stub) -> Adapter {
-    Adapter::new(Client::new(stub.endpoint(), Timeouts::with_read_seconds(5)))
+fn adapter(stub: &Stub, model: &str) -> Adapter {
+    Adapter::new(
+        Client::new(stub.endpoint(), Timeouts::with_read_seconds(5)),
+        model,
+    )
 }
 
 /// One request for one frame, as the pipeline would build it.
 fn decide(stub: &Stub, state: State, preview: &Encoded, model: &str) -> Result<Response> {
-    let rubric = Rubric::embedded().expect("parse");
-    adapter(stub).decide(&request(&rubric, preview, state, model))
+    let rubric = Builtin::General.rubric().expect("parse");
+    adapter(stub, model).decide(&request(&rubric, preview, state, model))
 }
 
 #[test]
@@ -96,7 +109,7 @@ fn a_canned_answer_comes_back_as_a_reading_with_all_six_answers() {
     )
     .expect("a 200 is an answer");
 
-    let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+    let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
     let answers = reading.answers.expect("six readable answers");
     assert_eq!(answers.overall, 6.4237);
     assert_eq!(answers.stars, 4);
@@ -216,7 +229,7 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
     .expect("a 200 is an answer");
 
     let questions = stub.requests()[0].body["questions"].clone();
-    let rubric = Rubric::embedded().expect("parse");
+    let rubric = Builtin::General.rubric().expect("parse");
 
     let overall = &questions["overall"];
     assert_eq!(overall["type"], "score");
@@ -226,8 +239,21 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
     );
     let legend = overall["criteria"].as_array().expect("an ordered legend");
     assert_eq!(legend.len(), 11, "keys 0-10, one description each");
-    assert_eq!(legend[0], "delete — unusable, the frame does not work");
-    assert_eq!(legend[10], "portfolio-grade — the best the shoot can offer");
+    let described: Vec<&str> = rubric
+        .question("overall")
+        .expect("overall")
+        .criteria()
+        .iter()
+        .map(|criterion| criterion.description())
+        .collect();
+    assert_eq!(
+        legend
+            .iter()
+            .map(|level| level.as_str().expect("a description"))
+            .collect::<Vec<_>>(),
+        described,
+        "the legend on the wire is the rubric's own, in key order"
+    );
 
     let stars = &questions["stars"];
     assert_eq!(stars["type"], "choice");
@@ -237,9 +263,11 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
         ["1", "2", "3", "4", "5"],
         "option order survives, because it is part of the legend"
     );
+    let stars_offered = rubric.question("stars").expect("stars");
     assert_eq!(
         options["1"],
-        "reject — unusable, out of focus, or a duplicate"
+        stars_offered.criteria()[0].description(),
+        "each option carries the wording the rubric gives it"
     );
 
     let verdict = &questions["verdict"];
@@ -289,7 +317,7 @@ fn an_adversarial_document_becomes_a_bad_response_not_a_guess() {
             "clef-flash-oQ4e",
         )
         .unwrap_or_else(|error| panic!("{case}: HTTP itself succeeded: {error}"));
-        let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+        let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
         let error = reading.answers.expect_err(&format!("{case} must not read"));
         assert_eq!(error.kind(), Some(ErrorKind::BadResponse), "{case}");
     }
@@ -309,7 +337,7 @@ fn a_body_that_is_not_json_is_kept_as_the_document_it_was() {
     .expect("the status was a 200");
 
     assert_eq!(response.document, json!("not json at all"));
-    let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+    let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
     let error = reading.answers.expect_err("nothing to read");
     assert_eq!(error.kind(), Some(ErrorKind::BadResponse));
 }
@@ -357,9 +385,7 @@ fn the_status_taxonomy_names_what_the_server_rejected() {
 }
 
 #[test]
-fn a_5xx_is_classified_as_a_failure_with_its_status_kept() {
-    // Retrying and the 5xx action are ticket 06's; here the point is that a
-    // 500 is never mistaken for an answer.
+fn a_5xx_names_the_server_side_failure_and_keeps_its_status() {
     let stub = Stub::scripted(vec![(500, r#"{"detail":"boom"}"#.to_string())]);
     let preview = preview(100, 100);
 
@@ -371,8 +397,35 @@ fn a_5xx_is_classified_as_a_failure_with_its_status_kept() {
     )
     .expect_err("a 500 is not an answer");
 
+    assert_eq!(error.kind(), Some(ErrorKind::Http5xx));
     assert_eq!(error.http_status(), Some(500));
+    assert_eq!(
+        error.recovery(),
+        Recovery::RetryThenRecord,
+        "a server-side hiccup is retried, not an abort and not a 4xx"
+    );
     assert!(error.message().contains("boom"));
+}
+
+#[test]
+fn a_context_that_is_too_long_says_which_knob_to_turn_down() {
+    let stub = Stub::scripted(vec![(413, r#"{"detail":"context too long"}"#.to_string())]);
+    let preview = preview(100, 100);
+
+    let error = decide(
+        &stub,
+        State::for_frame("DSC_0001.NEF", None),
+        &preview,
+        "clef-flash-oQ4e",
+    )
+    .expect_err("a 413 is not an answer");
+
+    assert_eq!(error.kind(), Some(ErrorKind::Http413));
+    assert!(
+        error.message().contains("--max-edge"),
+        "the row has to say what to change: {}",
+        error.message()
+    );
 }
 
 #[test]
@@ -381,11 +434,14 @@ fn nothing_listening_is_server_unreachable() {
     let addr = listener.local_addr().expect("addr");
     drop(listener);
 
-    let adapter = Adapter::new(Client::new(
-        Endpoint::parse(&format!("http://{addr}")).expect("valid endpoint"),
-        Timeouts::with_read_seconds(5),
-    ));
-    let rubric = Rubric::embedded().expect("parse");
+    let adapter = Adapter::new(
+        Client::new(
+            Endpoint::parse(&format!("http://{addr}")).expect("valid endpoint"),
+            Timeouts::with_read_seconds(5),
+        ),
+        "clef-flash-oQ4e",
+    );
+    let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
     let error = adapter
         .decide(&request(
@@ -402,14 +458,17 @@ fn nothing_listening_is_server_unreachable() {
 #[test]
 fn a_server_that_never_answers_times_out() {
     let stub = Stub::scripted(vec![(200, answer_document())]).taking(Duration::from_secs(2));
-    let adapter = Adapter::new(Client::new(
-        stub.endpoint(),
-        Timeouts {
-            connect: Duration::from_secs(5),
-            read: Duration::from_millis(200),
-        },
-    ));
-    let rubric = Rubric::embedded().expect("parse");
+    let adapter = Adapter::new(
+        Client::new(
+            stub.endpoint(),
+            Timeouts {
+                connect: Duration::from_secs(5),
+                read: Duration::from_millis(200),
+            },
+        ),
+        "clef-flash-oQ4e",
+    );
+    let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
 
     let error = adapter
@@ -440,16 +499,24 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
     let script = std::iter::repeat_n((200, answer_document()), 3).collect();
     // A handler that takes a moment to answer would let a concurrent client
     // overlap requests; the stub records the deepest overlap it ever saw.
-    let stub = Stub::scripted(script).taking(Duration::from_millis(30));
+    let stub = Stub::serving(script, &["clef-flash-oQ4e"]).taking(Duration::from_millis(30));
 
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         None,
         Params::default(),
         ingest::ScanOptions::default(),
         Some("street at dusk".into()),
+        support::unwatched(),
     );
-    let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, &config.model),
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(run.frames.len(), 3);
     assert_eq!(run.scored(), 3);
@@ -457,7 +524,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
     assert_eq!(run.model, "clef-flash-oQ4e");
     assert_eq!(run.rubric_hash, config.rubric_hash());
 
-    let requests = stub.requests();
+    let requests = posts(&stub);
     assert_eq!(requests.len(), 3, "one request per frame");
     let names: Vec<&str> = requests
         .iter()
@@ -487,26 +554,196 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
 #[test]
 fn a_run_over_http_reports_the_answers_it_read() {
     let shoot = shoot(1);
-    let stub = Stub::scripted(vec![(200, answer_document())]);
+    let stub = Stub::serving(vec![(200, answer_document())], &["clef-27b-oQ4e"]);
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         Some("clef-27b-oQ4e".into()),
         Params::default(),
         ingest::ScanOptions::default(),
         None,
+        support::unwatched(),
     );
 
-    let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, &config.model),
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     let frame = &run.frames[0];
     let reading = frame.outcome.as_ref().expect("the frame was prepared");
     let answers = reading.answers.as_ref().expect("six answers");
     assert_eq!(answers.overall, 6.4237);
     assert_eq!(answers.stars, 4);
-    assert_eq!(stub.requests()[0].body["model"], "clef-27b-oQ4e");
+    assert_eq!(posts(&stub)[0].body["model"], "clef-27b-oQ4e");
     assert_eq!(
         run.rubric_hash,
         config.rubric.hash("clef-27b-oQ4e"),
         "--model feeds the rubric hash"
+    );
+}
+
+#[test]
+fn a_server_that_keys_its_type_report_still_passes_preflight() {
+    // The real-world shape: /health and /v1/models open, /v1/models/status behind
+    // an API key, /v1/systemone answering. Refusing to score here would be the
+    // tool calling a working server broken.
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "healthy", "default_model": "clef-flash-oQ4e"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models/status",
+            401,
+            json!({"error": {"message": "API key required"}}).to_string(),
+        ),
+    ]);
+    let decide = &adapter(&stub, "clef-flash-oQ4e");
+
+    assert!(
+        decide.preflight().is_ok(),
+        "a keyed type report is a caveat, not a failure: {:?}",
+        decide.preflight().map_err(|error| error.to_string())
+    );
+}
+
+#[test]
+fn a_server_that_does_not_report_model_types_can_still_be_scored() {
+    // Spec §51: preflight confirms the alias exists "and if the server exposes
+    // per-model status, confirm the model is a decision model". A server without
+    // that endpoint has not said it is unfit — refusing every run against it
+    // would refuse a working server on the strength of a missing nicety.
+    let shoot = shoot(1);
+    let stub = Stub::untyped(vec![(200, answer_document())], &["clef-flash-oQ4e"]);
+    let config = Config::new(
+        Builtin::General.rubric().expect("parse"),
+        None,
+        Params::default(),
+        ingest::ScanOptions::default(),
+        None,
+        support::unwatched(),
+    );
+    let adapter = adapter(&stub, &config.model);
+    let preflight = adapter.preflight();
+    assert!(
+        preflight.is_ok(),
+        "a server that cannot confirm types may still score: {:?}",
+        preflight.map_err(|error| error.to_string())
+    );
+    let run = scoring::run(shoot.path(), &config, &adapter, &Silent, &Cancel::new())
+        .expect("a run over a server with no type report");
+
+    assert_eq!(run.scored(), 1, "the frame was scored, not refused");
+    assert_eq!(posts(&stub).len(), 1, "one frame, one request");
+}
+
+#[test]
+fn a_server_that_says_the_alias_is_not_a_decision_model_fails_preflight() {
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "ok", "version": "0.7.1.dev1"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models/status",
+            200,
+            json!({"models": [{"id": "clef-flash-oQ4e", "model_type": "vlm"}]}).to_string(),
+        ),
+    ]);
+
+    let error = adapter(&stub, "clef-flash-oQ4e")
+        .preflight()
+        .expect_err("a chat model cannot answer /v1/systemone");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("not a decision model") && error.message().contains("vlm"),
+        "the message says what the alias is and what it needs to be: {}",
+        error.message()
+    );
+    assert!(
+        posts(&stub).is_empty(),
+        "nothing is sent to a server that was told it cannot answer"
+    );
+}
+
+#[test]
+fn a_server_that_predates_decision_models_fails_preflight() {
+    // The relaxed rule still refuses the one server that has said, in so many
+    // words, that it cannot serve the endpoint: 0.7.0 predates decision models.
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "ok", "version": "0.7.0"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        // No /v1/models/status at all: the stub 404s, as 0.7.0 does.
+    ]);
+
+    let error = adapter(&stub, "clef-flash-oQ4e")
+        .preflight()
+        .expect_err("a server older than decision models cannot score");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("predates decision models")
+            && error.message().contains("0.7.1.dev1"),
+        "the message names the release that is needed: {}",
+        error.message()
+    );
+}
+
+#[test]
+fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() {
+    let shoot = shoot(2);
+    let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);
+    let config = Config::new(
+        Builtin::General.rubric().expect("parse"),
+        Some("clef-flash-oQ4e".into()),
+        Params::default(),
+        ingest::ScanOptions::default(),
+        None,
+        support::unwatched(),
+    );
+
+    let error = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter(&stub, "clef-flash-oQ4e"),
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect_err("a missing alias is a broken server, not a broken file");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("clef-flash-oQ4e") && error.message().contains("clef-27b-oQ4e"),
+        "the message names the alias asked for and the ones served: {}",
+        error.message()
+    );
+    assert!(
+        posts(&stub).is_empty(),
+        "no frame is sent to a server that cannot answer"
     );
 }

@@ -36,8 +36,16 @@ pub struct Report {
 
 impl Report {
     /// Whether photos can be scored with this endpoint and alias.
+    ///
+    /// [`Verdict::TypesUnavailable`] counts as ready: the alias is served, and
+    /// only the optional type report is missing. A server that keys that one
+    /// endpoint still answers `/v1/systemone` — refusing to score against it
+    /// would be the tool calling a working server broken.
     pub fn is_ready(&self) -> bool {
-        matches!(self.verdict, Verdict::Ready { .. })
+        matches!(
+            self.verdict,
+            Verdict::Ready { .. } | Verdict::TypesUnavailable { .. }
+        )
     }
 
     /// The exit classification: ready, or fatal.
@@ -46,6 +54,38 @@ impl Report {
             ExitCode::Ok
         } else {
             ExitCode::Fatal
+        }
+    }
+
+    /// Whether a run may start against this endpoint and alias.
+    ///
+    /// Looser than [`Report::is_ready`] on purpose, because the two answer
+    /// different questions. `doctor` reports only what it can *confirm*, and the
+    /// front end needs that strictness to explain an install. A run, though,
+    /// only refuses what it can *prove* unfit: nothing answering, something that
+    /// is not oMLX, a server demanding an API key, a checkpoint still loading, an
+    /// alias the server does not serve, or a server that reports model types and
+    /// says the alias is not a decision model (or that it predates decision
+    /// models altogether). A server that simply never says what its models are
+    /// has not been shown to be unfit — its `/v1/systemone` may answer
+    /// perfectly — so preflight lets it through (spec §51: "if the server
+    /// exposes per-model status, confirm the model is a decision model").
+    pub fn can_score(&self) -> bool {
+        match &self.verdict {
+            Verdict::Ready { .. } | Verdict::TypesUnavailable { .. } => true,
+            // An absent type report is not a negative one: an install without
+            // `/v1/models/status` has simply never been asked, and it serves the
+            // alias this run wants.
+            Verdict::NoModelTypes { .. } | Verdict::TooOld { found: None } => true,
+            // A version below the floor is the one report that says the endpoint
+            // this run depends on does not exist there.
+            Verdict::TooOld { found: Some(_) }
+            | Verdict::Unreachable { .. }
+            | Verdict::NotReady { .. }
+            | Verdict::Unauthorized { .. }
+            | Verdict::NotOmlx { .. }
+            | Verdict::AliasMissing { .. }
+            | Verdict::PlainModel { .. } => false,
         }
     }
 
@@ -104,6 +144,12 @@ impl Report {
                 "no models are served at {endpoint} — load a Clef or Clef-Flash checkpoint in oMLX \
                  and run imagecull models to see its alias"
             ),
+            Verdict::TypesUnavailable { http_status } => format!(
+                "oMLX at {endpoint} serves '{alias}', but GET /v1/models/status returned HTTP \
+                 {http_status}, so which models are decision models cannot be confirmed — scoring \
+                 may still work: check it with `imagecull score <DIR> --limit 1` before a long run, \
+                 or turn auth off for the loopback bind"
+            ),
             Verdict::AliasMissing { available } => format!(
                 "'{alias}' is not served at {endpoint} — served: {}; run imagecull models to see \
                  them, or pass --model",
@@ -156,6 +202,15 @@ pub enum Verdict {
     NoModelTypes {
         /// The version `/health` reported, verbatim.
         version: Option<String>,
+    },
+    /// The alias is served, but `/v1/models/status` would not say what it is.
+    ///
+    /// A server can guard that endpoint with an API key while `/v1/systemone`
+    /// stays open, so this is a caveat rather than a failure: the alias exists,
+    /// which is the part a run cannot do without.
+    TypesUnavailable {
+        /// What `/v1/models/status` answered (401, 403, 404, …).
+        http_status: u16,
     },
     /// The endpoint does not serve the configured alias.
     AliasMissing {
@@ -318,10 +373,25 @@ fn check_models(client: &Client, alias: &str, raw_version: &Option<String>) -> V
         };
     }
 
+    // The alias comes first: an endpoint that does not serve it cannot score,
+    // however much else is or is not known about the server.
+    let Some(model) = catalog.find(alias) else {
+        return Verdict::AliasMissing {
+            available: catalog.aliases(),
+        };
+    };
+    let model = model.clone();
+
     if !catalog.types_reported() {
-        // No /v1/models/status. On a server that never had it, that is the
-        // "too old" verdict; on one that claims a new version, the install is
-        // lying and types cannot be confirmed either way.
+        // No `/v1/models/status` listing. A server that guarded the endpoint or
+        // dropped the call has not said whether it is new enough, and its aliases
+        // are known, so the honest verdict is a caveat rather than a diagnosis.
+        if let Some(http_status) = catalog.types_unavailable() {
+            return Verdict::TypesUnavailable { http_status };
+        }
+        // Never had it: on a server that predates it, that is the "too old"
+        // verdict; on one that claims a new version, the install is lying and
+        // types cannot be confirmed either way.
         return match parsed {
             Some(found) => Verdict::NoModelTypes {
                 version: Some(found.to_string()),
@@ -330,20 +400,15 @@ fn check_models(client: &Client, alias: &str, raw_version: &Option<String>) -> V
         };
     }
 
-    match catalog.find(alias) {
-        None => Verdict::AliasMissing {
-            available: catalog.aliases(),
+    match model.kind {
+        ModelKind::Decision => Verdict::Ready { version: parsed },
+        ModelKind::Chat => Verdict::PlainModel {
+            served_as: model
+                .model_type
+                .clone()
+                .unwrap_or_else(|| "chat".to_string()),
         },
-        Some(model) => match model.kind {
-            ModelKind::Decision => Verdict::Ready { version: parsed },
-            ModelKind::Chat => Verdict::PlainModel {
-                served_as: model
-                    .model_type
-                    .clone()
-                    .unwrap_or_else(|| "chat".to_string()),
-            },
-            ModelKind::Unreported => Verdict::TooOld { found: parsed },
-        },
+        ModelKind::Unreported => Verdict::TooOld { found: parsed },
     }
 }
 
@@ -371,6 +436,15 @@ mod tests {
             "oMLX 0.7.1.dev1 at http://127.0.0.1:8000 serves 'clef-flash-oQ4e' as a decision \
              model — ready to score"
         );
+
+        let caveat = report(Verdict::TypesUnavailable { http_status: 401 });
+        assert!(
+            caveat.is_ready(),
+            "a server that guards only its type report can still answer the questions"
+        );
+        assert_eq!(caveat.exit(), ExitCode::Ok);
+        assert!(caveat.message().contains("HTTP 401"));
+        assert!(caveat.message().contains("clef-flash-oQ4e"));
 
         for verdict in [
             Verdict::Unreachable {

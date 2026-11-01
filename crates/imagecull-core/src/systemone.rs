@@ -13,6 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 
+use crate::doctor;
 use crate::error::{Error, ErrorKind, Result};
 use crate::omlx::Client;
 use crate::scoring::{Decider, Request, Response, State};
@@ -24,16 +25,40 @@ pub const PATH: &str = "/v1/systemone";
 #[derive(Debug, Clone)]
 pub struct Adapter {
     client: Client,
+    model: String,
 }
 
 impl Adapter {
-    /// Wrap a client. The client's timeouts are the request's timeouts.
-    pub fn new(client: Client) -> Adapter {
-        Adapter { client }
+    /// Wrap a client for one alias. The client's timeouts are the request's
+    /// timeouts, and the alias is what the preflight looks for on the server.
+    pub fn new(client: Client, model: impl Into<String>) -> Adapter {
+        Adapter {
+            client,
+            model: model.into(),
+        }
     }
 }
 
 impl Decider for Adapter {
+    /// Ask `doctor`'s question before the first frame: is something answering,
+    /// and is the alias served as a decision model? Both failures arrive here
+    /// as one actionable sentence, so a broken server costs seconds instead of
+    /// 400 frames of the same 400 (spec §10).
+    ///
+    /// The run is the lenient reader of that diagnosis: it refuses only what the
+    /// server has said is unfit, never what the server did not say at all
+    /// ([`crate::doctor::Report::can_score`] has the list). `imagecull doctor`
+    /// stays strict, so the strictness is available where it is useful —
+    /// explaining a server — and does not stop a working one from scoring.
+    fn preflight(&self) -> Result<()> {
+        let report = doctor::diagnose(&self.client, &self.model);
+        if report.can_score() {
+            Ok(())
+        } else {
+            Err(Error::fatal(report.message()))
+        }
+    }
+
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
         let payload = body(request);
         let started = Instant::now();
@@ -94,18 +119,22 @@ fn data_uri(jpeg: &[u8]) -> String {
 /// Classify a non-2xx answer: the status picks the taxonomy kind, and the
 /// server's own `detail` rides along because a rejected rubric should say which
 /// criteria it rejected (spec §10).
+///
+/// The row is the only thing the photographer reads after a run, so a status
+/// with a known remedy says what to change: a context that is too long asks for
+/// a smaller preview.
 fn failure(status: u16, body: &str) -> Error {
-    let detail = detail(body);
+    let kind = ErrorKind::from_status_code(status).unwrap_or(ErrorKind::BadResponse);
     let mut message = format!("POST {PATH} returned HTTP {status}");
+    let detail = detail(body);
     if !detail.is_empty() {
         message.push_str(": ");
         message.push_str(&detail);
     }
-    Error::new(
-        ErrorKind::from_status_code(status).unwrap_or(ErrorKind::BadResponse),
-        message,
-    )
-    .with_http_status(status)
+    if kind == ErrorKind::Http413 {
+        message.push_str(" — the preview is too big for the model's context; lower --max-edge");
+    }
+    Error::new(kind, message).with_http_status(status)
 }
 
 /// The server's `detail` field, or the body itself, cut to one short line.

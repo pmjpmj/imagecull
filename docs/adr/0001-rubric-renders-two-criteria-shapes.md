@@ -1,6 +1,8 @@
 # 0001 — The rubric is authored once and rendered twice
 
-Status: accepted · 2026-11-08 · Ticket 03 (rubric and wire adapter)
+Status: accepted · 2026-11-08 · Ticket 03 (rubric and wire adapter) ·
+amended by [ADR 0002](0002-dedupe-keys-the-state-but-not-the-filename.md) and
+[ADR 0004](0004-built-in-rubric-family.md)
 
 ## Context
 
@@ -64,4 +66,8 @@ and a choice question must offer exactly the keys the output column parses
   state matches too: the dedupe and resume keys of ticket 05 must include the
   state, not just `(preview_sha256, rubric_hash, model)`. The same frame judged
   as "dim, high-ISO street shoot" is a different question from the same frame
-  judged bare.
+  judged bare. — *Superseded in part by
+  [ADR 0002](0002-dedupe-keys-the-state-but-not-the-filename.md):* ticket 05's
+  dedupe key covers the bytes, the task framing, the shoot context and the
+  rubric identity, but not the filename, because two frames of one burst always
+  have different names and a key that covered it could never fire.

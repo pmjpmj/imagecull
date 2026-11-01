@@ -1,40 +1,63 @@
 //! `imagecull score`: a shoot folder, scored by the local decision model.
 //!
 //! Without `--dry-run` this is the real run: the folder is scanned, every
-//! accepted frame goes to `/v1/systemone` one at a time, and each frame's six
-//! answers are printed as they arrive. With `--dry-run` the same per-frame step
-//! runs but the bytes are written into a previews directory and no request is
-//! made. Rendering is all here; the decisions are in `imagecull_core`.
+//! accepted frame goes to `/v1/systemone` one at a time, and what the run is
+//! doing reaches the terminal through the core's reporter — this module hands it
+//! [`Terminal`], which renders the events, and reads the exit code off the run.
+//! With `--dry-run` the same per-frame step runs but the bytes are written into
+//! a previews directory and no request is made, so that command keeps its own
+//! small report. Rendering is all here; the decisions are in `imagecull_core`.
 
-use imagecull_core::ingest::ScanCounts;
+use std::sync::Arc;
+
+use imagecull_core::config::Effective;
 use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{self, Run};
+use imagecull_core::scoring::{self, Cancel};
 use imagecull_core::systemone::Adapter;
 use imagecull_core::{ExitCode, dry_run};
 
 use crate::cli::ScoreArgs;
+use crate::progress::{Terminal, Verbosity, kilobytes, left_out, plural};
 
 /// Run the command and return the process exit code.
 pub fn run(args: &ScoreArgs) -> u8 {
+    // The effective config first: a bad config file, or a `--config` that names
+    // nothing, must stop the run before a single frame is read.
+    let effective = match args.common.effective(args.overrides()) {
+        Ok(effective) => effective,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::Fatal.code();
+        }
+    };
+
     if args.dry_run {
-        return dry_run_command(args);
+        return dry_run_command(args, &effective);
     }
 
-    let rubric = match Rubric::load(args.rubric.as_deref()) {
+    let rubric = match Rubric::select(effective.rubric.as_ref()) {
         Ok(rubric) => rubric,
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::Fatal.code();
         }
     };
-    let config = scoring::Config::new(
+    let mut config = scoring::Config::new(
         rubric,
-        args.server.model.clone(),
-        args.params(),
-        args.scan_options(),
-        args.shoot_context.clone(),
+        effective.model.clone(),
+        effective.params,
+        effective.scan(args.limit),
+        effective.shoot_context.clone(),
+        effective.outputs.clone(),
     );
-    let client = match args.server.client() {
+    // What the run does with the ledger beside its CSV, whether an identical
+    // preview may reuse an outcome, which server to record in the header, and
+    // which config file these values came from.
+    config.ledger = args.ledger_mode();
+    config.dedupe = effective.dedupe;
+    config.endpoint = Some(effective.endpoint.clone());
+    config.source = effective.source.clone();
+    let client = match args.common.client(&effective) {
         Ok(client) => client,
         Err(message) => {
             eprintln!("error: {message}");
@@ -42,11 +65,20 @@ pub fn run(args: &ScoreArgs) -> u8 {
         }
     };
 
-    match scoring::run(&args.dir, &config, &Adapter::new(client)) {
-        Ok(run) => {
-            print!("{}", render_run(&run));
-            exit_code_for_run(&run)
-        }
+    let cancel = Arc::new(Cancel::new());
+    install_cancel_handler(&cancel);
+
+    // The run narrates itself; the terminal draws it. The exit code is the
+    // run's own classification, so a script can act on the outcome.
+    let reporter = Terminal::new(verbosity(args));
+    match scoring::run(
+        &args.dir,
+        &config,
+        &Adapter::new(client, &config.model),
+        &reporter,
+        &cancel,
+    ) {
+        Ok(run) => run.exit_code().code(),
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::Fatal.code()
@@ -54,13 +86,39 @@ pub fn run(args: &ScoreArgs) -> u8 {
     }
 }
 
-/// `--dry-run`: the bytes a run would send, written out, no HTTP at all.
-fn dry_run_command(args: &ScoreArgs) -> u8 {
+/// How much of the run the photographer asked to see.
+fn verbosity(args: &ScoreArgs) -> Verbosity {
+    if args.quiet {
+        Verbosity::Quiet
+    } else if args.verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
+    }
+}
+
+/// The CLI's half of cooperative cancellation: Ctrl-C asks the run to stop
+/// between files rather than killing the process mid-request, so nothing already
+/// scored is lost and the run still writes its CSV and exits `3` (spec §10).
+fn install_cancel_handler(cancel: &Arc<Cancel>) {
+    let cancel = Arc::clone(cancel);
+    if let Err(error) = ctrlc::set_handler(move || cancel.cancel()) {
+        // A process that cannot take the signal still runs; Ctrl-C then kills it
+        // the usual way, without the tidy exit.
+        eprintln!(
+            "warning: Ctrl-C cannot be caught here, so it will not stop a run cleanly: {error}"
+        );
+    }
+}
+
+/// `--dry-run`: the bytes a run would send, written out, no HTTP at all. It uses
+/// the same effective config, so a dry run previews what the real run would.
+fn dry_run_command(args: &ScoreArgs, effective: &Effective) -> u8 {
     match dry_run::render_previews(
         &args.dir,
         &args.previews_dir,
-        &args.scan_options(),
-        &args.params(),
+        &effective.scan(args.limit),
+        &effective.params,
     ) {
         Ok(export) => {
             print!("{}", render(&export));
@@ -71,57 +129,6 @@ fn dry_run_command(args: &ScoreArgs) -> u8 {
             ExitCode::Fatal.code()
         }
     }
-}
-
-/// The exit classification for a real run: every row scored, or some left
-/// behind. Fatal and interrupted are decided by the caller.
-pub fn exit_code_for_run(run: &Run) -> u8 {
-    if run.failed() > 0 {
-        ExitCode::FailedRows.code()
-    } else {
-        ExitCode::Ok.code()
-    }
-}
-
-/// The report of a real run: one line per frame with its six answers, then a
-/// summary. Pure, so it can be asserted on without a terminal.
-pub fn render_run(run: &Run) -> String {
-    let mut out = String::new();
-    for frame in &run.frames {
-        let name = frame.source.relative.display();
-        match &frame.outcome {
-            Err(error) => out.push_str(&format!("{name}  {error}\n")),
-            Ok(reading) => match &reading.answers {
-                Err(error) => out.push_str(&format!("{name}  {error}\n")),
-                Ok(answers) => out.push_str(&format!(
-                    "{name}  overall {:.2}  technical {:.2}  composition {:.2}  impact {:.2}  \
-                     {}★ {}  {}ms\n",
-                    answers.overall,
-                    answers.technical,
-                    answers.composition,
-                    answers.impact,
-                    answers.stars,
-                    answers.verdict.as_str(),
-                    reading.usage.latency_ms(),
-                )),
-            },
-        }
-    }
-    out.push('\n');
-    out.push_str(&summary(run));
-    out
-}
-
-/// The one-line summary: how much of the shoot was scored, under which rubric.
-fn summary(run: &Run) -> String {
-    let mut parts = vec![format!("{} of {} scored", run.scored(), run.frames.len())];
-    if run.failed() > 0 {
-        parts.push(format!("{} failed", run.failed()));
-    }
-    parts.extend(left_out(&run.counts));
-    parts.push(format!("rubric {}", run.rubric_hash.short()));
-    parts.push(format!("model {}", run.model));
-    format!("scored: {}\n", parts.join(" · "))
 }
 
 /// The exit classification of a dry run: every frame previewed, or some left
@@ -174,49 +181,12 @@ fn dry_run_summary(export: &dry_run::Export) -> String {
     format!("dry run: {}\n", parts.join(" · "))
 }
 
-/// What the scan left out, and why, in the words a photographer reads: the same
-/// counts in both reports, because a run and a dry run look at the same folder.
-fn left_out(counts: &ScanCounts) -> Vec<String> {
-    let mut parts = Vec::new();
-    if counts.skipped_extension > 0 {
-        parts.push(format!("{} skipped (not RAW)", counts.skipped_extension));
-    }
-    if counts.ignored > 0 {
-        parts.push(format!("{} ignored (Finder noise)", counts.ignored));
-    }
-    if counts.hidden_directories > 0 {
-        parts.push(format!(
-            "{} {} not scanned",
-            counts.hidden_directories,
-            plural(
-                counts.hidden_directories,
-                "hidden directory",
-                "hidden directories"
-            )
-        ));
-    }
-    parts
-}
-
-fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { one } else { many }
-}
-
-/// `bytes` as a whole number of kilobytes.
-fn kilobytes(bytes: usize) -> String {
-    format!("{} KB", bytes.div_ceil(1024))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use imagecull_core::error::{Error, ErrorKind};
     use imagecull_core::ingest::{ScanCounts, SourceFile};
-    use imagecull_core::reading;
-    use imagecull_core::rubric::Rubric;
-    use imagecull_core::scoring::{Frame, Response};
-    use serde_json::Value;
 
     use super::*;
 
@@ -256,105 +226,6 @@ mod tests {
             source: source(name),
             outcome: Err(Error::new(kind, format!("{name} embeds no JPEG preview"))),
         }
-    }
-
-    fn document(document: Value) -> reading::Reading {
-        reading::read(
-            &Rubric::embedded().expect("parse"),
-            Response {
-                document,
-                client_latency_ms: 812,
-            },
-        )
-    }
-
-    fn reading() -> reading::Reading {
-        document(serde_json::json!({
-            "answers": {
-                "overall": {"score": 6.4237, "confidence": 0.41},
-                "technical": {"score": 7.8125, "confidence": 0.55},
-                "composition": {"score": 5.3398, "confidence": 0.33},
-                "impact": {"score": 4.9601, "confidence": 0.62},
-                "stars": {"choice": "4", "confidence": 0.63},
-                "verdict": {"choice": "like", "confidence": 0.88}
-            },
-            "usage": {"input_tokens": 1327}
-        }))
-    }
-
-    fn run(frames: Vec<Frame>) -> Run {
-        Run {
-            rubric_hash: Rubric::embedded().expect("parse").hash("clef-flash-oQ4e"),
-            model: "clef-flash-oQ4e".to_string(),
-            counts: ScanCounts::default(),
-            frames,
-        }
-    }
-
-    fn frame(name: &str, outcome: imagecull_core::Result<reading::Reading>) -> Frame {
-        Frame {
-            source: source(name),
-            outcome,
-        }
-    }
-
-    #[test]
-    fn a_scored_run_prints_the_six_answers_per_frame_and_its_identity() {
-        let run = run(vec![frame("DSC_0001.NEF", Ok(reading()))]);
-
-        let rendered = render_run(&run);
-
-        assert!(
-            rendered.starts_with(
-                "DSC_0001.NEF  overall 6.42  technical 7.81  composition 5.34  impact 4.96  \
-                 4★ like  812ms\n"
-            ),
-            "{rendered}"
-        );
-        let hash = run.rubric_hash.short();
-        assert!(
-            rendered.contains(&format!(
-                "scored: 1 of 1 scored · rubric {hash} · model clef-flash-oQ4e\n"
-            )),
-            "{rendered}"
-        );
-        assert_eq!(exit_code_for_run(&run), ExitCode::Ok.code());
-    }
-
-    #[test]
-    fn a_failed_frame_is_named_with_its_status_and_changes_the_exit_code() {
-        let run = run(vec![
-            frame("DSC_0001.NEF", Ok(reading())),
-            frame(
-                "DSC_0002.NEF",
-                Err(Error::new(
-                    ErrorKind::NoPreview,
-                    "DSC_0002.NEF embeds no JPEG preview",
-                )),
-            ),
-            frame(
-                "DSC_0003.NEF",
-                Ok(document(
-                    serde_json::json!({"answers": {"overall": {"score": 6.0}}}),
-                )),
-            ),
-        ]);
-
-        let rendered = render_run(&run);
-
-        assert!(
-            rendered.contains("DSC_0002.NEF  no_preview: DSC_0002.NEF embeds no JPEG preview\n"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("DSC_0003.NEF  bad_response:"),
-            "an unreadable document is a failed row too: {rendered}"
-        );
-        assert!(
-            rendered.contains("scored: 1 of 3 scored · 2 failed ·"),
-            "{rendered}"
-        );
-        assert_eq!(exit_code_for_run(&run), ExitCode::FailedRows.code());
     }
 
     #[test]

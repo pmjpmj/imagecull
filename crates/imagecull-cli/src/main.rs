@@ -11,12 +11,13 @@ use clap::Parser;
 mod cli;
 mod doctor;
 mod models;
+mod progress;
 mod score;
 
 use cli::{Cli, Command};
 
 fn main() -> ExitCode {
-    // `--version` carries the embedded rubric's hash, which clap cannot know at
+    // `--version` carries the default built-in's hash, which clap cannot know at
     // compile time, so it is answered before the parser runs.
     if std::env::args()
         .skip(1)

@@ -6,14 +6,111 @@
 //! JPEG previews the camera would have embedded. That is enough to drive the
 //! whole extraction, orientation, downscale and encode path without a camera.
 //!
-//! [`stub`] is the other shared fixture: a loopback HTTP server that answers
-//! canned bytes, for the tests that drive the real client.
+//! [`stub`] and [`decider`] are the other shared fixtures: a loopback HTTP
+//! server that answers canned bytes, for the tests that drive the real client,
+//! and a scripted [`Decider`](imagecull_core::scoring::Decider) that records
+//! what the pipeline would have sent.
 
 #![allow(dead_code)]
 
+pub mod decider;
 pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
+use imagecull_core::report::Outputs;
+use imagecull_core::rubric::Rubric;
+
+/// A rubric in TOML, written the way the embedded one is, so a test can change
+/// one word and see only the hash move.
+pub fn rubric_toml(model: &str, overall_instruction: &str) -> String {
+    let legend: String = (0..=10)
+        .map(|level| format!("{{ key = \"{level}\", description = \"level {level}\" }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
+model = "{model}"
+
+[[question]]
+id = "overall"
+type = "score"
+instructions = "{overall_instruction}"
+criteria = [{legend}]
+
+[[question]]
+id = "technical"
+type = "score"
+instructions = "Judge technical quality only."
+criteria = [{legend}]
+
+[[question]]
+id = "composition"
+type = "score"
+instructions = "Judge composition only."
+criteria = [{legend}]
+
+[[question]]
+id = "impact"
+type = "score"
+instructions = "Judge impact only."
+criteria = [{legend}]
+
+[[question]]
+id = "stars"
+type = "choice"
+instructions = "How many stars?"
+criteria = [
+    {{ key = "1", description = "reject" }},
+    {{ key = "2", description = "poor" }},
+    {{ key = "3", description = "ok" }},
+    {{ key = "4", description = "strong" }},
+    {{ key = "5", description = "excellent" }},
+]
+
+[[question]]
+id = "verdict"
+type = "choice"
+instructions = "Would you keep it?"
+criteria = [
+    {{ key = "dislike", description = "no" }},
+    {{ key = "neutral", description = "maybe" }},
+    {{ key = "like", description = "yes" }},
+]
+"#
+    )
+}
+
+pub fn rubric(model: &str, overall_instruction: &str) -> Rubric {
+    Rubric::from_toml(&rubric_toml(model, overall_instruction)).expect("a valid rubric")
+}
+
+/// A temp shoot folder holding `files`, creating subfolders as needed.
+pub fn shoot(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    for (name, bytes) in files {
+        let path = dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create a subfolder");
+        }
+        std::fs::write(path, bytes).expect("write fixture");
+    }
+    dir
+}
+
+/// Where the report of a test that reads the answers from the run itself goes: a
+/// throwaway directory nobody looks at.
+///
+/// A run always writes its CSV and the ledger beside it, and it must never write
+/// into the folder it is scoring. The directory is kept rather than deleted, so
+/// the path stays valid for the length of the run.
+pub fn unwatched() -> Outputs {
+    let dir = tempfile::tempdir().expect("a temp dir").keep();
+    Outputs {
+        csv: dir.join("scores.csv"),
+        json_scores: None,
+        absolute: false,
+    }
+}
 
 /// A JPEG of `width` by `height` with a pattern, so a resize has something to
 /// lose and the encoder has something to spend bytes on.
@@ -122,10 +219,8 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     let sub_count = previews.len().saturating_sub(1);
 
     let mut entries: Vec<(u16, u16, u32, [u8; 4])> = Vec::new();
-    let entry_count = 2
-        + usize::from(dng)
-        + usize::from(sub_count > 0)
-        + if previews.is_empty() { 0 } else { 2 };
+    let entry_count =
+        2 + usize::from(dng) + usize::from(sub_count > 0) + if previews.is_empty() { 0 } else { 2 };
     let ifd0_size = 2 + 12 * entry_count + 4;
 
     // Lay the file out: header, IFD0, out-of-line values, SubIFDs, then the
@@ -202,7 +297,11 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     out.extend(42u16.to_le_bytes());
     out.extend(8u32.to_le_bytes());
 
-    out.extend(u16::try_from(entries.len()).expect("few entries").to_le_bytes());
+    out.extend(
+        u16::try_from(entries.len())
+            .expect("few entries")
+            .to_le_bytes(),
+    );
     for (tag, kind, count, value) in &entries {
         out.extend(tag.to_le_bytes());
         out.extend(kind.to_le_bytes());
@@ -243,7 +342,11 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     for preview in previews {
         out.extend(preview);
     }
-    assert_eq!(out.len(), cursor, "the layout must land where it was planned");
+    assert_eq!(
+        out.len(),
+        cursor,
+        "the layout must land where it was planned"
+    );
     out
 }
 

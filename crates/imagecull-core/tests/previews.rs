@@ -192,7 +192,10 @@ fn the_encoded_jpeg_carries_no_exif() {
             break; // start of scan: entropy-coded data follows
         }
         let length = usize::from(u16::from_be_bytes([bytes[cursor + 2], bytes[cursor + 3]]));
-        assert_ne!(marker, 0xE1, "APP1/EXIF must not be written into the preview");
+        assert_ne!(
+            marker, 0xE1,
+            "APP1/EXIF must not be written into the preview"
+        );
         cursor += 2 + length;
     }
 }

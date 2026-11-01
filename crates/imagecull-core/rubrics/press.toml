@@ -1,10 +1,17 @@
-# The embedded cull rubric: six questions, answered in one forward pass (spec §8).
+# The press rubric: a photo editor culling a photojournalistic shoot, six
+# questions answered in one forward pass (spec §8).
 #
-# This wording is draft v1. M4 (ticket 08) tunes it against real shoots and
-# freezes it. Editing any of it — an instruction, a criterion, the model alias —
-# changes the rubric hash, and two CSVs with different hashes are not
-# comparable. That is deliberate: resume and calibration key off the hash, so a
-# changed rubric re-scores rather than silently mixing two rubrics in one file.
+# This is the wording ticket 08 is about: draft v1, which that ticket tunes
+# against real shoots and then freezes. It is not the default a run uses. A
+# shoot with no genre declared gets `general`, which assumes nothing and judges
+# the frame on its own terms; this one is selected when the shoot is press work:
+#
+#   imagecull score ~/Shoots/protest --rubric press
+#
+# Editing any of it — an instruction, a criterion, the model alias — changes the
+# rubric hash, and two CSVs with different hashes are not comparable. That is
+# deliberate: resume and calibration key off the hash, so a changed rubric
+# re-scores rather than silently mixing two rubrics in one file.
 #
 # Structure: `model` names the alias the wording was written for (`--model`
 # overrides it), then one `[[question]]` per question in declaration order.

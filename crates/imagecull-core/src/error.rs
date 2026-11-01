@@ -31,6 +31,8 @@ pub enum ErrorKind {
     Http413,
     /// The server rejected the request body (HTTP 422): a client bug.
     Http422,
+    /// The server failed on its own side (HTTP 5xx): a transient hiccup.
+    Http5xx,
     /// Nothing answered at the endpoint: connection refused, DNS failure.
     ServerUnreachable,
     /// The read timeout expired before the server answered.
@@ -41,13 +43,14 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 9] = [
+    pub const ALL: [ErrorKind; 10] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
         ErrorKind::Http400,
         ErrorKind::Http413,
         ErrorKind::Http422,
+        ErrorKind::Http5xx,
         ErrorKind::ServerUnreachable,
         ErrorKind::Timeout,
         ErrorKind::BadResponse,
@@ -63,21 +66,33 @@ impl ErrorKind {
             ErrorKind::Http400 => "http_400",
             ErrorKind::Http413 => "http_413",
             ErrorKind::Http422 => "http_422",
+            ErrorKind::Http5xx => "http_5xx",
             ErrorKind::ServerUnreachable => "server_unreachable",
             ErrorKind::Timeout => "timeout",
             ErrorKind::BadResponse => "bad_response",
         }
     }
 
+    /// The kind a `status` string names, if it names one (`"ok"` names no kind:
+    /// that is the absence of an error). The ledger reads its records back with
+    /// this, so a stored status and a live one cannot drift apart.
+    pub fn from_status(status: &str) -> Option<ErrorKind> {
+        ErrorKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == status)
+    }
+
     /// The kind for an HTTP status this taxonomy names, if it names it.
     ///
-    /// 5xx is deliberately absent: the spec has no `status` for it, and the
-    /// retry/preflight ticket owns that decision.
+    /// The whole 5xx range is one kind because the retry rule treats it as one:
+    /// a server that failed is worth another attempt whatever it called itself
+    /// (spec §10).
     pub fn from_status_code(status: u16) -> Option<ErrorKind> {
         match status {
             400 => Some(ErrorKind::Http400),
             413 => Some(ErrorKind::Http413),
             422 => Some(ErrorKind::Http422),
+            500..=599 => Some(ErrorKind::Http5xx),
             _ => None,
         }
     }
@@ -90,6 +105,7 @@ impl ErrorKind {
             }
             ErrorKind::Http413 | ErrorKind::BadResponse => Recovery::Continue,
             ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
+            ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
             ErrorKind::Timeout => Recovery::RetryThenRecord,
         }
@@ -119,6 +135,12 @@ impl Recovery {
     /// Whether this recovery ends the run rather than recording one bad row.
     pub fn aborts_run(self) -> bool {
         matches!(self, Recovery::RetryThenAbort | Recovery::AbortRun)
+    }
+
+    /// Whether this recovery is worth another attempt: the transient kinds
+    /// only, never a 4xx (spec §10).
+    pub fn is_retried(self) -> bool {
+        matches!(self, Recovery::RetryThenRecord | Recovery::RetryThenAbort)
     }
 }
 
@@ -171,6 +193,16 @@ impl Error {
     /// The HTTP status this failure came from, when it came from HTTP.
     pub fn http_status(&self) -> Option<u16> {
         self.http_status
+    }
+
+    /// Note how many attempts a retried failure cost, so the row's `error`
+    /// cell says why it is not a one-off. A failure that was never retried
+    /// stays as it is: there is nothing to explain.
+    pub fn with_attempts(mut self, attempts: usize) -> Self {
+        if attempts > 1 {
+            self.message = format!("{} — {attempts} attempts", self.message);
+        }
+        self
     }
 
     /// The taxonomy kind, or `None` when this is a run-level failure.
@@ -269,6 +301,7 @@ mod tests {
                 "http_400",
                 "http_413",
                 "http_422",
+                "http_5xx",
                 "server_unreachable",
                 "timeout",
                 "bad_response",
@@ -282,6 +315,7 @@ mod tests {
         assert_eq!(ErrorKind::Http400.recovery(), Recovery::AbortRun);
         assert_eq!(ErrorKind::Http422.recovery(), Recovery::AbortRun);
         assert_eq!(ErrorKind::Http413.recovery(), Recovery::Continue);
+        assert_eq!(ErrorKind::Http5xx.recovery(), Recovery::RetryThenRecord);
         assert_eq!(ErrorKind::Unreadable.recovery(), Recovery::Continue);
         assert_eq!(ErrorKind::NoPreview.recovery(), Recovery::Continue);
         assert_eq!(ErrorKind::PreviewBroken.recovery(), Recovery::Continue);
@@ -296,12 +330,46 @@ mod tests {
     }
 
     #[test]
-    fn only_the_named_four_xx_codes_become_kinds() {
+    fn only_the_named_statuses_become_kinds() {
         assert_eq!(ErrorKind::from_status_code(400), Some(ErrorKind::Http400));
         assert_eq!(ErrorKind::from_status_code(413), Some(ErrorKind::Http413));
         assert_eq!(ErrorKind::from_status_code(422), Some(ErrorKind::Http422));
-        assert_eq!(ErrorKind::from_status_code(500), None);
+        assert_eq!(ErrorKind::from_status_code(500), Some(ErrorKind::Http5xx));
+        assert_eq!(ErrorKind::from_status_code(503), Some(ErrorKind::Http5xx));
+        assert_eq!(ErrorKind::from_status_code(599), Some(ErrorKind::Http5xx));
         assert_eq!(ErrorKind::from_status_code(404), None);
+    }
+
+    #[test]
+    fn only_the_transient_kinds_are_worth_another_attempt() {
+        for kind in ErrorKind::ALL {
+            assert_eq!(
+                kind.recovery().is_retried(),
+                matches!(
+                    kind,
+                    ErrorKind::ServerUnreachable | ErrorKind::Timeout | ErrorKind::Http5xx
+                ),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retried_failure_names_how_many_attempts_it_cost() {
+        let error =
+            Error::new(ErrorKind::Http5xx, "POST /v1/systemone returned HTTP 503").with_attempts(4);
+        assert_eq!(
+            error.message(),
+            "POST /v1/systemone returned HTTP 503 — 4 attempts"
+        );
+
+        let once =
+            Error::new(ErrorKind::Http400, "POST /v1/systemone returned HTTP 400").with_attempts(1);
+        assert_eq!(
+            once.message(),
+            "POST /v1/systemone returned HTTP 400",
+            "a failure that was never retried says nothing about attempts"
+        );
     }
 
     #[test]

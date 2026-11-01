@@ -74,7 +74,7 @@ The scoring pipeline lives in a library crate with no stdout, TTY, or process-ex
 33. As a photographer, I want `--fresh` to discard the ledger deliberately, so that starting over is an explicit choice.
 34. As a photographer shooting bursts, I want identical previews to cost one request while every NEF still gets its own row with `duplicate_of` set, so that the CSV stays one-row-per-file and the run still gets faster.
 35. As a photographer, I want `--no-dedupe` to score every frame independently, so that I can check whether dedupe is hiding anything.
-36. As a photographer watching a long run, I want a live progress line showing index, filename, scores, per-frame latency and ETA, so that I know it is working and when it will be done.
+36. As a photographer watching a long run, I want a line per frame showing index, filename, scores, per-frame latency and ETA, so that I know it is working, when it will be done, and what it said about the frame I just watched it score.
 37. As a photographer, I want a final summary with counts by status, mean/median per score, a star histogram, the disagreement rate and total wall time, so that I can judge the run and the rubric at a glance.
 38. As a photographer, I want `--quiet` and `--verbose` to control how much of that I see, so that scripted use stays clean and debugging gets detail.
 39. As a photographer scripting this, I want distinct exit codes for all-ok, completed-with-failures, fatal, and interrupted, so that a shell can act on the outcome.
@@ -86,7 +86,7 @@ The scoring pipeline lives in a library crate with no stdout, TTY, or process-ex
 
 43. As a photographer, I want v1 to write nothing into the photo folder except the CSV I asked for, so that trying the tool cannot damage a library.
 44. As a photographer, I want my NEFs opened read-only and never modified, so that XMP-in-RAW stays a non-feature.
-45. As a photographer, I want re-running the same folder with the same rubric and model to produce a byte-identical CSV, so that I can trust the output as a cache and as a record.
+45. As a photographer, I want re-running the same folder with the same rubric and model to reproduce the same CSV apart from the timings it measured, so that I can trust the output as a cache and as a record.
 46. As a photographer, I want `doctor` to tell me when oMLX is missing, too old, unreachable, or is serving a Clef checkpoint as a plain VLM, so that I don't discover it as 400 identical failures.
 47. As a photographer, I want `doctor <FILE>` to self-test preview extraction on one of my own files, so that I know the pipeline works on my camera's output before a long run.
 48. As a photographer, I want `models` to list available aliases and flag which are decision models, so that I know exactly what to pass to `--model`.
@@ -134,6 +134,7 @@ One seam, at the top of the core:
 ### Ingest
 
 - Accepted extensions, case-insensitive: `.nef`, `.nrw`, `.dng`. Anything else increments a `skipped_extension` count — never an error.
+- `.dng` is accepted but **not decodable in v1**: the pinned `raw-files` has no DNG reader, so a DNG gets an `unreadable` row whose `error` cell names that cause and the way out (export a NEF or TIFF, or score the JPEG). The extension stays accepted so a DNG-only shoot is counted and explained rather than silently skipped; a DNG/TIFF reader is later work and needs a fixture to prove it against.
 - Non-recursive by default; `--recursive` walks subdirectories, never descending into hidden directories.
 - Ignore `._*`, `.DS_Store`, and anything under `__MACOSX`, and report how many were ignored.
 - Sort by natural, NFC-normalised filename so row order is stable.
@@ -167,10 +168,10 @@ One seam, at the top of the core:
 - A JSONL ledger lives beside the output CSV. First record is a versioned header (rubric hash, model, endpoint, start time); each subsequent record is a row with file name, size, mtime in nanoseconds, sent-preview SHA-256, status, the full outcome, and a timestamp.
 - Every record is appended and flushed immediately. Recovery scans for the last parseable line and truncates anything after it, so a `SIGKILL` mid-write cannot poison the file.
 - Resume key is `(file, size, mtime_ns)`: any change means re-score.
-- Dedupe key is the SHA-256 of the **sent preview bytes**: an identical preview reuses the earlier outcome, since the model is deterministic for identical bytes. Disabled with `--no-dedupe`.
+- Dedupe key is the SHA-256 of the **sent preview bytes**, plus everything else the model reads — task framing, shoot context, rubric hash, model alias — but **not the filename**: an identical preview judged in the same state reuses the earlier outcome, since the model is deterministic for identical bytes, while two frames of one burst (which always have different names) still dedupe. Disabled with `--no-dedupe`. `docs/adr/0002-dedupe-keys-the-state-but-not-the-filename.md` records why the filename is excluded.
 - **Burst policy:** every NEF gets its own CSV row; deduplicated frames carry the first frame's scores plus `duplicate_of`. The ledger saves the requests; the CSV stays one row per file so a filename is never missing.
 - `--fresh` discards the ledger. A rubric-hash or model mismatch without `--fresh` is a hard error with an actionable message.
-- The CSV is rewritten from the ledger every 25 rows (configurable) and at exit.
+- The CSV is appended one row per judged frame, from the same record, so a run killed mid-flight leaves a CSV that is exactly the ledger's rows and `--resume` rebuilds it. No row is fsynced: the ledger is the durable record.
 
 ### CSV
 
@@ -204,11 +205,18 @@ RFC 4180, UTF-8, header row, `\n` line endings, one row per input file, in inges
 | `http_400` | invalid criteria / bad question schema | **abort** (rubric is wrong) |
 | `http_413` | context too long | record, continue, suggest a smaller `--max-edge` |
 | `http_422` | malformed body | abort (client bug) |
+| `http_5xx` | the server failed on its own side | retry, then record, continue |
 | `server_unreachable` | refused / DNS | abort after retries |
 | `timeout` | exceeded read timeout | retry, then record |
 | `bad_response` | answer missing or wrong type | record raw document, continue |
 
-Retries: three attempts with 0.5/1/2 s backoff, **only** for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx.
+Retries: three retries (four attempts in all) with 0.5/1/2 s backoff, **only** for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx.
+
+`http_5xx` exists because the retry rule above already names 5xx as a transient
+class, so the taxonomy has to be able to name one: a run retries it and, if it
+never clears, records the row and carries on, because one server hiccup must not
+cost the photographer the shoot. It is the tenth `status` string, so every
+consumer of `status` (the XMP sidecars in v2, the GUI) accepts it.
 
 Preflight before the first file: `GET /v1/models`, confirm the alias exists, and if the server exposes per-model status, confirm the model is a decision model. Fail fast with an actionable message rather than 400 files of the same 400.
 
@@ -220,12 +228,14 @@ Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad argum
 - `models` — lists aliases and flags decision models.
 - `doctor [FILE]` — server reachability and version, decision-model detection, and, given a file, a preview-extraction self-test.
 - `--version` prints the version and the embedded rubric hash.
-- Progress (TTY only): index/total, filename, scores and stars, per-frame latency, ETA. Final summary: counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
+- One line per frame: index/total, filename, scores and stars, per-frame latency, ETA, and `duplicate of …` when an identical preview paid. Printed whether or not stdout is a terminal; `--quiet` silences it. Final summary: counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
 - **No `calibrate` subcommand in v1** (decided in this session: there are no star-rated shoots available as ground truth).
 
 ### Determinism
 
-A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce a byte-identical CSV. This is an acceptance criterion, not an aspiration, and the cache key `(preview_sha256, rubric_hash, model)` encodes it.
+A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce the same CSV in every cell that reports a decision — the six answers, their confidences, `input_tokens`, `status`, `error`, `duplicate_of`, `rubric_hash` and `model`. This is an acceptance criterion, not an aspiration, and the reuse key — sent bytes, request state, rubric hash and model (ADR 0002) — encodes it.
+
+The one exception is `latency_ms`, and it is not a weakening of the criterion but a statement of what the column is: it measures the run (`usage.latency_ms` — the server's own number when it reports one, otherwise this side's wall clock), not an answer from the model. No two runs can produce the same measurement. So the acceptance test compares two full runs cell by cell after blanking that one column, and asserts that every remaining cell — including the ones a future change is most likely to disturb, like `input_tokens` and `duplicate_of` — is byte-identical.
 
 ### Defaults locked in this session
 
@@ -269,7 +279,7 @@ A decision model has no sampling temperature: the answer is a deterministic func
 - CSV snapshots for the fixture set against a scripted `Decider`, so column order, formatting and full-precision numbers are pinned.
 - Acceptance 1: a long run (fixtures repeated into a synthetic 400-file directory) completes with a status on every row.
 - Acceptance 2: cancelling mid-run then resuming produces the same CSV as one uninterrupted run, with no duplicate rows.
-- Acceptance 3: two full runs produce byte-identical CSV.
+- Acceptance 3: two full runs agree byte for byte apart from `latency_ms`, which measures the run rather than the model.
 - Acceptance 4: `--dry-run` previews are upright for portrait fixtures.
 - Acceptance 5: with no XMP requested, an mtime scan of the input directory shows zero writes.
 

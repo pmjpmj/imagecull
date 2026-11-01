@@ -23,3 +23,6 @@ tempfile = { workspace = true }
 image = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+# The ledger tests hash the bytes the decider saw themselves: the recorded
+# SHA-256 is asserted against an independently computed one.
+sha2 = { workspace = true }
