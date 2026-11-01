@@ -16,16 +16,16 @@
 # that travels with a shoot folder keeps working.
 #
 # What a config file cannot set, because it describes this invocation rather
-# than this shoot: the shoot folder itself, `--dry-run`, `--resume`/`--fresh`,
-# `--limit`, `--quiet`/`--verbose`.
+# than this shoot: the shoot folder itself, `--dry-run`, `--force`,
+# `--allow-foreign`, `--print-sidecars`, `--limit`, `--quiet`/`--verbose`.
 
 [server]
 # Base URL of the local oMLX server. Default: http://127.0.0.1:8000
 endpoint = "http://127.0.0.1:8000"
 # Model alias to score with. Default: the rubric's own alias.
 # `doctor` and `models` default to clef-flash-oQ4e when neither this nor
-# `--model` is given. Changing the alias changes the rubric hash, and two
-# reports with different hashes are not comparable.
+# `--model` is given. Changing the alias changes the rubric hash, and two runs
+# with different hashes are not comparable.
 # model = "clef-flash-oQ4e"
 # Read timeout, in seconds. Default: 120
 # timeout = 120
@@ -44,14 +44,13 @@ endpoint = "http://127.0.0.1:8000"
 # recursive = false
 
 [outputs]
-# The CSV of scores. Default: ./scores.csv
-# csv = "scores.csv"
+# Ratings do not come out of a report: a run writes each one into an XMP sidecar
+# beside its frame (`DSC_0001.NEF` -> `DSC_0001.xmp`), where Lightroom, Bridge and
+# darktable can read it. There is nothing to configure about that.
+#
 # Every raw model answer, as JSON, so a surprising score loses nothing.
 # Default: not written
 # json_scores = "scores.json"
-# Write absolute paths in the `file` column instead of paths inside the
-# shoot folder. Default: false
-# absolute = false
 
 [run]
 # The rubric to judge by: a built-in's name, or a path to a rubric file.
@@ -59,9 +58,9 @@ endpoint = "http://127.0.0.1:8000"
 # genre and is what runs when nothing else is selected; `press`, a photo editor
 # culling a photojournalistic shoot; and `holiday`, which judges a frame as a
 # family-album keeper. A bare name is always a built-in, so use `./holiday` for
-# a file that happens to be called that. The rubric's hash goes into the report,
-# so a changed rubric re-scores rather than silently mixing two judgements in
-# one file; the name is provenance beside the hash.
+# a file that happens to be called that. The rubric's hash is written into each
+# sidecar, so a rating can always say which wording made it, and a re-run under a
+# different rubric skips the frames already rated unless you pass --force.
 # rubric = "holiday"
 # A rubric of your own: a path, relative to this file's directory.
 # rubric = "mine.toml"

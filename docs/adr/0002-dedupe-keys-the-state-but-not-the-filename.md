@@ -1,7 +1,8 @@
 # 0002 — The dedupe key covers the state, but not the filename
 
 Status: accepted · 2026-11-08 · Ticket 05 (ledger, resume, burst dedupe) ·
-amends ADR 0001
+amends ADR 0001 · key unchanged, memory narrowed by
+[ADR 0006](0006-the-rating-lives-in-the-sidecar.md) (2026-11-19)
 
 ## Context
 
@@ -70,3 +71,20 @@ so a burst partner gets its own attempt.
 - ADR 0001's final paragraph is superseded to that extent: it is the *state the
   model reads* that a reuse key must cover, and the filename is the one part of
   that state which is a label rather than content.
+
+## Amendment (2026-11-19)
+
+ADR 0006 deletes the ledger, so this key has no cross-process memory any more.
+The **key is unchanged** — same tag, same six fields, same deliberate absence of
+the filename — but it is now looked up in an in-process map that dies with the
+run, so dedupe fires within one run and never across two.
+
+The claim above that "the key is written into every ledger record, so dedupe also
+applies to outcomes a resumed run restores rather than only within one process"
+no longer holds, and neither the record nor the resume exists. What replaces it
+for a re-run is the skip rule: a frame whose sidecar already has a rating is left
+alone, which is cheaper than dedupe and does not need a key at all.
+
+Everything else here stands: the filename is still not in the key, a failed
+outcome is still never reused, and every reused row still names the frame whose
+request paid for it.

@@ -1,7 +1,7 @@
 # imagecull — Specification
 
 **Status:** Draft v0.1 · **Target platform:** macOS on Apple Silicon · **Language:** Rust
-**One-liner:** Score a folder of Nikon mirrorless NEFs with a local Clef decision model over oMLX, and (eventually) write the cull result into XMP sidecars so Lightroom Classic opens pre-culled.
+**One-liner:** Score a folder of Nikon mirrorless NEFs with a local Clef decision model over oMLX, and write each rating into an XMP sidecar so Lightroom Classic opens pre-culled.
 
 ---
 
@@ -15,20 +15,20 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
 
 | # | Goal |
 |---|---|
-| G1 | Point at a folder; get one row per Nikon mirrorless RAW with scores, no manual work. |
+| G1 | Point at a folder; get one rating per Nikon mirrorless RAW, written where the cull reads it, with no manual work. |
 | G2 | Preview-quality input: never decode RAW sensor data; use the JPEG the camera embedded. |
 | G3 | One keeper rating per frame, 1–5, recorded exactly as the model chose it. |
 | G4 | No post-hoc thresholds: the rating is the model's own `choice`, never derived from other numbers. |
-| G5 | Interruptible and resumable; a 400-file run survives Ctrl-C, sleep, or a server restart. |
+| G5 | Interruptible and cheap to finish; a 400-file run stopped by Ctrl-C, sleep or a server restart costs only the frames it had not rated. |
 | G6 | Deterministic: same image + same rubric + same model ⇒ same numbers, so results are cacheable. |
-| G7 | v1 is read-only. Nothing is written into the photo folder except the CSV the user asked for. |
+| G7 | The raws are read-only. A run writes sidecars beside them and never modifies a frame. |
 | G8 | The core is a library crate, so the eventual macOS GUI is a new front end, not a rewrite. |
 
 ## 3. Non-goals (v1)
 
 - No RAW demosaic, no editing, no colour pipeline, no output rendering.
 - No catalog database, no library management, no import/export to Lightroom's catalog.
-- No XMP writing (v2, §11), no GUI (v3, §12).
+- No writing anywhere but the sidecars of the shoot folder (no catalogue import, no raw edits), no GUI (v3, §13).
 - No video (`/v1/systemone` does not accept video over HTTP).
 - No cloud calls, no telemetry, no server management (starting/stopping oMLX).
 - No batching. oMLX serializes decision requests; pretending otherwise is a lie in the UX.
@@ -41,9 +41,9 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
 | Preview source | **Largest embedded JPEG** in the NEF | Camera-rendered, already sharpened; no colour pipeline to build. |
 | Scoring shape | **One `choice` question, answered 1–5** | A cull wants a keeper rating, not a diagnosis; a single 5-way choice is Clef's native mode and leaves nothing to combine. |
 | Rating legend | **1 = delete · 2 = not great · 3 = okay to keep · 4 = good · 5 = great** | Five named levels, so the answer is a decision the photographer can act on and a spreadsheet can sort. |
-| Sidecar target (v2) | **Lightroom Classic / ACR** — `DSC_0001.xmp` | LrC 13.2+ honours both `xmp:Rating` and `xmpDM:pick` from sidecars. |
-| Run model | **Sequential + resumable JSONL ledger** | oMLX serializes requests anyway; the win is crash-safety, not parallelism. |
-| v1 output | **CSV only** | Prove the numbers on a real shoot before anything writes into the library. |
+| Output | **An XMP sidecar per frame** — `DSC_0001.xmp` | The cull happens in a catalogue, so the rating goes where the catalogue reads it (`xmp:Rating`), not into a file beside the terminal. |
+| Run model | **Sequential, and skip what is already rated** | oMLX serialises requests anyway; the sidecar is the state, so an interrupted run finishes cheaply. |
+| A rating already there | **Left alone** (1–5), `--force` to override | The photographer's star and the model's must never fight over one property. |
 
 ## 5. Architecture
 
@@ -68,8 +68,8 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
                     └───────────────┬──────────────────────────────┘
                                     ▼
                     ┌──────────────────────────────────────────────┐
-                    │ record     ledger.jsonl (append, fsync)      │
-                    │            → scores.csv (append one row)      │
+                    │ record     <frame>.xmp (merge, atomic rename) │
+                    │            → xmp:Rating + imagecull:*         │
                     └──────────────────────────────────────────────┘
 ```
 
@@ -87,13 +87,12 @@ imagecull/
       src/clef.rs               # systemone client, request/answer types
       src/rubric.rs             # question schema, TOML load, rubric hash
       src/scoring.rs            # orchestration: one file → one Outcome
-      src/ledger.rs             # append-only JSONL, resume, corruption repair
-      src/report.rs             # CSV writer
+      src/sidecar.rs            # the XMP document, the writer port, raw answers
+      src/csv.rs                # RFC 4180 rows, for the measures report
       src/error.rs              # ErrorKind taxonomy
     imagecull-cli/              # bin: imagecull
       src/main.rs
       src/progress.rs           # indicatif + tracing
-    imagecull-xmp/              # (v2) sidecar merge/write
     imagecull-gui/              # (v3) Tauri app, depends on core only
   crates/imagecull-core/rubrics/  # general.toml, press.toml, holiday.toml
   tests/fixtures/               # see §13.1
@@ -109,7 +108,7 @@ imagecull/
 
 - Extensions (case-insensitive): `.nef`, `.nrw` (Nikon 1 / Coolpix), `.dng` (Nikon Z can be set to DNG). Anything else is skipped with a `skipped_extension` count, never an error.
 - Non-recursive by default; `--recursive` walks subdirectories.
-- Sorted by filename (natural/NFC-normalised) so runs are reproducible and the CSV row order is stable.
+- Sorted by filename (natural/NFC-normalised) so runs are reproducible and the order a shoot is rated in is stable.
 - macOS specifics: ignore `._*` AppleDouble files, `.DS_Store`, and anything under `__MACOSX`. Report how many were ignored.
 - Hidden directories are not descended into.
 
@@ -259,7 +258,7 @@ criteria = [
   gloss after the dash is the rubric's to write; the anchor word is not, because
   those five words are what a report's reader is sorting by.
 - The keys are `"1"`…`"5"` in that order. The report's integer column parses
-  them, and the v2 sidecar maps the key straight to `xmp:Rating`.
+  them, and the sidecar maps the key straight to `xmp:Rating`.
 - Because the answer is the model's own choice, there is nothing to combine, rescale or
   threshold. A frame is one number, and the number is the decision.
 
@@ -282,59 +281,107 @@ photographer may want to look at, not a frame to re-ask about.
 
 `sha256` over the canonicalised question schema (id, instructions, criteria, in
 declaration order) + `model` alias, with the schema tag `imagecull-rubric-v2`.
-Recorded in the ledger header, in the CSV's `rubric_hash` column, and (v2) in the
-XMP sidecar. `calibration` and `resume` both key off it: changing wording
-invalidates cached answers by design, and the run refuses to silently mix
-rubrics.
+Recorded in the summary, printed in the provenance line, and written into every
+sidecar as `imagecull:rubricHash`. It is how a rating says which wording made it,
+and how a skipped frame can be explained: changing wording means a re-score needs
+`--force`, by design.
 
 ---
 
-## 9. Output
+## 9. Output — one sidecar per frame
 
-### 9.1 CSV (v1 deliverable)
+A run writes the rating into an XMP sidecar beside the frame it judged, and
+nothing else. `DSC_0001.NEF` → `DSC_0001.xmp`: the base name with the extension
+replaced, never `DSC_0001.NEF.xmp`, which is darktable's history file. The raws are
+opened read-only and never modified.
 
-`--out scores.csv`, RFC 4180, UTF-8, header row, `\n`.
+### 9.1 The document
 
-The file is written as the run goes rather than rebuilt at the end: it is
-truncated and given its header once, before the first frame, and every judged
-frame appends its row — so after frame N the CSV is exactly the ledger's first N
-rows. A spreadsheet or `tail -f` can follow it, and a killed run leaves the rows
-it judged rather than a stale snapshot. `--json-scores` is the exception: its
-object is written once, at exit, because a JSON object cannot be appended row by
-row and the ledger already holds every document.
-
-| column | example | notes |
-|---|---|---|
-| `file` | `DSC_0421.NEF` | Relative to the input dir unless `--absolute`. |
-| `stars` | `4` | The model's own choice, integer 1–5. Empty on error. |
-| `conf_stars` | `0.63` | Top-option probability. A low value means "the model is unsure", the cheapest failure signal available. |
-| `latency_ms` | `812` | Server-side if provided, else client-measured. |
-| `input_tokens` | `1327` | Prompt size. |
-| `status` | `ok` | See §10 taxonomy. |
-| `error` | `` | Short message when `status != ok`. |
-| `duplicate_of` | `DSC_0418.NEF` | Set when the identical preview was already judged. |
-| `rubric_hash` | `9f3c…` | First 8 hex chars. |
-| `model` | `clef-flash-oQ4e` | Whatever the server alias is. |
-
-One answer, so one value column. Confidence is the only honest measure of trust;
-`status`/`error` keep a 400-file CSV self-explaining.
-
-`--json-scores scores.jsonl` writes the full raw `/v1/systemone` answer per file for debugging and future re-derivation.
-
-### 9.2 Ledger (`--resume`)
-
-`scores.csv.ledger.jsonl` next to the output file:
-
-```jsonc
-{"v":1,"kind":"header","rubric_hash":"9f3c…","model":"clef-flash-oQ4e","endpoint":"http://127.0.0.1:8000","started_at":"2026-11-08T10:12:44Z"}
-{"v":1,"kind":"row","file":"DSC_0421.NEF","size":48211344,"mtime_ns":1762593132211000000,"preview_sha256":"a1b2…","status":"ok","outcome":{…},"at":"…"}
+```xml
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="imagecull 0.1.0">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:imagecull="https://ns.imagecull.app/1.0/"
+    xmp:Rating="4"
+    imagecull:confStars="0.63"
+    imagecull:model="clef-flash-oQ4e"
+    imagecull:rubricHash="9f3c1a77"
+    imagecull:scoredAt="2026-11-08T10:14:02Z"
+    imagecull:version="0.1.0"/>
+ </rdf:RDF>
+</x:xmpmeta>
 ```
 
-- Append + `flush` per record. Recovery scans for the last parseable line and truncates garbage after it — a `SIGKILL` mid-write must not poison the ledger.
-- Resume key: `(file, size, mtime_ns)`. Any change ⇒ re-score, because the file changed.
-- Dedupe: `preview_sha256` over the *sent* JPEG bytes. Identical preview ⇒ reuse the earlier outcome (deterministic model, §6.4), so a 20-frame burst costs one request. Disable with `--no-dedupe`.
-- `--fresh` discards the ledger. A rubric-hash mismatch without `--fresh` is a hard error with a clear message, never a silent mix.
-- The CSV is appended one row per judged frame, from the same record, so a run killed mid-flight leaves a CSV that is exactly the ledger's rows, and `--resume` rebuilds the whole file from scratch. No row is fsynced: the ledger is the durable record and the CSV is its rendering.
+| property | value | why |
+|---|---|---|
+| `xmp:Rating` | the model's 1–5 | the portable channel: LrC, Bridge, darktable and digiKam all read it |
+| `imagecull:confStars` | the model's own confidence, unrounded | the cheapest "the model is unsure" signal, kept where the rating is |
+| `imagecull:model` | the alias used | provenance: which model said 4 |
+| `imagecull:rubricHash` | the rubric hash's first 8 hex | provenance: which wording said 4, and why a skip can be explained |
+| `imagecull:scoredAt` | RFC 3339, UTC | provenance: when |
+| `imagecull:version` | the binary's version | provenance: which build wrote it |
+
+There is no `imagecull:stars`: the rating is `xmp:Rating`, and two properties
+holding one number is a disagreement waiting to happen. `xmp:Label` and
+`xmpDM:pick` are never written — the colour label and the pick flag are the
+photographer's, and `xmp:Rating=-1` (the destructive reject) is never written by
+this tool.
+
+### 9.2 Merge, not replace
+
+A sidecar may already carry ACR develop settings (`crs:`), keywords, GPS or
+darktable history. Rule: **byte-preserve everything we do not own.**
+
+The update is a targeted text edit, not a parse-and-reserialise: find the first
+`rdf:Description` opening tag, rewrite the value of each property it already
+carries *in place*, append the ones it lacks, add the namespace declarations the
+tag does not already carry, and retire any `imagecull:` property this build no
+longer writes. Quoting style, attribute order, comments, CDATA and foreign
+namespaces are untouched. A document that already says exactly what this run
+would write is returned unchanged. No XML dependency is added: byte-preservation
+is the requirement, and a parser cannot give it.
+
+A document with no `rdf:Description` to write into is a refusal
+(`xmp_unreadable`), never a guess.
+
+### 9.3 Writing
+
+- **Atomic.** A temp file in the same directory, then `rename` over the target:
+  a killed run or a full disk leaves the old sidecar or the new one, never half of
+  one. An existing sidecar's permission bits are preserved.
+- **Backup.** `DSC_0001.xmp.bak` holds what was there before, written only when
+  the sidecar already existed, and never over an existing `.bak`. A first run
+  over a fresh shoot leaves none.
+- **Ordering.** The sidecar is written before the frame line is printed, so the
+  terminal never claims a rating that is not yet on disk.
+- **Silence on failure.** A frame the model never answered gets no sidecar at
+  all: "no answer" must never reach the disk as a zero, a blank or an empty file.
+
+### 9.4 Skipping what is already rated
+
+If a frame's sidecar already carries an integer `xmp:Rating` of 1–5, the run
+makes no request, writes nothing, and reports the frame as `5★ kept`. That single
+rule protects a photographer's rating and makes an interrupted run cheap to
+finish. `--force` rates such frames again; the merge and backup rules then apply.
+
+The rule cannot tell who set the rating. Consequently a re-score under a changed
+rubric is a no-op without `--force`, which is why `imagecull:rubricHash` is in the
+document: the run can say what the existing rating was judged by.
+
+### 9.5 What a run still writes to a file
+
+`--json-scores answers.json` writes every raw `/v1/systemone` answer document,
+once, at exit, keyed by the frame's path inside the shoot folder. It is the
+debugging record, not the deliverable, and it is off unless asked for.
+
+### 9.6 Review before a shoot
+
+`--print-sidecars` scores the folder, prints what each sidecar would become —
+`DSC_0421.NEF  would create DSC_0421.xmp`, then one line per property with the
+value already there beside it — and writes nothing at all. Run it over 20 frames
+and read them before letting the run loose on 400: the failure being guarded
+against is a wrong legend quietly labelling an entire library.
 
 ---
 
@@ -351,13 +398,16 @@ One answer, so one value column. Confidence is the only honest measure of trust;
 | `http_422` | malformed body | abort run (client bug) |
 | `server_unreachable` | connection refused / DNS | abort after retries |
 | `timeout` | exceeded `--timeout` | retry, then record |
-| `bad_response` | answer missing/typed wrong | record raw JSON in the JSONL, continue |
+| `bad_response` | answer missing/typed wrong | keep the raw JSON for `--json-scores`, continue |
+| `xmp_unreadable` | the existing sidecar has no `rdf:Description` to write into, or cannot be read | leave it alone, continue |
+| `xmp_foreign` | the sidecar belongs to another application (a `darktable:` namespace) | leave it alone, continue; `--allow-foreign` overrides |
+| `xmp_write_failed` | the sidecar could not be written (read-only mount, full disk) | **abort run**: every remaining frame would fail identically, and each was already paid for |
 
 Retries: 3 attempts with 0.5/1/2 s backoff, only for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx (a wrong rubric will fail identically 400 times).
 
 **Preflight** (before the first file): `GET /v1/models`, check the alias exists, and if the server exposes `/v1/models/status` confirm `model_type == "decision"`. Fail fast with an actionable message rather than 400 files of the same 400.
 
-Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad args, dir missing, server unreachable, rubric rejected) · `3` interrupted (SIGINT, ledger intact).
+Exit codes: `0` all ok (a run that skipped every frame is all ok) · `1` completed with failed rows · `2` fatal (bad args, dir missing, server unreachable, rubric rejected, a sidecar write failed) · `3` interrupted (SIGINT; what was rated is already on disk).
 
 ---
 
@@ -365,7 +415,6 @@ Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad args,
 
 ```
 imagecull score <DIR> [OPTIONS]
-    -o, --out <FILE>            default: ./scores.csv
         --endpoint <URL>        default: http://127.0.0.1:8000
     -m, --model <ALIAS>         default: from rubric.toml
         --rubric <NAME|FILE>    one of general/press/holiday, or a path
@@ -374,12 +423,13 @@ imagecull score <DIR> [OPTIONS]
         --max-edge <PX>         default 1568
         --jpeg-quality <1-100>  default 88
         --recursive
-        --resume | --fresh
-        --json-scores <FILE>
+        --json-scores <FILE>    every raw answer document, for debugging
         --no-dedupe
+        --force                 rate frames again even though their sidecars hold a rating
+        --allow-foreign         write into a sidecar another application owns
+        --print-sidecars        score and print what each sidecar would become, write nothing
         --limit <N>             smoke test on the first N files
         --dry-run               write previews to ./imagecull-previews, no HTTP
-        --absolute              absolute paths in the CSV
         --timeout <SECS>        default 120
         --quiet | --verbose
         --config <FILE>         read this config file instead of the discovered one
@@ -392,10 +442,11 @@ imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:R
 
 `--config` and `--no-config` are on all three subcommands (`§11.1`).
 
-One line per frame — `142/400  DSC_0555.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 3m10s`,
-with `duplicate of DSC_0540.NEF` when an identical preview paid for the answers —
-plus a final summary — counts by status, mean/median per score, star histogram,
-disagreement rate, total wall time. These lines print whether or not stdout is a
+One line per frame — `142/400  DSC_0555.NEF  4★  812ms  eta 3m10s`, `5★ kept` for a
+frame whose sidecar already had a rating, and `duplicate of DSC_0540.NEF` when an
+identical preview paid for the request — plus a final summary: how much of the
+folder this run rated, counts by status, how many were skipped or deduplicated,
+the rating's mean/median and histogram, what the scan left out, and the wall time. These lines print whether or not stdout is a
 terminal: a frame line ends in a newline, so a redirected log is the same text a
 terminal received, and `--quiet` is the switch for a script that wants none of
 it. `--verbose` adds the preview's size, the answers at full precision and each
@@ -409,7 +460,7 @@ Values that stay true across runs can come from a TOML file instead of being
 retyped as flags. Keys are grouped into five sections that map one-for-one onto
 the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
 `[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
-(`csv`, `json_scores`, `absolute`), `[run]` (`rubric`, `shoot_context`,
+(`json_scores`), `[run]` (`rubric`, `shoot_context`,
 `dedupe`). `[run] rubric` holds exactly what `--rubric` holds: a built-in's name
 or a path. `imagecull.toml.example` is the commented reference; ADR 0003 records
 why this shape, ADR 0004 the three built-ins.
@@ -423,8 +474,8 @@ entirely.
 
 **Precedence.** Flag > config file > built-in default, per key.
 
-**What a file cannot set.** The shoot folder, `--dry-run`, `--resume`,
-`--fresh`, `--limit`, `--quiet`, `--verbose` — those describe the invocation,
+**What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
+`--allow-foreign`, `--print-sidecars`, `--limit`, `--quiet`, `--verbose` — those describe the invocation,
 not the shoot.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are
@@ -443,73 +494,8 @@ the model alias:
 `rubric general/69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`
 — the name before the slash only when a built-in was selected by name, since a
 file has no name to give and the hash already identifies it.
-The file's content hash is **not** in the ledger header; see ADR 0003's
-consequences for what that leaves open.
-
----
-
-## 12. v2 — XMP sidecars for Lightroom Classic
-
-**Not built in v1.** Specced now because it constrains v1's data model (the rating, its confidence, the rubric hash and the model must be recorded even though v1 only prints CSV).
-
-### 12.1 What actually survives the handoff
-
-| field | XMP property | LrC reads it | other apps |
-|---|---|---|---|
-| stars | `xmp:Rating` `1`–`5` | yes, at import or *Read Metadata from File* | yes (Bridge, dt, digiKam) |
-| rejected | `xmp:Rating` `-1` | yes | yes — **never written by this tool** |
-| like tint | `xmp:Label` (`Green`/`Red`/none) | yes | partially (one colour label) — **not written: the cull has no verdict** |
-| pick / reject flag | `xmpDM:pick` `1`/`0`/`-1` + `xmpDM:good` | yes, LrC ≥ 13.2 only | mostly ignored — **not written: the reject is the photographer's** |
-| confidence | our own namespace | ignored (preserved) | ignored (preserved) |
-
-Design consequence: **the rating is the portable channel (`xmp:Rating`), and
-everything else lives in a namespace nobody else touches** so nothing is lost or
-mangled on the round trip.
-
-### 12.2 Filename
-
-`DSC_0001.NEF` → **`DSC_0001.xmp`** (base name, extension replaced, `.NEF`/`.nef` both handled). Never `DSC_0001.NEF.xmp` — that name belongs to darktable, and writing it would put our metadata inside another app's history file.
-
-### 12.3 Merge, not overwrite
-
-A sidecar may already carry ACR develop settings (`crs:`), keywords, GPS or darktable history. Rule: **byte-preserve everything we do not own.** Implementation: parse for validation (`roxmltree`), then perform targeted edits — remove only our own properties, then insert ours into the first `rdf:Description` — rather than parse-and-reserialise the whole document (which would reorder and re-quote foreign XML).
-
-```xml
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="imagecull 0.1">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-    xmlns:imagecull="https://ns.imagecull.app/1.0/"
-    xmp:Rating="4"
-    imagecull:stars="4"
-    imagecull:confStars="0.63"
-    imagecull:model="clef-flash-oQ4e"
-    imagecull:rubricHash="9f3c1a77"
-    imagecull:scoredAt="2026-11-08T10:14:02Z"
-    imagecull:version="0.1.0" />
- </rdf:RDF>
-</x:xmpmeta>
-```
-
-Mapping: `stars` → `xmp:Rating`, one for one, `1`–`5`. A low rating is not a
-rejection: **never** set `xmp:Rating=-1` automatically — that is the user's
-destructive reject, and it belongs to them. Pick/reject flags (`xmpDM:pick`,
-`xmp:Label`) are the photographer's, not the model's, because the cull answers
-one question and that question is the rating.
-
-### 12.4 Safety rules
-
-1. **Opt-in only:** requires `--xmp`; default is unchanged from v1.
-2. **`--dry-run`** prints a unified diff of the sidecar change; nothing is written.
-3. **Atomic write:** temp file in the same directory + `rename`.
-4. **Backup:** if a sidecar already existed, `DSC_0001.xmp.bak` (only with `--backup`, and never overwriting an older `.bak`).
-5. **Never clobber a human rating:** if the existing `xmp:Rating` differs from ours and is non-zero, skip and report `skipped_existing_rating`. Override with `--overwrite-rating`.
-6. **Foreign-app guard:** if the sidecar contains a `darktable:` namespace or `darktable:history`, refuse to write unless `--allow-foreign` — darktable owns that file and will rewrite it.
-7. **Read-only raws:** the NEF is opened read-only and never modified. XMP-in-RAW is a non-feature.
-
-### 12.5 First-run protocol
-
-Run `--xmp --dry-run` over the shoot, review 20 sidecars by eye, then run for real. State this in the README; the failure mode being guarded against is a wrong legend quietly labelling an entire library.
+The file's content hash is **not** carried anywhere in a run's output; see ADR
+0003's consequences for what that leaves open.
 
 ---
 
@@ -546,11 +532,21 @@ Bottleneck reality: the run is **serialized by the server**, so client-side opti
 
 ## 15. Determinism and caching
 
-Decision models have no sampling temperature — the answer is a deterministic function of `(weights, image bytes, question schema)`. Therefore:
+Decision models have no sampling temperature — the answer is a deterministic
+function of `(weights, image bytes, question schema)`. Therefore:
 
-- Re-running the same folder with the same rubric and model **must** produce a byte-identical CSV. This is an acceptance test (§16), not an aspiration.
-- The cache key is `(preview_sha256, rubric_hash, model)`. The ledger currently keys on the file identity; the rubric hash guards schema drift.
-- Recording `model` + `rubric_hash` in every row means any CSV can be reproduced later, or invalidated deliberately.
+- Re-running the same folder with the same rubric and model over the same raws
+  **must** produce the same ratings, and therefore byte-identical sidecars except
+  for `imagecull:scoredAt`. This is an acceptance test (§16), not an aspiration.
+- **Dedupe** reuses an answer for a byte-identical preview within one run, keyed
+  on `(preview_sha256, state, rubric_hash, model)`. The key covers the state the
+  model reads — the task, the shoot context and the bytes — but not the filename,
+  which is the photographer's label rather than something the picture shows (ADR
+  0002). The cache is in-process; it dies with the run.
+- **The sidecar is the only cross-run memory.** A frame whose sidecar already
+  carries a rating is skipped, so a re-run costs nothing for it. There is no
+  ledger, no resume flag and no re-derivation of an old run's numbers: a lost
+  sidecar costs one request.
 
 ---
 
@@ -571,13 +567,13 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 
 ### 16.2 Layers
 
-- **Unit:** orientation application (all 8 tags), largest-preview selection by area, downscale never upscales, base64 round-trip, CSV escaping (filenames with commas/quotes/unicode), ledger truncation repair, rubric canonicalisation/hash stability.
+- **Unit:** orientation application (all 8 tags), largest-preview selection by area, downscale never upscales, base64 round-trip, CSV escaping for the measures report (filenames with commas/quotes/unicode), the sidecar merge (byte-preservation of foreign XML, in-place rewrite, idempotency, refusal), rubric canonicalisation/hash stability.
 - **Contract:** `httpmock` serves recorded `/v1/systemone` bodies — including adversarial ones (`probabilities` as array *and* as object, `choice` as string, a key off the legend) — and asserts our deserialisation. No network in CI.
-- **Golden:** `insta` snapshots of the CSV for the fixture set against the mock server.
+- **Golden:** the summary block and the frame lines for the fixture set against the mock server, plus the exact sidecar document a fixture frame produces.
 - **Live (ignored by default, `--ignored`):** one real NEF against a real oMLX; asserts `status=ok` and that the rating lands in `1..=5`.
 - **Acceptance:**
   1. 400-file run completes; every row has a status.
-  2. `Ctrl-C` at 50% then `--resume` produces the same CSV as one uninterrupted run, with no duplicate rows.
+  2. `Ctrl-C` at 50% then a plain re-run makes **no requests** for the frames already rated and leaves their sidecars byte-identical.
   3. Two full runs are byte-identical.
   4. `--dry-run` previews are upright for portrait fixtures.
   5. Zero writes into the input folder when `--xmp` is absent (verified by mtime scan).
@@ -593,15 +589,15 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 | R3 | The rating may saturate (everything 3–4). | Watch the histogram in the run summary; if the spread is flat, the rubric's instructions and level glosses need work, not the thresholds — there are no thresholds. |
 | R4 | `/v1/systemone` is new surface that may drift. | Defensive parsing, raw answers preserved, contract tests, version check in `doctor`. |
 | R5 | Embedded preview ≠ the edit the user would make. | Deliberate: the preview is the camera's rendering and the thing a cull actually judges. Full RAW demosaic stays a non-goal. |
-| R6 | Long runs on battery / sleep kills the server. | Ledger + resume; `doctor` preflight; `caffeinate -i` suggested in docs. |
-| R7 | Sidecar writes are destructive if wrong (v2). | §12.4 guards, dry-run, backups, foreign-app detection. |
-| R8 | Rubric is the product; wording churn invalidates caches. | Rubric in TOML, hashed, `--fresh` explicit — but expect several re-runs during M4. Budget for it. |
+| R6 | Long runs on battery / sleep kills the server. | The skip rule finishes the shoot for the price of what is left; `doctor` preflight; `caffeinate -i` suggested in docs. |
+| R7 | Sidecar writes are destructive if wrong. | §9.2 merge, §9.3 atomic write and backups, §9.6 preview, `xmp_foreign` detection, skip-by-default. |
+| R8 | Rubric is the product; wording churn invalidates ratings. | Rubric in TOML, hashed into every sidecar, and `--force` is explicit — but expect several re-runs during M4. Budget for it. |
 
 Open questions for the user:
 1. Which Clef build is installed (27B / Flash, 4-bit / 8-bit), and which oMLX version?
 2. Aesthetic target: photojournalistic keepers, or technically-clean deliverables? It changes the rubric's instructions.
 3. Are there existing star-rated shoots we can use as calibration ground truth (with XMP already written)?
-4. Should bursts be collapsed in the CSV (one row per distinct frame, with `duplicate_of`) or always one row per NEF?
+4. Should a burst's identical previews share one sidecar rating (cheap) or be rated one at a time (honest about each file)? Today the first frame pays and the rest reuse its answer within the run.
 
 ---
 
@@ -612,9 +608,9 @@ Open questions for the user:
 | **M0** | workspace scaffold, `--version`, `doctor`, error taxonomy | `imagecull doctor` explains a missing/old oMLX clearly |
 | **M1** | ingest + preview extraction + orientation + downscale + `--dry-run` | portrait fixture exports upright at 1568 px |
 | **M2** | systemone client + rubric + single-file score | one NEF prints its rating; contract tests green |
-| **M3** | ledger, resume, CSV, progress, summary | acceptance tests 1–5 pass |
+| **M3** | sidecar writes, skip rule, progress, summary | acceptance tests 1–5 pass |
 | **M4** | real-shoot validation + rubric tuning + optional `calibrate` | scores agree with the user's own stars on a known shoot; rubric frozen |
-| **M5** | v2 XMP writer for Lightroom Classic | dry-run diff reviewed, 20 sidecars verified in LrC |
+| **M5** | Lightroom handoff: the written sidecars verified in LrC | 20 sidecars reviewed with `--print-sidecars` and 20 more verified in the catalogue |
 | **M6** | v3 Tauri GUI | grid + cull + write-XMP without a terminal |
 
 Sequencing note: M4 is the long pole and it is **not** engineering — it is prompt/schema iteration against real photos. Getting to M3 fast is the point of deferring XMP.
@@ -626,18 +622,17 @@ Sequencing note: M4 is the long pole and it is **not** engineering — it is pro
 | crate | role |
 |---|---|
 | `clap` 4 (derive) | CLI |
-| `serde`, `serde_json` | wire types, ledger, JSON scores |
+| `serde`, `serde_json` | wire types, `--json-scores` |
 | `toml` | rubric config |
 | `raw-files` | NEF preview extraction + orientation (primary) |
 | `image` | JPEG decode/encode, `apply_orientation` |
 | `fast_image_resize` | Lanczos3 downscale |
 | `base64` | data URI payloads |
 | `ureq` | blocking HTTP to `/v1/systemone` |
-| `csv` | RFC 4180 output |
 | `sha2` | preview/rubric hashing |
+| `tempfile` | the sidecar writer's temp file and rename |
 | `indicatif`, `tracing`, `tracing-subscriber` | progress and logs |
 | `thiserror` | error taxonomy |
-| *v2:* `roxmltree` (+ targeted string edit) | XMP merge |
 | *v3:* `tauri` | macOS GUI |
 | *dev:* `httpmock`, `insta`, `assert_cmd`, `predicates`, `tempfile` | contract, golden, CLI tests |
 
