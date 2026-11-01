@@ -166,6 +166,7 @@ fn frame_line(frame: &FrameEvent) -> String {
         Judgement::Answered(answers) => {
             parts.push(format!("{}★", answers.stars));
         }
+        Judgement::Skipped { rating } => parts.push(format!("{rating}★ kept")),
         Judgement::Failed(failure) => parts.push(failure.kind.as_str().to_string()),
     }
     if let Some(latency_ms) = frame.latency_ms {
@@ -202,6 +203,10 @@ fn verbose_line(frame: &FrameEvent) -> String {
                 "{}★  confidence {:.2}",
                 answers.stars, answers.confidence
             ));
+        }
+        Judgement::Skipped { rating } => {
+            parts.push(format!("kept {rating}★"));
+            parts.push("the sidecar already had a rating".to_string());
         }
         Judgement::Failed(failure) => {
             parts.push(failure.kind.as_str().to_string());
@@ -252,11 +257,15 @@ fn summary_block(summary: &Summary) -> String {
         ));
         out.push_str(&format!("stars: {}\n", histogram(&summary.stars)));
     }
-    if summary.resumed > 0 || summary.duplicates > 0 {
-        out.push_str(&format!(
-            "resumed: {} · deduplicated: {}\n",
-            summary.resumed, summary.duplicates
-        ));
+    if summary.skipped > 0 || summary.duplicates > 0 {
+        let mut parts = Vec::new();
+        if summary.skipped > 0 {
+            parts.push(format!("skipped: {}", summary.skipped));
+        }
+        if summary.duplicates > 0 {
+            parts.push(format!("deduplicated: {}", summary.duplicates));
+        }
+        out.push_str(&format!("{}\n", parts.join(" · ")));
     }
     let left_out = left_out(&summary.left_out);
     if !left_out.is_empty() {
@@ -289,8 +298,8 @@ fn outcome_line(summary: &Summary) -> String {
         duration_text(summary.elapsed)
     )];
     parts.push(statuses(summary));
-    if summary.resumed > 0 {
-        parts.push(format!("{} resumed", summary.resumed));
+    if summary.skipped > 0 {
+        parts.push(format!("{} skipped", summary.skipped));
     }
     if summary.duplicates > 0 {
         parts.push(format!("{} deduplicated", summary.duplicates));
@@ -400,9 +409,9 @@ mod tests {
     use imagecull_core::ingest::ScanCounts;
     use imagecull_core::progress::{MeanMedian, PreviewShape, StatusCount, Warning};
     use imagecull_core::reading::Answers;
-    use imagecull_core::report::Failure;
     use imagecull_core::rubric::Builtin;
     use imagecull_core::scoring::Ending;
+    use imagecull_core::sidecar::Failure;
 
     use super::*;
 
@@ -469,7 +478,7 @@ mod tests {
             judged: 400,
             scored: 397,
             failed: 3,
-            resumed: 3,
+            skipped: 3,
             duplicates: 2,
             counts: vec![
                 StatusCount {
@@ -577,7 +586,7 @@ mod tests {
              status: ok 397 · no_preview 1 · timeout 2\n\
              rating: 4.54 mean / 5.00 median\n\
              stars: 1★ 0 · 2★ 4 · 3★ 51 · 4★ 68 · 5★ 274\n\
-             resumed: 3 · deduplicated: 2\n\
+             skipped: 3 · deduplicated: 2\n\
              left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned\n\
              rubric general/{short} · model clef-flash-oQ4e\n"
@@ -658,7 +667,7 @@ mod tests {
 
         assert_eq!(
             rendered.out,
-            "scored 397 of 400 in 8m12s · ok 397 · no_preview 1 · timeout 2 · 3 resumed · \
+            "scored 397 of 400 in 8m12s · ok 397 · no_preview 1 · timeout 2 · 3 skipped · \
              2 deduplicated · left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned · rubric general/3f2a1b0c · model clef-flash-oQ4e\n"
                 .replace("3f2a1b0c", summary().rubric_hash.short()),

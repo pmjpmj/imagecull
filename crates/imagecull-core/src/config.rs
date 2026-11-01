@@ -20,8 +20,8 @@ use crate::error::{Error, Result};
 use crate::ingest::ScanOptions;
 use crate::omlx;
 use crate::preprocess::Params;
-use crate::report::Outputs;
 use crate::rubric::RubricSource;
+use crate::sidecar::Outputs;
 
 /// The config file that travels with a shoot folder.
 pub const SHOOT_CONFIG: &str = "imagecull.toml";
@@ -31,10 +31,6 @@ pub const USER_CONFIG_DIR: &str = "imagecull";
 
 /// The user-level config file's name, inside [`USER_CONFIG_DIR`].
 pub const USER_CONFIG_FILE: &str = "config.toml";
-
-/// The CSV a run writes when neither a flag nor a file names another one
-/// (spec §11).
-pub const DEFAULT_CSV: &str = "scores.csv";
 
 /// The read timeout a run uses when neither a flag nor a file names another
 /// one, in seconds.
@@ -198,9 +194,7 @@ impl ConfigFile {
             max_edge: self.preview.max_edge,
             jpeg_quality: self.preview.jpeg_quality,
             recursive: self.scan.recursive,
-            csv: anchor(&self.outputs.csv, base),
             json_scores: anchor(&self.outputs.json_scores, base),
-            absolute: self.outputs.absolute,
             rubric: self.run.rubric.clone().map(|source| source.anchored(base)),
             shoot_context: self.run.shoot_context.clone(),
             dedupe: self.run.dedupe,
@@ -224,6 +218,18 @@ impl ConfigFile {
             return Err(Error::fatal(format!(
                 "preview.jpeg_quality must be between 1 and 100, not {quality}"
             )));
+        }
+        if self.outputs.csv.is_some() {
+            return Err(Error::fatal(
+                "outputs.csv is gone: a run writes each rating into an XMP sidecar beside its \
+                 frame, so there is no report path to set — delete the key",
+            ));
+        }
+        if self.outputs.absolute.is_some() {
+            return Err(Error::fatal(
+                "outputs.absolute is gone with the report: there is no file column to spell \
+                 absolutely — delete the key",
+            ));
         }
         if let Some(0) = self.server.timeout {
             return Err(Error::fatal(
@@ -269,13 +275,20 @@ struct ScanSection {
     recursive: Option<bool>,
 }
 
-/// `[outputs]`: where the report goes, as [`Outputs`].
+/// `[outputs]`: what a run still writes to a file, as [`Outputs`].
+///
+/// Ratings go into sidecars beside the frames, so there is no report path here.
+/// `csv` and `absolute` are gone with the report: an old file that still sets
+/// them is a fatal error naming the change, never a silent shrug.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct OutputsSection {
+    /// Gone: named only so the refusal can say where ratings go instead of
+    /// leaving a photographer guessing at an unknown field.
     csv: Option<PathBuf>,
-    json_scores: Option<PathBuf>,
+    /// Gone with it: there is no `file` column to spell absolutely.
     absolute: Option<bool>,
+    json_scores: Option<PathBuf>,
 }
 
 /// `[run]`: the rest of what a run needs to know.
@@ -315,9 +328,7 @@ pub struct Resolved {
     pub max_edge: Option<u32>,
     pub jpeg_quality: Option<u8>,
     pub recursive: Option<bool>,
-    pub csv: Option<PathBuf>,
     pub json_scores: Option<PathBuf>,
-    pub absolute: Option<bool>,
     /// Which rubric to judge by: a built-in's name, or a path to a file.
     pub rubric: Option<RubricSource>,
     pub shoot_context: Option<String>,
@@ -337,9 +348,7 @@ impl Resolved {
             max_edge: flags.max_edge.or(self.max_edge),
             jpeg_quality: flags.jpeg_quality.or(self.jpeg_quality),
             recursive: flags.recursive.or(self.recursive),
-            csv: flags.csv.or(self.csv),
             json_scores: flags.json_scores.or(self.json_scores),
-            absolute: flags.absolute.or(self.absolute),
             rubric: flags.rubric.or(self.rubric),
             shoot_context: flags.shoot_context.or(self.shoot_context),
             dedupe: flags.dedupe.or(self.dedupe),
@@ -367,9 +376,7 @@ impl Resolved {
             },
             recursive: self.recursive.unwrap_or(false),
             outputs: Outputs {
-                csv: self.csv.unwrap_or_else(|| PathBuf::from(DEFAULT_CSV)),
                 json_scores: self.json_scores,
-                absolute: self.absolute.unwrap_or(false),
             },
             rubric: self.rubric,
             shoot_context: self.shoot_context,
@@ -394,7 +401,7 @@ pub struct Effective {
     /// Whether a run descends into subdirectories. The scan's `limit` stays a
     /// flag, because it describes the invocation.
     pub recursive: bool,
-    /// Where the CSV and the raw answers go.
+    /// Where the raw answers go, when they are asked for.
     pub outputs: Outputs,
     /// Which rubric to judge by: a built-in's name, or a path to a file. `None`
     /// is the default built-in.

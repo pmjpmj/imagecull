@@ -1,7 +1,7 @@
 # 03: The run writes sidecars instead of a report
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** resolved
 **Blocked by:** 01, 02
 **Spec:** [../spec.md](../spec.md) §"Modules and interfaces", §"What a run does,
 per frame", §"Statuses and exit behaviour"
@@ -69,3 +69,41 @@ In the tests: delete `tests/ledger.rs`; rewrite the ledger and CSV assertions in
 - Do not touch the CLI (ticket 04) or the docs (ticket 05), except where the core
   API change forces a compile fix in `crates/imagecull-cli` — in that case keep it
   minimal and note it in the ticket.
+
+## Comments
+
+### Evidence (2026-11-19)
+
+`report` is gone and its row lives in `sidecar` (`Row`, `Failure`, `OK`,
+`Outputs` with `json_scores` only, `write_json`). `ledger.rs` and the whole resume
+family are deleted: `Record`, `Provenance`, `FileIdentity`, `ResumeKey`, `Header`,
+`LedgerMode`, the mid-record and "plain score starts the ledger over" warnings,
+`Run::resumed`, `Summary::resumed`, `tests/ledger.rs`.
+
+`scoring::run` takes the sidecar `Writer` as a second port beside `Decider`. The
+per-frame order is: read the sidecar → skip if it already carries a rating 1–5
+(no extraction, no request) → refuse a document nothing can be written into
+(`xmp_unreadable`, before any request is paid) → refuse another application's
+sidecar (`xmp_foreign`, unless `allow_foreign`) → prepare/dedupe/ask/read → write
+→ frame event.
+
+`Frame` is now `{ source, outcome: Outcome::{Asked, Kept}, persisted: Persisted }`,
+so one place decides a frame's status: a failed write outranks a missing answer,
+and a kept frame is neither scored nor failed. `Config` grew `force` and
+`allow_foreign`; `Config::ledger` is gone. Dedupe's memory is an in-process
+`HashMap` of reused answers; the key is unchanged.
+
+`Summary` carries `skipped` instead of `resumed`; kept frames stay out of the star
+histogram, the mean/median and the status counts.
+
+New kinds: `xmp_unreadable` and `xmp_foreign` (`Recovery::Continue`),
+`xmp_write_failed` (`Recovery::AbortRun`).
+
+`[outputs] csv` and `[outputs] absolute` are refused by name with a message that
+says ratings now go into sidecars.
+
+Tests: `tests/sidecar.rs` (11 behaviour tests through `run`), `tests/config.rs`
+(the two report keys), `tests/progress.rs` (a kept frame is reported as
+`Judgement::Skipped`), `tests/failure_taxonomy.rs` rewritten to read statuses from
+the run instead of a CSV, and `tests/report.rs` deleted with its json-scores and
+"never touches the raws" assertions moved over.

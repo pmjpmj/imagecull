@@ -474,6 +474,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
         shoot.path(),
         &config,
         &adapter(&stub, &config.model),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -529,13 +530,14 @@ fn a_run_over_http_reports_the_answers_it_read() {
         shoot.path(),
         &config,
         &adapter(&stub, &config.model),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
     let frame = &run.frames[0];
-    let reading = frame.outcome.as_ref().expect("the frame was prepared");
+    let reading = frame.reading().expect("the frame was prepared");
     let answers = reading.answers.as_ref().expect("a readable answer");
     assert_eq!(answers.stars, 4);
     assert_eq!(posts(&stub)[0].body["model"], "clef-27b-oQ4e");
@@ -600,8 +602,15 @@ fn a_server_that_does_not_report_model_types_can_still_be_scored() {
         "a server that cannot confirm types may still score: {:?}",
         preflight.map_err(|error| error.to_string())
     );
-    let run = scoring::run(shoot.path(), &config, &adapter, &Silent, &Cancel::new())
-        .expect("a run over a server with no type report");
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter,
+        &imagecull_core::sidecar::Filesystem,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run over a server with no type report");
 
     assert_eq!(run.scored(), 1, "the frame was scored, not refused");
     assert_eq!(posts(&stub).len(), 1, "one frame, one request");
@@ -691,6 +700,7 @@ fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() 
         shoot.path(),
         &config,
         &adapter(&stub, "clef-flash-oQ4e"),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )

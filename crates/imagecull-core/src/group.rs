@@ -43,13 +43,14 @@ use image::RgbImage;
 use raw_files::{DateTime, Metadata};
 use sha2::{Digest, Sha256};
 
+use crate::csv;
 use crate::error::{Error, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::measure::{self, AfPoint, Measures};
 use crate::preprocess;
 use crate::preview;
-use crate::report::{self, Failure};
 use crate::rubric::hex;
+use crate::sidecar::{self, Failure};
 
 /// The identity of the algorithm, part of every [`grouping_hash`]. Bump it when
 /// a gate, its order or the signature changes: two runs under different versions
@@ -454,7 +455,7 @@ impl Planned {
     pub fn status(&self) -> &'static str {
         self.failure
             .as_ref()
-            .map_or(report::OK, |failure| failure.kind.as_str())
+            .map_or(sidecar::OK, |failure| failure.kind.as_str())
     }
 }
 
@@ -663,7 +664,7 @@ pub const COLUMNS: [&str; 14] = [
 /// empty: "no answer" and "a measure of zero" are different facts.
 pub fn render_csv(plan: &Plan) -> String {
     let mut out = String::new();
-    report::push_record(&mut out, &COLUMNS);
+    csv::push_record(&mut out, &COLUMNS);
     for frame in &plan.frames {
         let measures = frame.measures;
         let cells = [
@@ -685,7 +686,7 @@ pub fn render_csv(plan: &Plan) -> String {
                 .as_ref()
                 .map_or_else(String::new, |failure| failure.message.clone()),
         ];
-        report::push_record(&mut out, &cells);
+        csv::push_record(&mut out, &cells);
     }
     out
 }

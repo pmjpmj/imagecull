@@ -37,19 +37,18 @@
 )]
 
 pub mod config;
+pub(crate) mod csv;
 pub mod doctor;
 pub mod dry_run;
 pub mod error;
 pub mod group;
 pub mod ingest;
-pub mod ledger;
 pub mod measure;
 pub mod omlx;
 pub mod preprocess;
 pub mod preview;
 pub mod progress;
 pub mod reading;
-pub mod report;
 pub mod rubric;
 pub mod scoring;
 pub mod sidecar;
@@ -63,15 +62,15 @@ pub use group::{
     Thresholds,
 };
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
-pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
     Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter, Silent, Started,
     StatusCount, Summary, Warning,
 };
 pub use reading::{Answers, Reading};
-pub use report::Outputs;
 pub use rubric::{Builtin, Question, Rubric, RubricHash, RubricSource};
 pub use scoring::{
-    Cancel, Config, Decider, Ending, Request, Response, RetryPolicy, Run, State, Usage,
+    Cancel, Config, Decider, Ending, Outcome, Persisted, Request, Response, RetryPolicy, Run,
+    State, Usage,
 };
+pub use sidecar::{Failure, Outputs, Properties, Row, Written};

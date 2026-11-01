@@ -17,9 +17,9 @@ use std::time::Duration;
 use crate::error::ErrorKind;
 use crate::ingest::ScanCounts;
 use crate::reading::Answers;
-use crate::report::{self, Failure};
 use crate::rubric::{Builtin, RubricHash};
 use crate::scoring::{Ending, Run};
+use crate::sidecar::{self, Failure};
 
 /// Where a run's progress goes.
 ///
@@ -100,8 +100,8 @@ pub struct Summary {
     pub scored: usize,
     /// How many did not, for any reason.
     pub failed: usize,
-    /// How many frames the resumed ledger already held.
-    pub resumed: usize,
+    /// How many frames already carried a rating and were left alone.
+    pub skipped: usize,
     /// How many frames reused an identical preview's outcome.
     pub duplicates: usize,
     /// Counts by `status`: `ok` first, then the taxonomy's own order, omitting
@@ -137,13 +137,21 @@ impl Summary {
         let mut failures: BTreeMap<ErrorKind, usize> = BTreeMap::new();
         let mut ratings = Vec::new();
         let mut stars = [0usize; 5];
+        let mut skipped = 0;
         for frame in &run.frames {
-            let answers = match frame.answers_or_failure() {
-                Ok(answers) => answers,
-                Err(failure) => {
-                    *failures.entry(failure.kind).or_default() += 1;
-                    continue;
-                }
+            if frame.kept().is_some() {
+                // A kept frame's rating is not this run's judgement: it is not in
+                // the histogram, the mean, or the status counts.
+                skipped += 1;
+                continue;
+            }
+            if let Some(failure) = frame.failure() {
+                *failures.entry(failure.kind).or_default() += 1;
+                continue;
+            }
+            let answers = match frame.answers() {
+                Some(answers) => answers,
+                None => continue,
             };
             ratings.push(f64::from(answers.stars));
             let bucket = usize::from(answers.stars.clamp(1, 5)) - 1;
@@ -156,7 +164,7 @@ impl Summary {
         let mut counts = Vec::with_capacity(1 + ErrorKind::ALL.len());
         if scored > 0 {
             counts.push(StatusCount {
-                status: report::OK,
+                status: sidecar::OK,
                 count: scored,
             });
         }
@@ -174,7 +182,7 @@ impl Summary {
             judged: run.frames.len(),
             scored,
             failed: run.failed(),
-            resumed: run.resumed,
+            skipped,
             duplicates: run.duplicates,
             counts,
             rating,
@@ -249,8 +257,14 @@ pub struct FrameEvent {
 pub enum Judgement {
     /// The answer, at the precision the model gave it.
     Answered(Answers),
-    /// The row's `status` and `error` columns: the same failure the CSV carries.
+    /// The row's `status` and `error` columns: the same failure the record
+    /// carries.
     Failed(Failure),
+    /// The sidecar already carried this rating, so nothing was asked or written.
+    Skipped {
+        /// The rating that was already there.
+        rating: u8,
+    },
 }
 
 /// The bytes that were sent, in the shape a photographer thinks about them.

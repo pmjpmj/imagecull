@@ -20,15 +20,15 @@ use imagecull_core::error::{Error, ErrorKind, ExitCode};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
-use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Builtin;
-use imagecull_core::scoring::{self, Cancel, Config, Ending, RetryPolicy};
+use imagecull_core::scoring::{self, Cancel, Config, Ending, RetryPolicy, Run};
+use imagecull_core::sidecar::Outputs;
 use serde_json::json;
 use support::decider::{Scripted, document};
 
 /// A run over `csv`'s folder, with the spec's retry schedule shortened to
 /// nothing: the attempt count is what these tests assert, not the waiting.
-fn config(csv: PathBuf) -> Config {
+fn config(_unused: PathBuf) -> Config {
     let mut config = Config::new(
         Builtin::General
             .rubric()
@@ -37,11 +37,7 @@ fn config(csv: PathBuf) -> Config {
         Params::default(),
         ScanOptions::default(),
         None,
-        Outputs {
-            csv,
-            json_scores: None,
-            absolute: false,
-        },
+        Outputs::default(),
     );
     config.retry = RetryPolicy::without_waiting();
     config
@@ -68,67 +64,62 @@ fn failure(kind: ErrorKind, message: &str) -> Error {
     Error::new(kind, message)
 }
 
-/// The CSV a run wrote, as rows of cells, parsed the way RFC 4180 asks: a cell
-/// may be quoted, may hold commas, and may hold a line break. Escaping in
-/// general is `tests/report.rs`'s job; this is only enough to read a row back.
-struct Csv {
-    header: Vec<String>,
-    rows: Vec<Vec<String>>,
+/// The statuses of a run's frames, in ingest order.
+fn statuses(rows: &Rows<'_>) -> Vec<&'static str> {
+    (0..rows.len())
+        .map(|row| {
+            rows.0.frames[row]
+                .failure()
+                .map_or("ok", |failure| failure.kind.as_str())
+        })
+        .collect()
 }
 
-impl Csv {
-    fn read(path: &Path) -> Csv {
-        let text = fs::read_to_string(path).expect("the run wrote a CSV");
-        let mut records = records(&text).into_iter();
-        Csv {
-            header: records.next().expect("a header row"),
-            rows: records.collect(),
+/// A finished run's per-frame facts, read the way the report's columns used to
+/// be: the report is gone, so the run itself is the record.
+struct Rows<'a>(&'a Run);
+
+impl<'a> Rows<'a> {
+    fn of(run: &'a Run) -> Rows<'a> {
+        Rows(run)
+    }
+
+    fn len(&self) -> usize {
+        self.0.frames.len()
+    }
+
+    fn cell(&self, row: usize, column: &str) -> String {
+        let frame = &self.0.frames[row];
+        match column {
+            "status" => match (frame.kept(), frame.failure()) {
+                (Some(_), _) => "skipped_existing_rating".to_string(),
+                (None, Some(failure)) => failure.kind.as_str().to_string(),
+                (None, None) => "ok".to_string(),
+            },
+            "error" => frame
+                .failure()
+                .map(|failure| failure.message)
+                .unwrap_or_default(),
+            "stars" => frame
+                .answers()
+                .map(|answers| answers.stars.to_string())
+                .unwrap_or_default(),
+            "conf_stars" => frame
+                .answers()
+                .map(|answers| answers.confidence.to_string())
+                .unwrap_or_default(),
+            "file" => frame.source.relative.to_string_lossy().into_owned(),
+            "latency_ms" => frame
+                .latency_ms()
+                .map(|millis| millis.to_string())
+                .unwrap_or_default(),
+            other => panic!("no such column: {other}"),
         }
     }
 
-    /// One column of the report, row by row.
-    fn column(&self, column: &str) -> Vec<&str> {
-        (0..self.rows.len())
-            .map(|row| self.cell(row, column))
-            .collect()
+    fn column(&self, column: &str) -> Vec<String> {
+        (0..self.len()).map(|row| self.cell(row, column)).collect()
     }
-
-    /// One column of one row, by column name.
-    fn cell(&self, row: usize, column: &str) -> &str {
-        let index = self
-            .header
-            .iter()
-            .position(|name| name == column)
-            .unwrap_or_else(|| panic!("the CSV has a {column} column: {:?}", self.header));
-        &self.rows[row][index]
-    }
-}
-
-/// The text as records of cells: `"` toggles quoting, `""` inside a quoted cell
-/// is one quote, and `\n` ends a record only outside quotes.
-fn records(text: &str) -> Vec<Vec<String>> {
-    let mut records = Vec::new();
-    let mut record = Vec::new();
-    let mut cell = String::new();
-    let mut quoted = false;
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '"' if quoted && characters.peek() == Some(&'"') => {
-                cell.push('"');
-                characters.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => record.push(std::mem::take(&mut cell)),
-            '\n' if !quoted => {
-                record.push(std::mem::take(&mut cell));
-                records.push(std::mem::take(&mut record));
-            }
-            '\r' if !quoted => {}
-            other => cell.push(other),
-        }
-    }
-    records
 }
 
 #[test]
@@ -161,6 +152,7 @@ fn a_timeout_is_retried_and_then_recorded() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -183,7 +175,7 @@ fn a_timeout_is_retried_and_then_recorded() {
         "a timeout costs four attempts, and the next frame is a fresh start"
     );
     assert_eq!(run.scored(), 1, "the run carried on after the timeout");
-    let csv = Csv::read(&csv);
+    let csv = Rows::of(&run);
     assert_eq!(csv.cell(0, "status"), "timeout");
     assert!(
         csv.cell(0, "error").ends_with("4 attempts"),
@@ -210,6 +202,7 @@ fn a_5xx_that_never_clears_is_recorded_after_its_retries() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -217,7 +210,7 @@ fn a_5xx_that_never_clears_is_recorded_after_its_retries() {
 
     assert_eq!(decider.seen().len(), 5);
     assert_eq!(run.scored(), 1);
-    let csv = Csv::read(&csv);
+    let csv = Rows::of(&run);
     assert_eq!(csv.cell(0, "status"), "http_5xx");
     assert!(
         csv.cell(0, "error").contains("503"),
@@ -243,6 +236,7 @@ fn a_4xx_is_recorded_without_being_retried() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -254,7 +248,7 @@ fn a_4xx_is_recorded_without_being_retried() {
         "a 413 is a 4xx: one attempt, then the next frame"
     );
     assert_eq!(run.scored(), 1);
-    let csv = Csv::read(&csv);
+    let csv = Rows::of(&run);
     assert_eq!(csv.cell(0, "status"), "http_413");
     assert!(
         csv.cell(0, "error").contains("--max-edge"),
@@ -280,6 +274,7 @@ fn a_bad_response_is_recorded_and_the_run_continues() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -291,7 +286,7 @@ fn a_bad_response_is_recorded_and_the_run_continues() {
         "an unreadable answer is not a hiccup"
     );
     assert_eq!(run.scored(), 1);
-    assert_eq!(Csv::read(&csv).cell(0, "status"), "bad_response");
+    assert_eq!(Rows::of(&run).cell(0, "status"), "bad_response");
 }
 
 #[test]
@@ -307,6 +302,7 @@ fn a_rejected_rubric_stops_the_run_at_the_first_frame() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -326,8 +322,8 @@ fn a_rejected_rubric_stops_the_run_at_the_first_frame() {
         other => panic!("a rejected rubric aborts the run, got {other:?}"),
     }
     assert_eq!(run.exit_code(), ExitCode::Fatal);
-    let csv = Csv::read(&csv);
-    assert_eq!(csv.rows.len(), 1, "the frame that stopped the run is a row");
+    let csv = Rows::of(&run);
+    assert_eq!(csv.len(), 1, "the frame that stopped the run is a row");
     assert_eq!(csv.cell(0, "status"), "http_400");
 }
 
@@ -344,6 +340,7 @@ fn a_malformed_body_stops_the_run_too() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -351,7 +348,7 @@ fn a_malformed_body_stops_the_run_too() {
 
     assert_eq!(decider.seen().len(), 1, "a client bug is not retried");
     assert_eq!(run.exit_code(), ExitCode::Fatal);
-    assert_eq!(Csv::read(&csv).cell(0, "status"), "http_422");
+    assert_eq!(Rows::of(&run).cell(0, "status"), "http_422");
 }
 
 #[test]
@@ -375,6 +372,7 @@ fn an_unreachable_server_stops_the_run_after_its_retries() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -392,7 +390,7 @@ fn an_unreachable_server_stops_the_run_after_its_retries() {
     );
     assert!(matches!(run.ending, Ending::Aborted { .. }));
     assert_eq!(run.exit_code(), ExitCode::Fatal);
-    let csv = Csv::read(&csv);
+    let csv = Rows::of(&run);
     assert_eq!(csv.cell(0, "status"), "server_unreachable");
     assert!(
         csv.cell(0, "error").ends_with("4 attempts"),
@@ -415,6 +413,7 @@ fn the_exit_code_is_a_function_of_the_run() {
         shoot.path(),
         &config(shoot.path().join("a.csv")),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -430,6 +429,7 @@ fn the_exit_code_is_a_function_of_the_run() {
         shoot.path(),
         &config(shoot.path().join("b.csv")),
         &Scripted::always_reading(2),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -501,12 +501,13 @@ fn every_status_an_answer_can_carry_reaches_the_csv() {
             shoot.path(),
             &config(csv.clone()),
             &Scripted::answering(answers),
+            &imagecull_core::sidecar::Filesystem,
             &Silent,
             &Cancel::new(),
         )
         .expect("a run");
 
-        let csv = Csv::read(&csv);
+        let csv = Rows::of(&run);
         assert_eq!(
             csv.cell(0, "status"),
             kind.as_str(),
@@ -541,40 +542,38 @@ fn every_status_a_file_can_carry_reaches_the_csv() {
     ]);
     let csv = shoot.path().join("scores.csv");
 
-    scoring::run(
+    let run = scoring::run(
         shoot.path(),
         &config(csv.clone()),
         &Scripted::always_reading(1),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
-    let csv = Csv::read(&csv);
-    let mut statuses: Vec<(&str, &str)> = (0..csv.rows.len())
-        .map(|row| (csv.cell(row, "file"), csv.cell(row, "status")))
+    let rows = Rows::of(&run);
+    let mut statuses: Vec<(String, String)> = (0..rows.len())
+        .map(|row| (rows.cell(row, "file"), rows.cell(row, "status")))
         .collect();
     statuses.sort_unstable();
     assert_eq!(
         statuses,
         [
-            ("broken.NEF", "preview_broken"),
-            ("fine.NEF", "ok"),
-            ("garbage.NEF", "unreadable"),
-            ("previewless.NEF", "no_preview"),
+            ("broken.NEF".to_string(), "preview_broken".to_string()),
+            ("fine.NEF".to_string(), "ok".to_string()),
+            ("garbage.NEF".to_string(), "unreadable".to_string()),
+            ("previewless.NEF".to_string(), "no_preview".to_string()),
         ],
         "each file failure lands in the taxonomy, and the good file still scores"
     );
     for (file, status) in statuses {
-        let row = (0..csv.rows.len())
-            .find(|row| csv.cell(*row, "file") == file)
+        let row = (0..rows.len())
+            .find(|row| rows.cell(*row, "file") == file)
             .expect("the file has a row");
         if status != "ok" {
-            assert!(
-                csv.cell(row, "error").len() > 10 && csv.cell(row, "error").len() < 200,
-                "{file}: {}",
-                csv.cell(row, "error")
-            );
+            let error = rows.cell(row, "error");
+            assert!(error.len() > 10 && error.len() < 200, "{file}: {error}");
         }
     }
 }
@@ -591,6 +590,7 @@ fn a_preflight_failure_stops_the_run_before_the_first_frame() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
@@ -623,6 +623,7 @@ fn a_run_cancelled_between_files_keeps_the_rows_it_judged() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &cancel,
     )
@@ -636,13 +637,13 @@ fn a_run_cancelled_between_files_keeps_the_rows_it_judged() {
     assert_eq!(run.frames.len(), 2);
     assert_eq!(run.ending, Ending::Interrupted);
     assert_eq!(run.exit_code(), ExitCode::Interrupted);
-    let csv = Csv::read(&csv);
+    let csv = Rows::of(&run);
     assert_eq!(
-        csv.rows.len(),
+        csv.len(),
         2,
         "the rows judged before the cancel are on disk"
     );
-    assert_eq!(csv.column("status"), ["ok", "ok"]);
+    assert_eq!(statuses(&csv), ["ok", "ok"]);
 }
 
 #[test]
@@ -657,6 +658,7 @@ fn a_run_cancelled_before_it_starts_writes_an_empty_report() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &cancel,
     )
@@ -665,9 +667,11 @@ fn a_run_cancelled_before_it_starts_writes_an_empty_report() {
     assert!(decider.seen().is_empty());
     assert!(run.frames.is_empty());
     assert_eq!(run.exit_code(), ExitCode::Interrupted);
-    let csv = Csv::read(&csv);
-    assert!(csv.rows.is_empty(), "the header alone is still a report");
-    assert_eq!(csv.header.len(), 10);
+    let rows = Rows::of(&run);
+    assert!(
+        rows.len() == 0,
+        "no frame was reached, so no frame is claimed"
+    );
 }
 
 #[test]
@@ -689,46 +693,62 @@ fn a_synthetic_400_file_shoot_gets_a_status_on_every_row() {
         shoot.path(),
         &config(csv.clone()),
         &decider,
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
     assert_eq!(run.frames.len(), 400);
-    let csv = Csv::read(&csv);
-    assert_eq!(csv.rows.len(), 400, "one row per file, none missing");
+    let rows = Rows::of(&run);
+    assert_eq!(rows.len(), 400, "one row per file, none missing");
     let vocabulary: Vec<&str> = ErrorKind::ALL.iter().map(|kind| kind.as_str()).collect();
-    for row in 0..csv.rows.len() {
-        let status = csv.cell(row, "status");
+    for row in 0..rows.len() {
+        let status = rows.cell(row, "status");
         assert!(
-            status == "ok" || vocabulary.contains(&status),
+            status == "ok" || vocabulary.contains(&status.as_str()),
             "row {row} has no status the taxonomy names: {status:?}"
         );
     }
-    assert!(csv.column("status").contains(&"bad_response"));
+    assert!(
+        rows.column("status")
+            .iter()
+            .any(|status| status == "bad_response")
+    );
 }
 
 #[test]
-fn a_run_writes_nothing_into_the_shoot_folder() {
+fn a_run_touches_the_sidecars_it_writes_and_never_the_raws() {
     let shoot = shoot(3);
-    let before = mtimes(shoot.path());
-    let report = tempfile::tempdir().expect("a temp dir");
+    let raws = mtimes(shoot.path());
 
     scoring::run(
         shoot.path(),
-        &config(report.path().join("scores.csv")),
+        &config(shoot.path().join("scores.csv")),
         &Scripted::always_reading(3),
+        &imagecull_core::sidecar::Filesystem,
         &Silent,
         &Cancel::new(),
     )
     .expect("a run");
 
-    assert_eq!(
-        mtimes(shoot.path()),
-        before,
-        "spec §43 allows the CSV in the shoot folder only because the photographer asked for it: \
-         a run that is not asked to write there touches nothing"
-    );
+    let after = mtimes(shoot.path());
+    for (path, before) in &raws {
+        assert_eq!(
+            after.get(path),
+            Some(before),
+            "{} is the negative: a cull never modifies it",
+            path.display()
+        );
+    }
+    let written: Vec<&PathBuf> = after
+        .keys()
+        .filter(|path| !raws.contains_key(*path))
+        .collect();
+    assert_eq!(written.len(), 3, "one sidecar per frame and nothing else");
+    for path in written {
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("xmp"));
+    }
 }
 
 /// A preview whose header parses — so it is counted as a preview, with a size —

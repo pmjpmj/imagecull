@@ -13,7 +13,7 @@ use imagecull_core::ingest::{ScanCounts, SourceFile};
 use imagecull_core::progress::{MeanMedian, Summary};
 use imagecull_core::reading::{Answers, Reading};
 use imagecull_core::rubric::Builtin;
-use imagecull_core::scoring::{Ending, Frame, Run, Usage};
+use imagecull_core::scoring::{Ending, Frame, Outcome, Persisted, Run, Usage};
 
 fn source(name: &str) -> SourceFile {
     SourceFile {
@@ -33,21 +33,23 @@ fn answers(stars: u8) -> Answers {
 fn scored(name: &str, stars: u8) -> Frame {
     Frame {
         source: source(name),
-        outcome: Ok(Reading {
+        outcome: Outcome::Asked(Ok(Reading {
             answers: Ok(answers(stars)),
             usage: Usage::measured(812),
             document: serde_json::Value::Null,
-        }),
+        })),
+        persisted: Persisted::Written,
     }
 }
 
 fn failed(name: &str, kind: ErrorKind) -> Frame {
     Frame {
         source: source(name),
-        outcome: Err(imagecull_core::Error::new(
+        outcome: Outcome::Asked(Err(imagecull_core::Error::new(
             kind,
             format!("{name} did not answer"),
-        )),
+        ))),
+        persisted: Persisted::NotAttempted,
     }
 }
 
@@ -62,7 +64,6 @@ fn run(frames: Vec<Frame>) -> Run {
         counts: ScanCounts::default(),
         total: frames.len(),
         frames,
-        resumed: 0,
         duplicates: 0,
         elapsed: Duration::from_millis(1),
         ending: Ending::Completed,
@@ -181,10 +182,9 @@ fn a_run_with_no_answers_has_no_statistics_but_still_has_counts() {
 }
 
 #[test]
-fn the_summary_carries_the_time_it_took_and_the_frames_it_reused() {
+fn the_summary_carries_the_time_it_took_and_the_frames_it_left_alone() {
     let mut run = run(vec![scored("DSC_0001.NEF", 3)]);
     run.total = 400;
-    run.resumed = 3;
     run.duplicates = 2;
     run.elapsed = Duration::from_secs(8 * 60 + 12);
     run.counts = ScanCounts {
@@ -196,7 +196,7 @@ fn the_summary_carries_the_time_it_took_and_the_frames_it_reused() {
     let summary = run.summary();
 
     assert_eq!(summary.elapsed, Duration::from_secs(492));
-    assert_eq!(summary.resumed, 3);
+    assert_eq!(summary.skipped, 0, "nothing had a rating already");
     assert_eq!(summary.duplicates, 2);
     assert_eq!(summary.total, 400, "the folder, not the frames it got to");
     assert_eq!(summary.left_out, run.counts, "what the scan skipped");

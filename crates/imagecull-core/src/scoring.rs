@@ -11,6 +11,7 @@
 //! Requests are strictly sequential. oMLX serialises decision requests anyway,
 //! so concurrency would only manufacture timeouts (spec §7.1).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -18,19 +19,16 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{ExitCode, Result};
+use crate::error::{Error, ErrorKind, ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
-use crate::ledger::{
-    self, FileIdentity, Header, Ledger, LedgerMode, Provenance, Record, ResumeKey,
-};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::progress::{
-    Event, Finished, FrameEvent, Judgement, PreviewShape, Reporter, Started, Summary, Warning,
+    Event, Finished, FrameEvent, Judgement, PreviewShape, Reporter, Started, Summary,
 };
 use crate::reading::{self, Answers, Reading};
-use crate::report::{self, Failure, Outputs, Row};
 use crate::rubric::{Builtin, Rubric, RubricHash, hex};
+use crate::sidecar::{self, Failure, Outputs, Properties, Row};
 
 /// The task framing every request's state carries (spec §7.1).
 pub const TASK: &str = "photo_cull";
@@ -201,7 +199,7 @@ impl RetryPolicy {
 }
 
 /// An effective scoring run: which rubric, which alias, how to look at the
-/// folder, how to prepare each frame, and where the report goes.
+/// folder, how to prepare each frame, and what to do with a sidecar.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The questions.
@@ -217,20 +215,23 @@ pub struct Config {
     /// How hard to retry a transient failure. The spec's schedule by default;
     /// tests replace it so an attempt count costs no wall time.
     pub retry: RetryPolicy,
-    /// Where the CSV and the raw answers are written.
+    /// Where the raw answers are written, when they are.
     pub outputs: Outputs,
-    /// What to do with a ledger that is already beside the CSV (spec §9.2).
-    pub ledger: LedgerMode,
+    /// Whether a frame whose sidecar already carries a rating is rated again
+    /// (`--force`).
+    pub force: bool,
+    /// Whether a sidecar another application owns may be written into
+    /// (`--allow-foreign`).
+    pub allow_foreign: bool,
     /// Whether an identical preview may reuse an earlier frame's outcome
-    /// (spec §9.2); `--no-dedupe` turns it off.
+    /// (`--no-dedupe` turns it off).
     pub dedupe: bool,
-    /// The server this run talks to, recorded in the ledger's header for
-    /// provenance. `None` when the decider has no endpoint of its own, as every
-    /// test's fake has.
+    /// The server this run talks to, recorded for provenance. `None` when the
+    /// decider has no endpoint of its own, as every test's fake has.
     pub endpoint: Option<String>,
     /// The config file this run's values came from, when one did. Provenance for
-    /// the summary, the way `endpoint` is provenance for the ledger's header;
-    /// `None` when the flags and the built-in defaults were the whole story.
+    /// the summary; `None` when the flags and the built-in defaults were the
+    /// whole story.
     pub source: Option<PathBuf>,
 }
 
@@ -257,7 +258,8 @@ impl Config {
             shoot_context,
             retry: RetryPolicy::default(),
             outputs,
-            ledger: LedgerMode::default(),
+            force: false,
+            allow_foreign: false,
             dedupe: true,
             endpoint: None,
             source: None,
@@ -284,11 +286,8 @@ pub struct Run {
     /// How many files the scan accepted. [`Run::frames`] holds the ones the run
     /// got to, which is fewer when it stopped or was interrupted early.
     pub total: usize,
-    /// One entry per file the run got to, in ingest order. A run that stopped
-    /// early has one entry for the frame that stopped it and nothing after.
+    /// One entry per file the run got to, in ingest order.
     pub frames: Vec<Frame>,
-    /// How many frames the resumed ledger already held: judged, never re-asked.
-    pub resumed: usize,
     /// How many frames reused an identical preview's outcome instead of costing
     /// a request.
     pub duplicates: usize,
@@ -296,13 +295,12 @@ pub struct Run {
     pub elapsed: Duration,
     /// How the run ended, which is also what it exits as.
     pub ending: Ending,
-    /// The config file the run's values came from, when one did: the summary
-    /// prints it beside the rubric hash so the numbers are attributable.
+    /// The config file the run's values came from, when one did.
     pub source: Option<PathBuf>,
 }
 
 impl Run {
-    /// How many frames produced a readable answer.
+    /// How many frames this run produced a rating for.
     pub fn scored(&self) -> usize {
         self.frames
             .iter()
@@ -310,9 +308,20 @@ impl Run {
             .count()
     }
 
-    /// How many frames did not, for any reason.
+    /// How many frames carried a rating already and were left alone.
+    pub fn kept(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|frame| frame.kept().is_some())
+            .count()
+    }
+
+    /// How many frames did not produce a rating this run could stand behind.
     pub fn failed(&self) -> usize {
-        self.frames.len() - self.scored()
+        self.frames
+            .iter()
+            .filter(|frame| frame.failure().is_some())
+            .count()
     }
 
     /// The run as a summary: the numbers a photographer judges it by, which is
@@ -325,7 +334,7 @@ impl Run {
     ///
     /// A pure function of the run: an interruption outranks a failed row
     /// (the run did not finish, it was stopped), and a run that stopped at a
-    /// frame is fatal however many rows it had already written.
+    /// frame is fatal however many ratings it had already written.
     pub fn exit_code(&self) -> ExitCode {
         match &self.ending {
             Ending::Interrupted => ExitCode::Interrupted,
@@ -358,37 +367,88 @@ pub enum Ending {
 pub struct Frame {
     /// The file it happened to.
     pub source: SourceFile,
-    /// The reading, or the classified reason there is none. A document that
-    /// arrived but could not be read is an `Ok` reading whose `answers` are an
-    /// error, so the raw document survives for `--json-scores`.
-    pub outcome: Result<Reading>,
+    /// The answer, or the rating the sidecar already carried.
+    pub outcome: Outcome,
+    /// What became of the sidecar, when the run got that far.
+    pub persisted: Persisted,
+}
+
+/// The two ways a frame leaves the model: asked, or left alone.
+#[derive(Debug)]
+pub enum Outcome {
+    /// The run asked, and this is what came back — including a document that
+    /// arrived but could not be read, whose failure is classified here and whose
+    /// document survives for `--json-scores`.
+    Asked(Result<Reading>),
+    /// The frame's sidecar already carried a rating, so the run spent nothing on
+    /// it and left it exactly as it found it.
+    Kept {
+        /// The rating that was already there.
+        rating: u8,
+    },
+}
+
+/// What became of a frame's sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Persisted {
+    /// Nothing was written: the frame had no answer, or it was kept.
+    NotAttempted,
+    /// The sidecar now holds this run's rating.
+    Written,
+    /// The write failed, which makes the frame a failure: the rating's only home
+    /// is the document beside the frame.
+    Failed(Failure),
 }
 
 impl Frame {
-    /// The answer, or the failure the row's `status` and `error` carry.
-    ///
-    /// One of the two always applies: a document that arrived but could not be
-    /// read is a [`Failure`] too, exactly as the CSV records it. This is the
-    /// only place that decision is made, so a frame line, a summary and a
-    /// row cannot disagree about what happened to a frame.
-    pub fn answers_or_failure(&self) -> std::result::Result<&Answers, Failure> {
+    /// The model's reading, when this frame reached the model and came back.
+    pub fn reading(&self) -> Option<&Reading> {
         match &self.outcome {
-            Ok(reading) => reading.answers.as_ref().map_err(Failure::of),
-            Err(error) => Err(Failure::of(error)),
+            Outcome::Asked(Ok(reading)) => Some(reading),
+            _ => None,
         }
     }
 
-    /// The answer, when this frame has it.
+    /// The answer, when this frame has one that was persisted or is about to be.
     pub fn answers(&self) -> Option<&Answers> {
-        self.answers_or_failure().ok()
+        match (&self.outcome, &self.persisted) {
+            // A rating whose sidecar could not be written is nowhere: the run
+            // scored nothing it can stand behind, so it does not claim to have.
+            (Outcome::Asked(_), Persisted::Failed(_)) => None,
+            (Outcome::Asked(Ok(reading)), _) => reading.answers.as_ref().ok(),
+            (Outcome::Kept { .. }, _) | (Outcome::Asked(Err(_)), _) => None,
+        }
+    }
+
+    /// The rating that was already in the sidecar, when the run left it alone.
+    pub fn kept(&self) -> Option<u8> {
+        match self.outcome {
+            Outcome::Kept { rating } => Some(rating),
+            Outcome::Asked(_) => None,
+        }
+    }
+
+    /// The failure a row's status carries, when the frame failed.
+    ///
+    /// A sidecar that could not be written outranks a model that did not answer:
+    /// the frame's rating is nowhere, which is the fact worth reporting.
+    pub fn failure(&self) -> Option<Failure> {
+        if let Persisted::Failed(failure) = &self.persisted {
+            return Some(failure.clone());
+        }
+        match &self.outcome {
+            Outcome::Kept { .. } => None,
+            Outcome::Asked(Err(error)) => Some(Failure::of(error)),
+            Outcome::Asked(Ok(reading)) => reading.answers.as_ref().err().map(Failure::of),
+        }
     }
 
     /// What the request that produced this outcome cost, when one was recorded.
     pub fn latency_ms(&self) -> Option<u64> {
-        self.outcome
-            .as_ref()
-            .ok()
-            .map(|reading| reading.usage.latency_ms())
+        match &self.outcome {
+            Outcome::Asked(Ok(reading)) => Some(reading.usage.latency_ms()),
+            _ => None,
+        }
     }
 }
 
@@ -417,6 +477,7 @@ pub fn run(
     shoot: &Path,
     config: &Config,
     decider: &dyn Decider,
+    sidecars: &dyn sidecar::Writer,
     reporter: &dyn Reporter,
     cancel: &Cancel,
 ) -> Result<Run> {
@@ -431,79 +492,99 @@ pub fn run(
         rubric_hash: rubric_hash.clone(),
         model: config.model.clone(),
     }));
-    // Before the first frame, and before any report or ledger is written: a
-    // server that cannot answer must cost seconds, not a shoot.
+    // Before the first frame: a server that cannot answer must cost seconds,
+    // not a shoot.
     decider.preflight()?;
-    let header = Header::new(&rubric_hash, &config.model, config.endpoint.as_deref());
-    let mut ledger = Ledger::open(&config.outputs.csv, header, config.ledger)?;
-    if ledger.truncated_bytes() > 0 {
-        reporter.event(Event::Warning(Warning {
-            message: format!(
-                "{} ends mid-record, so the run it belonged to was killed: {} bytes of a \
-                 half-written record were discarded and those frames are scored again",
-                ledger::path_for(&config.outputs.csv).display(),
-                ledger.truncated_bytes(),
-            ),
-        }));
-    }
-    if ledger.discarded_frames() > 0 {
-        reporter.event(Event::Warning(Warning {
-            message: format!(
-                "{} held {}, and a plain score starts the ledger over: they are scored \
-                 again — pass --resume to keep them",
-                ledger::path_for(&config.outputs.csv).display(),
-                recorded_frames(ledger.discarded_frames()),
-            ),
-        }));
-    }
     let total = scan.files.len();
-    // The report is the run's from here on: truncate it once, beside the ledger
-    // it renders, and never again. A killed run leaves the rows it judged; a
-    // resumed one rebuilds the whole file from the records it walks through.
-    let mut report = report::Writer::open(&config.outputs.csv, config.outputs.absolute)?;
-    // The run's account of itself as it goes: the events a reporter hears, the
-    // rows the report and the raw documents are written from, and the frames the
-    // summary adds up.
     let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
+    // Dedupe's memory: one run's answers, keyed by the question that produced
+    // them. It dies with the process, which is where bursts live anyway.
+    let mut reused: HashMap<String, Reused> = HashMap::new();
     let mut ending = Ending::Completed;
     for (position, source) in scan.files.iter().enumerate() {
         if cancel.is_cancelled() {
             ending = Ending::Interrupted;
             break;
         }
-        let identity = FileIdentity::of(&source.path).ok();
-        let recorded = identity
-            .map(|identity| ResumeKey::new(display_name(source), identity))
-            .and_then(|key| ledger.recorded(&key));
-        if let Some(record) = recorded {
-            // Resumed frames are reported and written like any other: the frame
-            // line counts them, the CSV carries their row and the summary counts
-            // them, so an interrupted run picks up where it stopped and says so.
-            account.resumed(position + 1, source, record, &mut report)?;
+        let path = sidecar::path_for(&source.path);
+        let existing = match read_sidecar(&path) {
+            Ok(existing) => existing,
+            Err(error) => {
+                // A sidecar nobody can read is a frame this run cannot write, and
+                // no reason to spend a request on it.
+                let judged = Judged::refused(source, error);
+                account.judged(position + 1, judged);
+                continue;
+            }
+        };
+        // The frame already carries a rating a photographer would recognise: the
+        // run leaves it, and its money, alone.
+        if let Some(rating) = existing.as_deref().and_then(sidecar::existing_rating)
+            && !config.force
+        {
+            account.kept(position + 1, source, rating);
             continue;
         }
-        let judged = judge(source, config, decider, &rubric_hash, identity, &ledger);
-        // The frame's row is written first either way, so a run that stops says
-        // which frame stopped it and why.
-        let stops_run = judged
-            .frame
-            .outcome
-            .as_ref()
-            .err()
-            .filter(|error| error.recovery().aborts_run())
-            .map(ToString::to_string);
-        account.judged(position + 1, judged, &mut ledger, &mut report)?;
+        // A sidecar nothing can be written into is a frame this run cannot
+        // record, and asking the model anyway would buy an answer with nowhere to
+        // go.
+        if existing
+            .as_deref()
+            .is_some_and(|document| !sidecar::can_extend(document))
+        {
+            let error = Error::new(
+                ErrorKind::XmpUnreadable,
+                format!(
+                    "{} has no rdf:Description this tool can write into, so it was left alone",
+                    path.display()
+                ),
+            );
+            let judged = Judged::refused(source, error);
+            account.judged(position + 1, judged);
+            continue;
+        }
+        // A sidecar another application owns is not ours to write into, whatever
+        // the rating: darktable has its own copy of this frame's story.
+        if existing.as_deref().is_some_and(sidecar::is_foreign) && !config.allow_foreign {
+            let error = Error::new(
+                ErrorKind::XmpForeign,
+                format!(
+                    "{} belongs to another application, so it was left alone; pass \
+                     --allow-foreign to write into it",
+                    path.display()
+                ),
+            );
+            let judged = Judged::refused(source, error);
+            let stops_run = judged.stops_run();
+            account.judged(position + 1, judged);
+            if let Some(reason) = stops_run {
+                ending = Ending::Aborted { reason };
+                break;
+            }
+            continue;
+        }
+
+        let mut judged = judge(source, config, decider, &rubric_hash, &mut reused);
+        // The sidecar is written before the frame line is reported, so the
+        // terminal never claims a rating that is not yet on disk.
+        persist(
+            &mut judged.frame,
+            existing.as_deref(),
+            &path,
+            config,
+            &rubric_hash,
+            sidecars,
+        );
+        let stops_run = judged.stops_run();
+        account.judged(position + 1, judged);
         if let Some(reason) = stops_run {
             ending = Ending::Aborted { reason };
             break;
         }
     }
-    report::write_json(&account.rows, &config.outputs)?;
+    sidecar::write_json(&account.rows, &config.outputs)?;
     let Account {
-        frames,
-        resumed,
-        duplicates,
-        ..
+        frames, duplicates, ..
     } = account;
     let run = Run {
         builtin: config.rubric.builtin(),
@@ -512,37 +593,67 @@ pub fn run(
         counts: scan.counts,
         total,
         frames,
-        resumed,
         duplicates,
         elapsed: began.elapsed(),
         ending,
         source: config.source.clone(),
     };
-    // The last thing a reporter hears: the run's own account of itself, which a
-    // front end renders as the summary and a script reads for the outcome.
+    // The last thing a reporter hears: the run's own account of itself.
     reporter.event(Event::Finished(Finished {
         summary: run.summary(),
     }));
     Ok(run)
 }
 
-/// `count` recorded frames, for a warning that has to read like a sentence.
-fn recorded_frames(count: usize) -> String {
-    if count == 1 {
-        "1 recorded frame".to_string()
-    } else {
-        format!("{count} recorded frames")
+/// The sidecar as it is before this run touches it: `None` when there is none, a
+/// classified refusal when there is one this run cannot read.
+fn read_sidecar(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::new(
+            ErrorKind::XmpUnreadable,
+            format!("cannot read {}: {error}", path.display()),
+        )),
     }
 }
 
-/// The run's account of itself while it runs: what the reporter hears, the rows
-/// the report and the raw documents are written from, and the frames the summary
-/// adds up.
+/// Write this frame's rating into its sidecar, and record how that went.
 ///
-/// A resumed frame and a freshly judged one reach it through two doors and are
-/// recorded identically from there, so a resumed row and a fresh one cannot
-/// drift apart — which is what makes an interrupted-and-resumed run write the
-/// same CSV as an uninterrupted one.
+/// A frame with no answer is not touched at all: "no answer" must never reach
+/// the disk as a rating of zero or an empty file.
+fn persist(
+    frame: &mut Frame,
+    existing: Option<&str>,
+    path: &Path,
+    config: &Config,
+    rubric_hash: &RubricHash,
+    writer: &dyn sidecar::Writer,
+) {
+    let Some(answers) = frame.answers().cloned() else {
+        return;
+    };
+    let properties = Properties::now(
+        answers.stars,
+        answers.confidence,
+        &config.model,
+        rubric_hash.short(),
+    );
+    let document = match sidecar::render(existing, &properties) {
+        Ok(document) => document,
+        Err(error) => {
+            frame.persisted = Persisted::Failed(Failure::of(&error));
+            return;
+        }
+    };
+    frame.persisted = match writer.write(path, &document, existing) {
+        Ok(_) => Persisted::Written,
+        Err(error) => Persisted::Failed(Failure::of(&error)),
+    };
+}
+
+/// The run's account of itself while it runs: what the reporter hears, the rows
+/// `--json-scores` is written from, and the frames the summary adds up.
 struct Account<'a> {
     reporter: &'a dyn Reporter,
     rubric_hash: &'a RubricHash,
@@ -551,7 +662,6 @@ struct Account<'a> {
     began: Instant,
     frames: Vec<Frame>,
     rows: Vec<Row>,
-    resumed: usize,
     duplicates: usize,
 }
 
@@ -571,67 +681,67 @@ impl<'a> Account<'a> {
             began,
             frames: Vec::with_capacity(total),
             rows: Vec::with_capacity(total),
-            resumed: 0,
             duplicates: 0,
         }
     }
 
-    /// A frame the ledger already held: reported, written and counted like any
-    /// other, but never asked again.
-    fn resumed(
-        &mut self,
-        index: usize,
-        source: &SourceFile,
-        record: &Record,
-        report: &mut report::Writer,
-    ) -> Result<()> {
-        let row = self.record(index, record.frame(source.clone()), record, None);
-        self.resumed += 1;
-        report.append(&row)
+    /// A frame whose sidecar already carried a rating: reported and counted, and
+    /// otherwise untouched.
+    fn kept(&mut self, index: usize, source: &SourceFile, rating: u8) {
+        let frame = Frame {
+            source: source.clone(),
+            outcome: Outcome::Kept { rating },
+            persisted: Persisted::NotAttempted,
+        };
+        self.record(index, frame, None, None);
     }
 
-    /// A frame this run prepared and judged: recorded in the ledger it will be
-    /// resumed from, reported, and appended to the report as the row it will be
-    /// read as — the durable record first, its rendering second.
-    fn judged(
-        &mut self,
-        index: usize,
-        judged: Judged,
-        ledger: &mut Ledger,
-        report: &mut report::Writer,
-    ) -> Result<()> {
-        if judged.record.duplicate_of.is_some() {
+    /// A frame this run judged, and what became of its sidecar.
+    fn judged(&mut self, index: usize, judged: Judged) {
+        if judged.duplicate_of.is_some() {
             self.duplicates += 1;
         }
-        let row = self.record(index, judged.frame, &judged.record, judged.preview);
-        ledger.append(judged.record)?;
-        report.append(&row)
+        let Judged {
+            frame,
+            preview,
+            duplicate_of,
+        } = judged;
+        self.record(index, frame, preview, duplicate_of);
     }
 
-    /// One frame's account: the event a reporter hears, the row the report
-    /// appends, and the frame the summary adds up. The row is handed back rather
-    /// than only kept, because the caller decides when it reaches the file.
+    /// One frame's account: the event a reporter hears, the row the raw answers
+    /// are written from, and the frame the summary adds up.
     fn record(
         &mut self,
         index: usize,
         frame: Frame,
-        record: &Record,
         preview: Option<PreviewShape>,
-    ) -> Row {
+        duplicate_of: Option<String>,
+    ) {
         self.reporter.event(Event::Frame(frame_event(
             index,
             self.total,
             &frame,
             preview,
-            record.duplicate_of.as_deref(),
+            duplicate_of.as_deref(),
             self.began.elapsed(),
         )));
-        let row = record.row(frame.source.clone(), self.rubric_hash, self.model);
-        // Kept for `--json-scores`, which is written once at exit and needs every
-        // document; the report does not read this back.
-        self.rows.push(row.clone());
+        let reading = match &frame.outcome {
+            Outcome::Asked(Ok(reading)) => Some(reading),
+            _ => None,
+        };
+        let row = Row {
+            source: frame.source.clone(),
+            answers: frame.answers().cloned(),
+            usage: reading.map(|reading| reading.usage),
+            document: reading.map(|reading| reading.document.clone()),
+            failure: frame.failure(),
+            duplicate_of,
+            rubric_hash: self.rubric_hash.short().to_string(),
+            model: self.model.to_string(),
+        };
+        self.rows.push(row);
         self.frames.push(frame);
-        row
     }
 }
 
@@ -671,24 +781,67 @@ fn estimate_remaining(done: usize, total: usize, elapsed: Duration) -> Option<Du
     Some(Duration::from_secs_f64(pace * remaining as f64))
 }
 
-/// A frame's outcome as the front end sees it: the answers, or the failure the
-/// row's `status` and `error` columns will carry.
+/// A frame's outcome as the front end sees it.
 fn judgement(frame: &Frame) -> Judgement {
-    match frame.answers_or_failure() {
-        Ok(answers) => Judgement::Answered(answers.clone()),
-        Err(failure) => Judgement::Failed(failure),
+    if let Some(rating) = frame.kept() {
+        return Judgement::Skipped { rating };
+    }
+    match frame.failure() {
+        Some(failure) => Judgement::Failed(failure),
+        None => match frame.answers() {
+            Some(answers) => Judgement::Answered(answers.clone()),
+            // Unreachable: a frame with neither answer, rating nor failure
+            // cannot be built. Reporting it as a failure beats panicking in a run.
+            None => Judgement::Failed(Failure {
+                kind: ErrorKind::BadResponse,
+                message: "the frame has no answer and no reason".to_string(),
+            }),
+        },
     }
 }
 
-/// One frame, judged: the run's frame, the ledger's record of it, and the shape
-/// of the bytes that were sent.
+/// One frame, judged: the run's frame, the shape of the bytes that were sent, and
+/// the earlier frame whose answer this one reused.
 struct Judged {
     frame: Frame,
-    record: Record,
     preview: Option<PreviewShape>,
+    duplicate_of: Option<String>,
 }
 
-/// One file, all the way to a record: prepare, reuse or ask, read.
+impl Judged {
+    /// A frame the run refused before asking: an unreadable sidecar, a sidecar
+    /// another application owns.
+    fn refused(source: &SourceFile, error: Error) -> Judged {
+        Judged {
+            frame: Frame {
+                source: source.clone(),
+                outcome: Outcome::Asked(Err(error)),
+                persisted: Persisted::NotAttempted,
+            },
+            preview: None,
+            duplicate_of: None,
+        }
+    }
+
+    /// The failure that stops the run, when this frame has one that will fail
+    /// identically for every frame after it.
+    fn stops_run(&self) -> Option<String> {
+        self.frame
+            .failure()
+            .filter(|failure| failure.kind.recovery().aborts_run())
+            .map(|failure| failure.message)
+    }
+}
+
+/// An answer one run already paid for, and the frame it paid for it on.
+struct Reused {
+    file: String,
+    answers: Answers,
+    usage: Usage,
+    document: serde_json::Value,
+}
+
+/// One file, all the way to a frame: prepare, reuse or ask, read.
 ///
 /// This is the only place a frame becomes a request, which is what makes the
 /// exact bytes, dimensions and questions handed to [`Decider`] assertable, and
@@ -699,21 +852,19 @@ fn judge(
     config: &Config,
     decider: &dyn Decider,
     rubric_hash: &RubricHash,
-    identity: Option<FileIdentity>,
-    ledger: &Ledger,
+    reused: &mut HashMap<String, Reused>,
 ) -> Judged {
     let encoded = match prepare(source, &config.params) {
         Ok(encoded) => encoded,
         Err(error) => {
-            let frame = Frame {
-                source: source.clone(),
-                outcome: Err(error),
-            };
-            let record = Record::of(&frame, identity, Provenance::default());
             return Judged {
-                frame,
-                record,
+                frame: Frame {
+                    source: source.clone(),
+                    outcome: Outcome::Asked(Err(error)),
+                    persisted: Persisted::NotAttempted,
+                },
                 preview: None,
+                duplicate_of: None,
             };
         }
     };
@@ -728,27 +879,26 @@ fn judge(
     let dedupe_key = config
         .dedupe
         .then(|| dedupe_key(&preview_sha256, &state, rubric_hash, &config.model));
-    // A frame is never a duplicate of itself: a file whose mtime changed is
-    // scored again even when the bytes it renders to did not (spec §32).
+    // A frame is never a duplicate of itself: a file whose bytes changed is
+    // scored again even when it renders to the same preview.
     if let Some(reused) = dedupe_key
         .as_deref()
-        .and_then(|key| ledger.reusable(key))
-        .filter(|reused| reused.file != name)
+        .and_then(|key| reused.get(key))
+        .filter(|earlier| earlier.file != name)
     {
-        let frame = reused.frame(source.clone());
-        let record = Record::of(
-            &frame,
-            identity,
-            Provenance {
-                preview_sha256: Some(&preview_sha256),
-                dedupe_key: dedupe_key.as_deref(),
-                duplicate_of: Some(&reused.file),
-            },
-        );
+        let frame = Frame {
+            source: source.clone(),
+            outcome: Outcome::Asked(Ok(Reading {
+                answers: Ok(reused.answers.clone()),
+                usage: reused.usage,
+                document: reused.document.clone(),
+            })),
+            persisted: Persisted::NotAttempted,
+        };
         return Judged {
             frame,
-            record,
             preview: Some(preview),
+            duplicate_of: Some(reused.file.clone()),
         };
     }
     let request = Request {
@@ -759,23 +909,30 @@ fn judge(
     };
     let outcome = decide(decider, &request, &config.retry)
         .map(|response| reading::read(&config.rubric, response));
-    let frame = Frame {
-        source: source.clone(),
-        outcome,
-    };
-    let record = Record::of(
-        &frame,
-        identity,
-        Provenance {
-            preview_sha256: Some(&preview_sha256),
-            dedupe_key: dedupe_key.as_deref(),
-            ..Provenance::default()
-        },
-    );
+    // Only an answer is worth reusing: a timeout is not an answer, so a burst
+    // partner gets its own attempt.
+    if let Some(key) = dedupe_key
+        && let Ok(reading) = &outcome
+        && let Ok(answers) = &reading.answers
+    {
+        reused.insert(
+            key,
+            Reused {
+                file: name,
+                answers: answers.clone(),
+                usage: reading.usage,
+                document: reading.document.clone(),
+            },
+        );
+    }
     Judged {
-        frame,
-        record,
+        frame: Frame {
+            source: source.clone(),
+            outcome: Outcome::Asked(outcome),
+            persisted: Persisted::NotAttempted,
+        },
         preview: Some(preview),
+        duplicate_of: None,
     }
 }
 

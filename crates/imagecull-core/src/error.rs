@@ -45,11 +45,14 @@ pub enum ErrorKind {
     /// The frame's sidecar could not be written: a read-only mount, a full
     /// disk, a file that is not ours to replace.
     XmpWriteFailed,
+    /// The frame's sidecar belongs to another application, which will rewrite it
+    /// from its own history: the run refused to write into it.
+    XmpForeign,
 }
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 12] = [
+    pub const ALL: [ErrorKind; 13] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
@@ -62,6 +65,7 @@ impl ErrorKind {
         ErrorKind::BadResponse,
         ErrorKind::XmpUnreadable,
         ErrorKind::XmpWriteFailed,
+        ErrorKind::XmpForeign,
     ];
 
     /// The `status` string for this kind (never `"ok"`: that is the absence of
@@ -80,6 +84,7 @@ impl ErrorKind {
             ErrorKind::BadResponse => "bad_response",
             ErrorKind::XmpUnreadable => "xmp_unreadable",
             ErrorKind::XmpWriteFailed => "xmp_write_failed",
+            ErrorKind::XmpForeign => "xmp_foreign",
         }
     }
 
@@ -118,6 +123,9 @@ impl ErrorKind {
             // Every remaining frame would fail the same way, and each attempt
             // has already been paid for: stop, do not collect 400 failures.
             ErrorKind::XmpWriteFailed => Recovery::AbortRun,
+            // One darktable sidecar is not a trend: the photographer may well
+            // want the rest of the folder rated.
+            ErrorKind::XmpForeign => Recovery::Continue,
             ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
             ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
@@ -324,6 +332,7 @@ mod tests {
                 // like any other.
                 "xmp_unreadable",
                 "xmp_write_failed",
+                "xmp_foreign",
             ]
         );
         assert!(!strings.contains(&"ok"));

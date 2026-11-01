@@ -50,10 +50,8 @@ pub fn run(args: &ScoreArgs) -> u8 {
         effective.shoot_context.clone(),
         effective.outputs.clone(),
     );
-    // What the run does with the ledger beside its CSV, whether an identical
-    // preview may reuse an outcome, which server to record in the header, and
-    // which config file these values came from.
-    config.ledger = args.ledger_mode();
+    // Whether an identical preview may reuse an outcome, which server to record,
+    // and which config file these values came from.
     config.dedupe = effective.dedupe;
     config.endpoint = Some(effective.endpoint.clone());
     config.source = effective.source.clone();
@@ -75,6 +73,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
         &args.dir,
         &config,
         &Adapter::new(client, &config.model),
+        &imagecull_core::sidecar::Filesystem,
         &reporter,
         &cancel,
     ) {

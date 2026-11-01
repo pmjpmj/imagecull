@@ -11,7 +11,16 @@
 //! enough scanning to find the first `rdf:Description` opening tag, the
 //! attributes in it, and where its attributes end.
 
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{Map, Value};
+
 use crate::error::{Error, ErrorKind, Result};
+use crate::ingest::SourceFile;
+use crate::reading::Answers;
+use crate::scoring::Usage;
 
 /// The namespace our own properties live in, outside the reach of any other
 /// application.
@@ -481,5 +490,197 @@ fn failed(target: &std::path::Path, error: std::io::Error) -> Error {
     Error::new(
         ErrorKind::XmpWriteFailed,
         format!("cannot write {}: {error}", target.display()),
+    )
+}
+
+/// The `status` a frame carries when nothing went wrong.
+pub const OK: &str = "ok";
+
+/// Where a run writes what it still writes to a file: the raw answers, when
+/// they are asked for. The ratings themselves are sidecars, not a report.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outputs {
+    /// The raw answer document of every frame (`--json-scores`), when asked for.
+    pub json_scores: Option<PathBuf>,
+}
+
+/// One frame's account while the run goes, and the unit `--json-scores` is
+/// written from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    /// The file, as the scan found it.
+    pub source: SourceFile,
+    /// The answer at the precision the model gave it; `None` on a failed row.
+    pub answers: Option<Answers>,
+    /// What the request cost, when it got far enough to cost anything.
+    pub usage: Option<Usage>,
+    /// The raw answer document, kept for `--json-scores`. A `bad_response` row
+    /// keeps its document even though its answers could not be read.
+    pub document: Option<Value>,
+    /// Why the row has no answers; `None` means it has them.
+    pub failure: Option<Failure>,
+    /// The first frame whose identical preview this row reuses: the frame that
+    /// paid for the request this row's numbers came from.
+    pub duplicate_of: Option<String>,
+    /// The rubric's short hash: the row's provenance at a glance.
+    pub rubric_hash: String,
+    /// The alias actually used.
+    pub model: String,
+}
+
+impl Row {
+    /// The status this row would carry: `ok`, or the kind that cost it its
+    /// values.
+    pub fn status(&self) -> &'static str {
+        self.failure
+            .as_ref()
+            .map_or(OK, |failure| failure.kind.as_str())
+    }
+}
+
+/// A failed frame's status and message, kept together so they cannot disagree
+/// about whether the frame failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The taxonomy kind.
+    pub kind: ErrorKind,
+    /// A short message that explains the frame without a log file.
+    pub message: String,
+}
+
+impl Failure {
+    /// The status and message for a frame's error.
+    ///
+    /// Every error a frame can carry is classified: an unclassified one is
+    /// run-level, and stops the run before it could become a row.
+    pub fn of(error: &Error) -> Failure {
+        Failure {
+            kind: error.kind().unwrap_or(ErrorKind::Unreadable),
+            message: error.message().to_string(),
+        }
+    }
+}
+
+/// Write `--json-scores`, when the run asked for it: the raw documents, once, at
+/// the end. The documents are the debugging record now that nothing else keeps
+/// the model's own words.
+pub fn write_json(rows: &[Row], outputs: &Outputs) -> Result<()> {
+    if let Some(path) = &outputs.json_scores {
+        let text = json(rows);
+        fs::write(path, text.as_bytes())
+            .map_err(|error| Error::fatal(format!("cannot write {}: {error}", path.display())))?;
+    }
+    Ok(())
+}
+
+/// The raw answer document of every row, keyed by the frame's path inside the
+/// shoot folder, `null` for a frame the model never answered.
+fn json(rows: &[Row]) -> String {
+    let mut documents = Map::new();
+    for row in rows {
+        documents.insert(
+            row.source.relative.to_string_lossy().into_owned(),
+            row.document.clone().unwrap_or(Value::Null),
+        );
+    }
+    let mut out = serde_json::to_string_pretty(&Value::Object(documents))
+        .unwrap_or_else(|_| "{}".to_string());
+    out.push('\n');
+    out
+}
+
+/// The rating a sidecar already carries, when it carries one a photographer
+/// would recognise: an integer 1–5 in the first description.
+///
+/// Anything else — absent, empty, `0`, `-1`, a number that is not an integer —
+/// is not a rating this tool defers to, and is not a rating it produced either.
+pub fn existing_rating(document: &str) -> Option<u8> {
+    let start = document.find(DESCRIPTION)?;
+    let end = tag_end(document, start)?;
+    attributes(&document[start..end])
+        .into_iter()
+        .find(|attribute| attribute.name == "xmp:Rating")
+        .and_then(|attribute| attribute.value.trim().parse::<u8>().ok())
+        .filter(|rating| (1..=5).contains(rating))
+}
+
+/// Whether this document has a description we can safely write into.
+///
+/// Asked before a request is spent: a sidecar no tool can extend is a frame this
+/// run cannot record, and finding that out after paying for the answer would be
+/// paying twice for the same refusal.
+pub fn can_extend(document: &str) -> bool {
+    document
+        .find(DESCRIPTION)
+        .and_then(|start| tag_end(document, start))
+        .is_some()
+}
+
+/// Whether another application owns this sidecar: darktable records its history
+/// in one, and rewrites the whole file the next time it is opened. Writing into
+/// it is allowed only when the photographer says so.
+pub fn is_foreign(document: &str) -> bool {
+    document.contains("xmlns:darktable") || document.contains("darktable:")
+}
+
+impl Properties {
+    /// This run's properties for one frame, stamped now with the alias and the
+    /// rubric that produced the rating.
+    pub fn now(rating: u8, conf_stars: f64, model: &str, rubric_hash: &str) -> Properties {
+        Properties {
+            rating,
+            conf_stars,
+            model: model.to_string(),
+            rubric_hash: rubric_hash.to_string(),
+            scored_at: scored_at_now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+/// The current time, RFC 3339 in UTC.
+pub fn scored_at_now() -> String {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    timestamp(since_epoch.as_secs())
+}
+
+/// `seconds` since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+fn timestamp(seconds: u64) -> String {
+    let (year, month, day) = civil_from_days(seconds / 86_400);
+    let rest = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        (rest % 3600) / 60,
+        rest % 60
+    )
+}
+
+/// The calendar date of a day count from 1970-01-01: Howard Hinnant's
+/// `civil_from_days`, which is the whole of the calendar arithmetic a timestamp
+/// needs and one dependency cheaper than a date crate.
+fn civil_from_days(days: u64) -> (i64, u64, u64) {
+    let days = i64::try_from(days).unwrap_or(i64::MAX);
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (
+        year,
+        u64::try_from(month).unwrap_or(0),
+        u64::try_from(day).unwrap_or(0),
     )
 }

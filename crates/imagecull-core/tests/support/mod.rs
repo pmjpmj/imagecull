@@ -18,8 +18,8 @@ pub mod scenes;
 pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
-use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
+use imagecull_core::sidecar::Outputs;
 
 /// A rubric in TOML, written the way the embedded one is, so a test can change
 /// one word and see only the hash move.
@@ -60,19 +60,10 @@ pub fn shoot(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
     dir
 }
 
-/// Where the report of a test that reads the answers from the run itself goes: a
-/// throwaway directory nobody looks at.
-///
-/// A run always writes its CSV and the ledger beside it, and it must never write
-/// into the folder it is scoring. The directory is kept rather than deleted, so
-/// the path stays valid for the length of the run.
+/// The outputs of a test that reads the run itself rather than a file: no raw
+/// answers, and ratings go into sidecars beside the frames.
 pub fn unwatched() -> Outputs {
-    let dir = tempfile::tempdir().expect("a temp dir").keep();
-    Outputs {
-        csv: dir.join("scores.csv"),
-        json_scores: None,
-        absolute: false,
-    }
+    Outputs::default()
 }
 
 /// A JPEG of `width` by `height` with a pattern, so a resize has something to
