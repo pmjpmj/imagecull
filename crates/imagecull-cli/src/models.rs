@@ -101,7 +101,13 @@ pub fn render(
             "\n* a decision model: answers /v1/systemone, which is what imagecull scores with\n",
         );
     }
-    if !catalog.types_reported() {
+    if let Some(http_status) = catalog.types_unavailable() {
+        out.push_str(&format!(
+            "\n! this server answered GET /v1/models/status with HTTP {http_status}, so what each \
+             model is could not be read and none of the above could be marked — scoring may still \
+             work: try `imagecull doctor` or a one-file run\n"
+        ));
+    } else if !catalog.types_reported() {
         out.push_str(&format!(
             "\n! this server does not report model types (GET /v1/models/status is missing), \
              so none of the above could be marked — upgrade oMLX to {MIN_DECISION_VERSION} or \
@@ -173,6 +179,23 @@ mod tests {
         assert!(rendered.contains("/v1/models/status is missing"));
         assert!(rendered.contains(MIN_DECISION_VERSION));
         assert!(!rendered.contains("* a decision model"));
+    }
+
+    #[test]
+    fn a_keyed_type_report_says_so_and_does_not_blame_the_version() {
+        let catalog = Catalog::new(
+            vec![model("clef-flash-oQ4e", ModelKind::Unreported, None)],
+            false,
+        )
+        .with_types_unavailable(401);
+        let rendered = render(&catalog, None, "http://127.0.0.1:8000", "clef-flash-oQ4e");
+
+        assert!(rendered.contains("HTTP 401"), "{rendered}");
+        assert!(rendered.contains("scoring may still work"), "{rendered}");
+        assert!(
+            !rendered.contains(MIN_DECISION_VERSION),
+            "upgrading will not lift an API key: {rendered}"
+        );
     }
 
     #[test]

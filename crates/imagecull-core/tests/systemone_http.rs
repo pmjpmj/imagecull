@@ -569,6 +569,37 @@ fn a_run_over_http_reports_the_answers_it_read() {
 }
 
 #[test]
+fn a_server_that_keys_its_type_report_still_passes_preflight() {
+    // The real-world shape: /health and /v1/models open, /v1/models/status behind
+    // an API key, /v1/systemone answering. Refusing to score here would be the
+    // tool calling a working server broken.
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "healthy", "default_model": "clef-flash-oQ4e"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models/status",
+            401,
+            json!({"error": {"message": "API key required"}}).to_string(),
+        ),
+    ]);
+    let decide = &adapter(&stub, "clef-flash-oQ4e");
+
+    assert!(
+        decide.preflight().is_ok(),
+        "a keyed type report is a caveat, not a failure: {:?}",
+        decide.preflight().map_err(|error| error.to_string())
+    );
+}
+
+#[test]
 fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() {
     let shoot = shoot(2);
     let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);

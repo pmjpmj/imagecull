@@ -171,6 +171,7 @@ impl ServedModel {
 pub struct Catalog {
     models: Vec<ServedModel>,
     types_reported: bool,
+    types_unavailable: Option<u16>,
 }
 
 impl Catalog {
@@ -180,7 +181,16 @@ impl Catalog {
         Catalog {
             models,
             types_reported,
+            types_unavailable: None,
         }
+    }
+
+    /// Note that `/v1/models/status` answered, but not with a listing: a server
+    /// that guards it (or does not have it) still lists its aliases, and that is
+    /// the part a run cannot do without.
+    pub fn with_types_unavailable(mut self, http_status: u16) -> Catalog {
+        self.types_unavailable = Some(http_status);
+        self
     }
 
     /// The served aliases, in the order the server listed them.
@@ -188,10 +198,22 @@ impl Catalog {
         &self.models
     }
 
-    /// Whether `/v1/models/status` answered. When false, every model is
-    /// [`ModelKind::Unreported`] because the server predates that endpoint.
+    /// Whether `/v1/models/status` answered with a listing. When false, every
+    /// model is [`ModelKind::Unreported`], either because the server predates
+    /// that endpoint or because it refused to show it.
     pub fn types_reported(&self) -> bool {
         self.types_reported
+    }
+
+    /// The status `/v1/models/status` answered when it refused to show its
+    /// listing: `401` or `403`, i.e. it wants a key. `None` when it answered
+    /// with a listing, or when it has no such endpoint to show.
+    ///
+    /// This is the difference between "this install is too old to tell me" and
+    /// "this install will not tell me", which is the difference between
+    /// "upgrade oMLX" and "scoring may well work anyway".
+    pub fn types_unavailable(&self) -> Option<u16> {
+        self.types_unavailable
     }
 
     /// The model served under `alias`, if any.
@@ -269,13 +291,27 @@ impl Client {
     pub fn catalog(&self) -> Result<Catalog> {
         let listing: ModelsEnvelope = parse_json("/v1/models", &self.get_success("/v1/models")?)?;
 
+        // `/v1/models` answered, so the aliases are known. The optional type
+        // endpoint is decoration on top: a server that guards it (401), never
+        // had it (404) or dropped the connection still lists what it serves, and
+        // refusing the whole catalog over the decoration is how a working server
+        // gets called broken. Why it was unavailable is kept, so `doctor` can
+        // tell "too old to say" from "will not say" (spec §11, ticket 01).
+        let mut unavailable = None;
         let statuses = match self.get("/v1/models/status") {
-            Ok(fetched) if fetched.http_status == 404 => None,
             Ok(fetched) if (200..300).contains(&fetched.http_status) => {
                 Some(parse_json::<StatusEnvelope>("/v1/models/status", &fetched.body)?.models)
             }
-            Ok(fetched) => return Err(status_error("/v1/models/status", fetched.http_status)),
-            Err(error) => return Err(error),
+            // Guarded: the endpoint exists and we are not allowed to read it.
+            // That is `doctor`'s "will not say", not its "too old to say".
+            Ok(fetched) if matches!(fetched.http_status, 401 | 403) => {
+                unavailable = Some(fetched.http_status);
+                None
+            }
+            // Absent (404) or broken: treated as a server without the endpoint,
+            // which is the version verdict's job to explain.
+            Ok(_) => None,
+            Err(_) => None,
         };
 
         let models = listing
@@ -308,7 +344,11 @@ impl Client {
             })
             .collect();
 
-        Ok(Catalog::new(models, statuses.is_some()))
+        let catalog = Catalog::new(models, statuses.is_some());
+        Ok(match unavailable {
+            Some(http_status) => catalog.with_types_unavailable(http_status),
+            None => catalog,
+        })
     }
 
     /// `POST path` with a JSON body, returning the status and the body

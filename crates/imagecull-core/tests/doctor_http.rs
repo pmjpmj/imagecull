@@ -187,14 +187,80 @@ fn a_server_still_loading_its_models_is_not_ready() {
 }
 
 #[test]
-fn a_server_that_wants_an_api_key_is_named_as_such() {
-    // oMLX guards /v1/models/status with the main API key while /v1/models can
-    // be open, so an auth failure shows up on the second call.
+fn a_server_that_keys_its_status_endpoint_is_still_ready() {
+    // oMLX guards /v1/models/status with the main API key while /v1/models and
+    // /v1/systemone can be open, so an auth failure on the optional type report
+    // must not stop a run against a server that will answer the questions.
     let server = Stub::routed(vec![
         route("/health", 200, health("0.7.1.dev1")),
         route("/v1/models", 200, MODELS_ONE.to_string()),
         route(
             "/v1/models/status",
+            401,
+            r#"{"detail":"API key required"}"#.to_string(),
+        ),
+    ]);
+    let report = doctor::diagnose(&client(server.endpoint()), "clef-flash-oQ4e");
+
+    assert_eq!(
+        report.verdict,
+        Verdict::TypesUnavailable { http_status: 401 }
+    );
+    assert!(report.is_ready());
+    assert_eq!(report.exit(), ExitCode::Ok);
+    assert!(report.message().contains("clef-flash-oQ4e"));
+    assert!(report.message().contains("HTTP 401"));
+    assert!(report.message().contains("--limit 1"));
+}
+
+#[test]
+fn a_keyed_status_endpoint_still_lists_the_aliases_it_serves() {
+    let server = Stub::routed(vec![
+        route("/health", 200, health("0.7.1.dev1")),
+        route("/v1/models", 200, MODELS_ONE.to_string()),
+        route(
+            "/v1/models/status",
+            401,
+            r#"{"detail":"API key required"}"#.to_string(),
+        ),
+    ]);
+    let catalog = client(server.endpoint()).catalog().expect("a catalog");
+
+    assert_eq!(catalog.aliases(), ["clef-flash-oQ4e"]);
+    assert!(!catalog.types_reported());
+    assert_eq!(catalog.types_unavailable(), Some(401));
+}
+
+#[test]
+fn an_absent_alias_is_missing_even_when_types_are_unavailable() {
+    let server = Stub::routed(vec![
+        route("/health", 200, health("0.7.1.dev1")),
+        route("/v1/models", 200, MODELS_OTHER.to_string()),
+        route(
+            "/v1/models/status",
+            401,
+            r#"{"detail":"API key required"}"#.to_string(),
+        ),
+    ]);
+    let report = doctor::diagnose(&client(server.endpoint()), "clef-flash-oQ4e");
+
+    assert_eq!(
+        report.verdict,
+        Verdict::AliasMissing {
+            available: vec!["clef-27b-4bit".to_string()]
+        }
+    );
+    assert_eq!(report.exit(), ExitCode::Fatal);
+}
+
+#[test]
+fn a_server_that_wants_an_api_key_for_its_whole_api_is_named_as_such() {
+    // The alias list itself is behind the key, so there is nothing to score
+    // with: this is the auth failure that stops a run.
+    let server = Stub::routed(vec![
+        route("/health", 200, health("0.7.1.dev1")),
+        route(
+            "/v1/models",
             401,
             r#"{"detail":"API key required"}"#.to_string(),
         ),
