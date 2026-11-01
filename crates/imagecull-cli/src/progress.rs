@@ -287,10 +287,16 @@ fn summary_block(summary: &Summary) -> String {
         out.push_str(&format!("left out: {}\n", left_out.join(" · ")));
     }
     out.push_str(&format!(
-        "rubric {} · model {}\n",
+        "rubric {} · model {}",
         summary.rubric_hash.short(),
         summary.model
     ));
+    // Which config file produced these numbers, when one did: the same kind of
+    // provenance as the rubric hash and the alias beside it (spec §11.1).
+    if let Some(config) = &summary.config {
+        out.push_str(&format!(" · config {}", config.display()));
+    }
+    out.push('\n');
     if let Some(ending) = ending_line(&summary.ending) {
         out.push_str(&ending);
     }
@@ -413,6 +419,7 @@ pub(crate) fn kilobytes(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use imagecull_core::error::ErrorKind;
@@ -532,6 +539,7 @@ mod tests {
             disagreement_rate: 6.0 / 397.0,
             rubric_hash: rubric,
             model: "clef-flash-oQ4e".to_string(),
+            config: None,
             elapsed: Duration::from_secs(8 * 60 + 12),
             left_out: ScanCounts {
                 skipped_extension: 3,
@@ -619,6 +627,29 @@ mod tests {
         );
         assert_eq!(rendered.out, expected);
         assert!(rendered.err.is_empty());
+    }
+
+    #[test]
+    fn the_summary_names_the_config_file_when_one_was_read() {
+        let mut summary = summary();
+        summary.config = Some(PathBuf::from("/Volumes/Shoot A/imagecull.toml"));
+        let short = summary.rubric_hash.short().to_string();
+
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary,
+            })],
+            Verbosity::Normal,
+            false,
+        );
+
+        assert!(
+            rendered.out.contains(&format!(
+                "rubric {short} · model clef-flash-oQ4e · config /Volumes/Shoot A/imagecull.toml\n"
+            )),
+            "the numbers have to be attributable to the file that made them: {}",
+            rendered.out
+        );
     }
 
     #[test]

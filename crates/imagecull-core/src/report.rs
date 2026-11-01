@@ -47,7 +47,7 @@ pub const COLUMNS: [&str; 17] = [
 ];
 
 /// Where a run writes its report, and how it spells the paths in it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outputs {
     /// The CSV of scores (`--out`).
     pub csv: PathBuf,

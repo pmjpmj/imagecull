@@ -11,7 +11,7 @@
 //! Requests are strictly sequential. oMLX serialises decision requests anyway,
 //! so concurrency would only manufacture timeouts (spec §7.1).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -236,6 +236,10 @@ pub struct Config {
     /// provenance. `None` when the decider has no endpoint of its own, as every
     /// test's fake has.
     pub endpoint: Option<String>,
+    /// The config file this run's values came from, when one did. Provenance for
+    /// the summary, the way `endpoint` is provenance for the ledger's header;
+    /// `None` when the flags and the built-in defaults were the whole story.
+    pub source: Option<PathBuf>,
 }
 
 impl Config {
@@ -265,6 +269,7 @@ impl Config {
             dedupe: true,
             csv_rewrite_every: DEFAULT_CSV_REWRITE_EVERY,
             endpoint: None,
+            source: None,
         }
     }
 
@@ -298,6 +303,9 @@ pub struct Run {
     pub elapsed: Duration,
     /// How the run ended, which is also what it exits as.
     pub ending: Ending,
+    /// The config file the run's values came from, when one did: the summary
+    /// prints it beside the rubric hash so the numbers are attributable.
+    pub source: Option<PathBuf>,
 }
 
 impl Run {
@@ -512,6 +520,7 @@ pub fn run(
         duplicates,
         elapsed: began.elapsed(),
         ending,
+        source: config.source.clone(),
     };
     // The last thing a reporter hears: the run's own account of itself, which a
     // front end renders as the summary and a script reads for the outcome.

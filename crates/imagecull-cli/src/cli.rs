@@ -2,23 +2,21 @@
 //!
 //! Only arguments live here — no rendering, no decisions. Every flag maps to a
 //! core value, so nothing about the pipeline can be reachable only from the
-//! terminal.
+//! terminal; and no default is filled here either, because a config file may
+//! supply it. Each command asks [`CommonArgs::effective`] for the values it will
+//! actually use, which is why the flags are `Option<T>`: this layer has to say
+//! "the photographer did not say" without guessing what the answer is.
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use imagecull_core::ingest::ScanOptions;
+use imagecull_core::config::{self, Effective, Loaded, Resolved};
 use imagecull_core::ledger::LedgerMode;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
-use imagecull_core::preprocess::Params;
-use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
-
-/// The CSV a run writes when `--out` is not given (spec §11: `./scores.csv`).
-pub const DEFAULT_OUTPUT: &str = "scores.csv";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,7 +34,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// List what the local oMLX serves, flagging decision models
-    Models(ServerArgs),
+    Models(CommonArgs),
     /// Check that the local oMLX can score photos, and that a file's preview
     /// survives the pipeline
     Doctor(DoctorArgs),
@@ -44,37 +42,79 @@ pub enum Command {
     Score(ScoreArgs),
 }
 
-/// The options the commands that talk to a server share.
+/// The options every command shares: which server to talk to, and where the
+/// values come from.
 #[derive(Args, Debug)]
-pub struct ServerArgs {
-    /// Base URL of the oMLX server
-    #[arg(long, value_name = "URL", default_value = omlx::DEFAULT_ENDPOINT)]
-    pub endpoint: String,
+pub struct CommonArgs {
+    /// Base URL of the oMLX server (default http://127.0.0.1:8000)
+    #[arg(long, value_name = "URL")]
+    pub endpoint: Option<String>,
 
-    /// Model alias to check or score with (score defaults to the rubric's alias,
-    /// doctor and models to clef-flash-oQ4e)
+    /// Model alias to check or score with: score defaults to the rubric's alias,
+    /// doctor and models to clef-flash-oQ4e
     #[arg(short = 'm', long, value_name = "ALIAS")]
     pub model: Option<String>,
 
-    /// Read timeout in seconds
-    #[arg(long, value_name = "SECS", default_value_t = 120)]
-    pub timeout: u64,
+    /// Read timeout in seconds (default 120)
+    #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub timeout: Option<u64>,
+
+    /// Read values from this config file instead of the discovered one
+    #[arg(long, value_name = "FILE", conflicts_with = "no_config")]
+    pub config: Option<PathBuf>,
+
+    /// Ignore any config file and use the built-in defaults
+    #[arg(long)]
+    pub no_config: bool,
 }
 
-impl ServerArgs {
-    /// The alias to use when nothing more specific applies: the configured one,
-    /// or the reference server's default. `score` prefers the rubric's alias.
-    pub fn model(&self) -> &str {
-        self.model.as_deref().unwrap_or(omlx::DEFAULT_MODEL)
+impl CommonArgs {
+    /// The values this run actually uses: the config file's, under the flags',
+    /// under the built-in defaults.
+    ///
+    /// `flags` is what this command's own flags said; the shared ones come from
+    /// here. Any error is the message a photographer reads, already naming the
+    /// file and the key that has to change.
+    pub fn effective(&self, flags: Resolved) -> Result<Effective, String> {
+        let loaded = self.load()?;
+        let source = loaded.as_ref().map(|loaded| loaded.path.clone());
+        let file = loaded.map(|loaded| loaded.resolve()).unwrap_or_default();
+        Ok(file.override_with(flags).settle(source))
     }
 
-    /// Build the client these options describe, or the message explaining why
-    /// they describe nothing.
-    pub fn client(&self) -> Result<Client, String> {
-        let endpoint = Endpoint::parse(&self.endpoint).map_err(|error| error.to_string())?;
+    /// The shared flags as one source of config, before the file is consulted.
+    pub fn overrides(&self) -> Resolved {
+        Resolved {
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            timeout: self.timeout,
+            ..Resolved::default()
+        }
+    }
+
+    /// Find the config file this run reads, if any: `--config`, the shoot
+    /// config, or the user config, and nothing at all under `--no-config`.
+    fn load(&self) -> Result<Option<Loaded>, String> {
+        if self.no_config {
+            return Ok(None);
+        }
+        let env = config::Env::of_process().map_err(|error| error.to_string())?;
+        config::discover(self.config.as_deref(), &env).map_err(|error| error.to_string())
+    }
+
+    /// The alias `doctor` and `models` work with: the configured one, or the
+    /// reference server's default. A run prefers the rubric's alias instead.
+    pub fn alias<'a>(&self, effective: &'a Effective) -> &'a str {
+        effective.model.as_deref().unwrap_or(omlx::DEFAULT_MODEL)
+    }
+
+    /// Build the client the effective config describes, or the message
+    /// explaining why it describes nothing.
+    pub fn client(&self, effective: &Effective) -> Result<Client, String> {
+        let endpoint = Endpoint::parse(&effective.endpoint).map_err(|error| error.to_string())?;
         Ok(Client::new(
             endpoint,
-            Timeouts::with_read_seconds(self.timeout),
+            Timeouts::with_read_seconds(effective.timeout),
         ))
     }
 }
@@ -82,38 +122,29 @@ impl ServerArgs {
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
     #[command(flatten)]
-    pub server: ServerArgs,
+    pub common: CommonArgs,
 
     /// A RAW file to run the preview pipeline on, as a self-test
     #[arg(value_name = "FILE")]
     pub file: Option<PathBuf>,
 
-    /// Cap on the longest edge of the sent preview, in pixels
-    #[arg(
-        long,
-        value_name = "PX",
-        default_value_t = Params::DEFAULT_MAX_EDGE,
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    pub max_edge: u32,
+    /// Cap on the longest edge of the sent preview, in pixels (default 1568)
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_edge: Option<u32>,
 
-    /// JPEG quality of the sent preview, 1-100
-    #[arg(
-        long,
-        value_name = "QUALITY",
-        default_value_t = Params::DEFAULT_JPEG_QUALITY,
-        value_parser = clap::value_parser!(u8).range(1..=100)
-    )]
-    pub jpeg_quality: u8,
+    /// JPEG quality of the sent preview, 1-100 (default 88)
+    #[arg(long, value_name = "QUALITY", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub jpeg_quality: Option<u8>,
 }
 
 impl DoctorArgs {
-    /// How the preview should be rendered — the same knobs a run would use, so
-    /// the self-test proves the pipeline the photographer is about to use.
-    pub fn params(&self) -> Params {
-        Params {
+    /// What this command's own flags said. The self-test proves the pipeline the
+    /// photographer is about to use, so it takes the same knobs a run would.
+    pub fn overrides(&self) -> Resolved {
+        Resolved {
             max_edge: self.max_edge,
             jpeg_quality: self.jpeg_quality,
+            ..self.common.overrides()
         }
     }
 }
@@ -125,7 +156,7 @@ pub struct ScoreArgs {
     pub dir: PathBuf,
 
     #[command(flatten)]
-    pub server: ServerArgs,
+    pub common: CommonArgs,
 
     /// A rubric file to use instead of the one built into imagecull
     #[arg(long, value_name = "FILE")]
@@ -144,35 +175,32 @@ pub struct ScoreArgs {
     #[arg(long, value_name = "DIR", default_value = DEFAULT_PREVIEWS_DIR)]
     pub previews_dir: PathBuf,
 
-    /// Cap on the longest edge of the sent preview, in pixels
+    /// Cap on the longest edge of the sent preview, in pixels (default 1568)
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_edge: Option<u32>,
+
+    /// JPEG quality of the sent preview, 1-100 (default 88)
+    #[arg(long, value_name = "QUALITY", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub jpeg_quality: Option<u8>,
+
+    /// Also scan subdirectories; hidden directories are never scanned.
+    /// Takes an optional true/false, so a config file that turns it on can be
+    /// turned off for one run
     #[arg(
         long,
-        value_name = "PX",
-        default_value_t = Params::DEFAULT_MAX_EDGE,
-        value_parser = clap::value_parser!(u32).range(1..)
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true"
     )]
-    pub max_edge: u32,
-
-    /// JPEG quality of the sent preview, 1-100
-    #[arg(
-        long,
-        value_name = "QUALITY",
-        default_value_t = Params::DEFAULT_JPEG_QUALITY,
-        value_parser = clap::value_parser!(u8).range(1..=100)
-    )]
-    pub jpeg_quality: u8,
-
-    /// Also scan subdirectories; hidden directories are never scanned
-    #[arg(long)]
-    pub recursive: bool,
+    pub recursive: Option<bool>,
 
     /// Score only the first N files, as a smoke test
     #[arg(long, value_name = "N", value_parser = positive_count)]
     pub limit: Option<usize>,
 
-    /// Where to write the CSV of scores
-    #[arg(long, value_name = "FILE", default_value = DEFAULT_OUTPUT)]
-    pub out: PathBuf,
+    /// Where to write the CSV of scores (default ./scores.csv)
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
 
     /// Also write every raw model answer to this JSON file, so a surprising
     /// score loses nothing
@@ -180,8 +208,13 @@ pub struct ScoreArgs {
     pub json_scores: Option<PathBuf>,
 
     /// Write absolute paths in the CSV instead of paths inside the shoot folder
-    #[arg(long)]
-    pub absolute: bool,
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub absolute: Option<bool>,
 
     /// Pick up an interrupted run: frames the ledger beside the CSV already
     /// holds are not scored again
@@ -239,28 +272,22 @@ fn positive_count(text: &str) -> Result<usize, String> {
 }
 
 impl ScoreArgs {
-    /// How the folder should be scanned.
-    pub fn scan_options(&self) -> ScanOptions {
-        ScanOptions {
-            recursive: self.recursive,
-            limit: self.limit,
-        }
-    }
-
-    /// How the preview should be rendered.
-    pub fn params(&self) -> Params {
-        Params {
+    /// What this command's flags said, before any config file is consulted.
+    ///
+    /// `--no-dedupe` is the one flag whose absence is meaningful: it can only
+    /// turn dedupe off, so leaving it out leaves the decision to the file.
+    pub fn overrides(&self) -> Resolved {
+        Resolved {
             max_edge: self.max_edge,
             jpeg_quality: self.jpeg_quality,
-        }
-    }
-
-    /// Where the run writes its report.
-    pub fn outputs(&self) -> Outputs {
-        Outputs {
+            recursive: self.recursive,
             csv: self.out.clone(),
             json_scores: self.json_scores.clone(),
             absolute: self.absolute,
+            rubric: self.rubric.clone(),
+            shoot_context: self.shoot_context.clone(),
+            dedupe: self.no_dedupe.then_some(false),
+            ..self.common.overrides()
         }
     }
 
@@ -283,6 +310,8 @@ impl ScoreArgs {
 
 #[cfg(test)]
 mod tests {
+    use imagecull_core::preprocess::Params;
+
     use super::*;
 
     fn parse(arguments: &[&str]) -> Command {
@@ -293,6 +322,12 @@ mod tests {
         Cli::try_parse_from(std::iter::once("imagecull").chain(arguments.iter().copied()))
     }
 
+    /// The effective config of a parsed `score` with no config file on disk.
+    /// Parsing only: the file itself is proven in the core's own tests.
+    fn effective(args: &ScoreArgs) -> Effective {
+        args.overrides().settle(None)
+    }
+
     #[test]
     fn score_defaults_are_the_specs_defaults() {
         let Command::Score(args) = parse(&["score", "shoot"]) else {
@@ -300,30 +335,45 @@ mod tests {
         };
         assert_eq!(args.dir, PathBuf::from("shoot"));
         assert!(!args.dry_run);
-        assert_eq!(args.server.endpoint, omlx::DEFAULT_ENDPOINT);
         assert_eq!(
-            args.server.model, None,
+            args.common.endpoint, None,
+            "the default is resolved later, so a file may supply it"
+        );
+        assert_eq!(
+            args.common.model, None,
             "--model defaults to the rubric's alias"
         );
-        assert_eq!(args.server.timeout, 120);
+        assert_eq!(args.common.timeout, None);
         assert_eq!(args.rubric, None);
         assert_eq!(args.shoot_context, None);
         assert_eq!(args.previews_dir, PathBuf::from(DEFAULT_PREVIEWS_DIR));
-        assert_eq!(args.max_edge, Params::DEFAULT_MAX_EDGE);
-        assert_eq!(args.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
-        assert!(!args.recursive);
+        assert_eq!(args.max_edge, None);
+        assert_eq!(args.jpeg_quality, None);
+        assert_eq!(args.recursive, None);
         assert_eq!(args.limit, None);
-        assert!(!args.scan_options().recursive);
-        assert_eq!(args.out, PathBuf::from(DEFAULT_OUTPUT));
+        assert_eq!(args.out, None);
         assert_eq!(args.json_scores, None);
-        assert!(!args.absolute);
-        assert_eq!(args.outputs().csv, PathBuf::from(DEFAULT_OUTPUT));
-        assert_eq!(args.outputs().json_scores, None);
-        assert!(!args.outputs().absolute);
+        assert_eq!(args.absolute, None);
+        assert_eq!(args.common.config, None);
+        assert!(!args.common.no_config);
         assert!(
             !args.quiet && !args.verbose,
             "a plain run shows the progress line and the summary"
         );
+
+        let effective = effective(&args);
+        assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
+        assert_eq!(effective.model, None, "no alias means the rubric's own");
+        assert_eq!(effective.timeout, 120);
+        assert_eq!(effective.params.max_edge, Params::DEFAULT_MAX_EDGE);
+        assert_eq!(effective.params.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
+        assert!(!effective.recursive);
+        assert!(!effective.scan(None).recursive);
+        assert_eq!(effective.outputs.csv, PathBuf::from(config::DEFAULT_CSV));
+        assert_eq!(effective.outputs.json_scores, None);
+        assert!(!effective.outputs.absolute);
+        assert!(effective.dedupe);
+        assert_eq!(effective.source, None);
     }
 
     #[test]
@@ -345,11 +395,27 @@ mod tests {
             panic!("not a score command");
         };
         assert!(args.dry_run);
-        assert!(args.recursive);
+        assert_eq!(args.recursive, Some(true));
         assert_eq!(args.limit, Some(20));
-        assert_eq!(args.params().max_edge, 1024);
-        assert_eq!(args.params().jpeg_quality, 70);
         assert_eq!(args.previews_dir, PathBuf::from("/tmp/out"));
+
+        let effective = effective(&args);
+        assert_eq!(effective.params.max_edge, 1024);
+        assert_eq!(effective.params.jpeg_quality, 70);
+        assert!(effective.recursive);
+        assert_eq!(effective.scan(Some(20)).limit, Some(20));
+    }
+
+    #[test]
+    fn a_config_that_turns_recursion_on_can_be_turned_off_for_one_run() {
+        let Command::Score(args) = parse(&["score", "shoot", "--recursive", "false"]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(
+            args.recursive,
+            Some(false),
+            "the flag has to be able to say no, or a file could only ever add"
+        );
     }
 
     #[test]
@@ -365,22 +431,28 @@ mod tests {
         ]) else {
             panic!("not a score command");
         };
-        let outputs = args.outputs();
+        let outputs = effective(&args).outputs;
         assert_eq!(outputs.csv, PathBuf::from("scores/march.csv"));
         assert_eq!(
             outputs.json_scores,
             Some(PathBuf::from("scores/march.json"))
         );
         assert!(outputs.absolute);
+        assert_eq!(
+            args.absolute,
+            Some(true),
+            "the flag is distinguishable from its absence"
+        );
     }
 
     #[test]
     fn nonsense_edges_and_qualities_are_rejected() {
-        let cases: [&[&str]; 4] = [
+        let cases: [&[&str]; 5] = [
             &["score", "shoot", "--max-edge", "0"],
             &["score", "shoot", "--jpeg-quality", "0"],
             &["score", "shoot", "--jpeg-quality", "101"],
             &["score", "shoot", "--limit", "0"],
+            &["score", "shoot", "--timeout", "0"],
         ];
         for arguments in cases {
             assert!(
@@ -408,14 +480,23 @@ mod tests {
         ]) else {
             panic!("not a score command");
         };
-        assert_eq!(args.server.endpoint, "http://127.0.0.1:9000");
-        assert_eq!(args.server.model.as_deref(), Some("clef-27b-oQ4e"));
+        assert_eq!(
+            args.common.endpoint.as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        assert_eq!(args.common.model.as_deref(), Some("clef-27b-oQ4e"));
         assert_eq!(args.rubric, Some(PathBuf::from("mine.toml")));
         assert_eq!(
             args.shoot_context.as_deref(),
             Some("street at dusk, high ISO expected")
         );
-        assert_eq!(args.server.timeout, 240);
+        assert_eq!(args.common.timeout, Some(240));
+
+        let effective = effective(&args);
+        assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
+        assert_eq!(effective.model.as_deref(), Some("clef-27b-oQ4e"));
+        assert_eq!(effective.rubric, Some(PathBuf::from("mine.toml")));
+        assert_eq!(effective.timeout, 240);
     }
 
     /// The three flags that decide what a run does with a ledger it finds
@@ -430,6 +511,11 @@ mod tests {
             args.ledger_mode(),
             LedgerMode::Restart,
             "a plain score starts the ledger over, after the mismatch check"
+        );
+        assert_eq!(
+            args.overrides().dedupe,
+            None,
+            "a run that says nothing about dedupe lets a config file decide"
         );
 
         let Command::Score(args) = parse(&["score", "shoot", "--resume"]) else {
@@ -446,6 +532,11 @@ mod tests {
             panic!("not a score command");
         };
         assert!(args.no_dedupe);
+        assert_eq!(
+            args.overrides().dedupe,
+            Some(false),
+            "--no-dedupe can only turn dedupe off"
+        );
     }
 
     #[test]
@@ -472,13 +563,50 @@ mod tests {
     }
 
     #[test]
+    fn every_command_takes_a_config_file_and_can_refuse_one() {
+        for command in ["score shoot", "doctor", "models"] {
+            let arguments: Vec<&str> = command
+                .split(' ')
+                .chain(["--config", "mine.toml"])
+                .collect();
+            let parsed = parse(&arguments);
+            let common = match &parsed {
+                Command::Score(args) => &args.common,
+                Command::Doctor(args) => &args.common,
+                Command::Models(args) => args,
+            };
+            assert_eq!(common.config, Some(PathBuf::from("mine.toml")), "{command}");
+
+            let arguments: Vec<&str> = command.split(' ').chain(["--no-config"]).collect();
+            let parsed = parse(&arguments);
+            let common = match &parsed {
+                Command::Score(args) => &args.common,
+                Command::Doctor(args) => &args.common,
+                Command::Models(args) => args,
+            };
+            assert!(common.no_config, "{command}");
+        }
+    }
+
+    #[test]
+    fn naming_a_config_file_and_refusing_them_all_are_opposite_answers() {
+        assert!(
+            parse_result(&["score", "shoot", "--config", "mine.toml", "--no-config"]).is_err(),
+            "one run cannot read a file and ignore every file"
+        );
+    }
+
+    #[test]
     fn doctor_takes_an_optional_file_and_the_server_flags() {
         let Command::Doctor(args) = parse(&["doctor"]) else {
             panic!("not a doctor command");
         };
         assert_eq!(args.file, None);
-        assert_eq!(args.server.endpoint, omlx::DEFAULT_ENDPOINT);
-        assert_eq!(args.server.model(), omlx::DEFAULT_MODEL);
+        assert_eq!(args.common.endpoint, None);
+        let effective = args.overrides().settle(None);
+        assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
+        assert_eq!(args.common.alias(&effective), omlx::DEFAULT_MODEL);
+        assert_eq!(effective.params.max_edge, Params::DEFAULT_MAX_EDGE);
 
         let Command::Doctor(args) = parse(&[
             "doctor",
@@ -491,9 +619,9 @@ mod tests {
             panic!("not a doctor command");
         };
         assert_eq!(args.file, Some(PathBuf::from("DSC_0001.NEF")));
-        assert_eq!(args.server.endpoint, "http://127.0.0.1:9000");
-        assert_eq!(args.server.model(), "clef-27b");
-        assert_eq!(args.params().max_edge, Params::DEFAULT_MAX_EDGE);
+        let effective = args.overrides().settle(None);
+        assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
+        assert_eq!(args.common.alias(&effective), "clef-27b");
     }
 
     #[test]
@@ -501,8 +629,9 @@ mod tests {
         let Command::Doctor(args) = parse(&["doctor", "DSC_0001.NEF", "--max-edge", "1024"]) else {
             panic!("not a doctor command");
         };
-        assert_eq!(args.params().max_edge, 1024);
-        assert_eq!(args.params().jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
+        let effective = args.overrides().settle(None);
+        assert_eq!(effective.params.max_edge, 1024);
+        assert_eq!(effective.params.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
     }
 
     #[test]

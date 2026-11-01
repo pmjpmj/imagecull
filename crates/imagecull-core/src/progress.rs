@@ -11,6 +11,7 @@
 //! the run does not care which.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::ErrorKind;
@@ -160,6 +161,9 @@ pub struct Summary {
     pub rubric_hash: RubricHash,
     /// The alias every frame was scored with.
     pub model: String,
+    /// The config file the run's values came from, when one did: the provenance
+    /// line prints it beside the rubric hash and the model alias.
+    pub config: Option<PathBuf>,
     /// From the first scan to the last write.
     pub elapsed: Duration,
     /// What the scan left out because it was not a RAW file, was Finder noise,
@@ -242,6 +246,7 @@ impl Summary {
             disagreement_rate,
             rubric_hash: run.rubric_hash.clone(),
             model: run.model.clone(),
+            config: run.source.clone(),
             elapsed: run.elapsed,
             left_out: run.counts,
             ending: run.ending.clone(),

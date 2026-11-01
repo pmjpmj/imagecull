@@ -359,15 +359,56 @@ imagecull score <DIR> [OPTIONS]
         --absolute              absolute paths in the CSV
         --timeout <SECS>        default 120
         --quiet | --verbose
+        --config <FILE>         read this config file instead of the discovered one
+        --no-config             ignore any config file; built-in defaults only
 
 imagecull models               # GET /v1/models, flag decision models
 imagecull doctor [FILE.nef]    # server reachability + preview extraction self-test
 imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:Rating
 ```
 
+`--config` and `--no-config` are on all three subcommands (`§11.1`).
+
 Progress (TTY only): `[142/400] DSC_0555.NEF  overall 6.4★4 · 0.8s · eta 3m10s`, plus a final summary — counts by status, mean/median per score, star histogram, disagreement rate, total wall time.
 
 `--version` prints version + rubric hash.
+
+### 11.1 Config files
+
+Values that stay true across runs can come from a TOML file instead of being
+retyped as flags. Keys are grouped into five sections that map one-for-one onto
+the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
+`[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
+(`csv`, `json_scores`, `absolute`), `[run]` (`rubric`, `shoot_context`,
+`dedupe`, `csv_rewrite_every`). `imagecull.toml.example` is the commented
+reference; ADR 0003 records why this shape.
+
+**Discovery.** Exactly one file is read. The first of these that exists wins
+whole: `--config <FILE>`, `./imagecull.toml`,
+`$XDG_CONFIG_HOME/imagecull/config.toml`,
+`~/.config/imagecull/config.toml`, the built-in defaults. Files never layer,
+and there are no environment-variable overrides. `--no-config` skips discovery
+entirely.
+
+**Precedence.** Flag > config file > built-in default, per key.
+
+**What a file cannot set.** The shoot folder, `--dry-run`, `--resume`,
+`--fresh`, `--limit`, `--quiet`, `--verbose` — those describe the invocation,
+not the shoot.
+
+**Strictness.** Unknown keys and unknown sections are fatal, values are
+validated to the same ranges the flags enforce, an unreadable `--config` target
+is fatal, and a malformed file is fatal with the parser's line and column. Exit
+code 2 (`§10`), never a warning-and-continue.
+
+**Paths.** Relative paths in the file resolve against the file's own directory.
+
+**Provenance.** The file is read by `score`, `doctor` and `models`, so a
+preflight certifies the pipeline the run will actually use. When a file was
+loaded, the run summary's provenance line prints it beside the rubric hash and
+the model alias: `rubric 69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`.
+The file's content hash is **not** in the ledger header; see ADR 0003's
+consequences for what that leaves open.
 
 ---
 

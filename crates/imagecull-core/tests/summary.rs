@@ -75,6 +75,7 @@ fn run(frames: Vec<Frame>) -> Run {
         duplicates: 0,
         elapsed: Duration::from_millis(1),
         ending: Ending::Completed,
+        source: None,
     }
 }
 

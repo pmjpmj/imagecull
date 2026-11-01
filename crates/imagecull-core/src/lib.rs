@@ -20,7 +20,9 @@
 //! is judged, `--resume` skips what is already there, and the CSV is rendered
 //! from those records. Ticket 07 adds the run's own account of itself
 //! ([`progress`]): the events a front end draws a progress line and a summary
-//! from, still with no terminal in the core.
+//! from, still with no terminal in the core. The config file ([`config`]) is the
+//! last source of values a run reads: what stays true across runs, resolved into
+//! the same effective config the flags produce.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -29,6 +31,7 @@
     clippy::exit
 )]
 
+pub mod config;
 pub mod doctor;
 pub mod dry_run;
 pub mod error;
@@ -45,6 +48,7 @@ pub mod scoring;
 pub mod systemone;
 pub mod version;
 
+pub use config::{ConfigFile, Effective, Env, Loaded, Resolved};
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
 pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};

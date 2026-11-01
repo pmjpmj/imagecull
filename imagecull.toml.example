@@ -1,0 +1,69 @@
+# A config file for imagecull — a commented example.
+#
+# Copy this to `imagecull.toml` in your shoot folder, or to
+# `~/.config/imagecull/config.toml` to apply it to every shoot, or pass it
+# explicitly with `--config <FILE>`. Exactly one file is read: `--config` if
+# given, else `./imagecull.toml`, else `$XDG_CONFIG_HOME/imagecull/config.toml`,
+# else `~/.config/imagecull/config.toml`, else the built-in defaults. A file
+# never layers over another one.
+#
+# A flag always beats the file; the file always beats the built-in default.
+# Every key below is optional — leave one out and its default applies.
+#
+# Unknown keys are an error, not a warning: a typo'd `max_edeg` would otherwise
+# cost you a whole run at the wrong resolution. Out-of-range values are errors
+# too. Relative paths are resolved against this file's directory, so a config
+# that travels with a shoot folder keeps working.
+#
+# What a config file cannot set, because it describes this invocation rather
+# than this shoot: the shoot folder itself, `--dry-run`, `--resume`/`--fresh`,
+# `--limit`, `--quiet`/`--verbose`.
+
+[server]
+# Base URL of the local oMLX server. Default: http://127.0.0.1:8000
+endpoint = "http://127.0.0.1:8000"
+# Model alias to score with. Default: the rubric's own alias.
+# `doctor` and `models` default to clef-flash-oQ4e when neither this nor
+# `--model` is given. Changing the alias changes the rubric hash, and two
+# reports with different hashes are not comparable.
+# model = "clef-flash-oQ4e"
+# Read timeout, in seconds. Default: 120
+# timeout = 120
+
+[preview]
+# Cap on the longest edge of the preview sent to the model, in pixels.
+# Smaller is faster and cheaper in context; below ~1000 px fine detail stops
+# being judgeable. Default: 1568
+# max_edge = 1568
+# JPEG quality of the sent preview, 1-100. Default: 88
+# jpeg_quality = 88
+
+[scan]
+# Also scan subdirectories. Hidden directories are never scanned.
+# Default: false (the shoot folder only)
+# recursive = false
+
+[outputs]
+# The CSV of scores. Default: ./scores.csv
+# csv = "scores.csv"
+# Every raw model answer, as JSON, so a surprising score loses nothing.
+# Default: not written
+# json_scores = "scores.json"
+# Write absolute paths in the `file` column instead of paths inside the
+# shoot folder. Default: false
+# absolute = false
+
+[run]
+# A rubric file to use instead of the one built into imagecull. Default: the
+# embedded rubric. Its hash goes into the report, so a rubric edit re-scores
+# rather than silently mixing two rubrics in one file.
+# rubric = "mine.toml"
+# Free text about the shoot, passed to the model as state.shoot_context, so a
+# dim, high-ISO street shoot is judged as that.
+# shoot_context = "night street, pushed two stops"
+# Reuse the outcome of a frame whose preview is byte-identical to another.
+# Default: true
+# dedupe = true
+# How many rows accumulate between rewrites of the CSV, so a killed run leaves
+# a readable spreadsheet behind. Default: 25
+# csv_rewrite_every = 25

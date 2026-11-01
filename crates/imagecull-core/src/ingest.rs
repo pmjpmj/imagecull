@@ -38,7 +38,7 @@ pub struct ScanCounts {
 }
 
 /// How to scan a folder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanOptions {
     /// Descend into subdirectories. Hidden ones are never descended either way.
     pub recursive: bool,

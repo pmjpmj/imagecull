@@ -8,12 +8,19 @@
 use imagecull_core::ExitCode;
 use imagecull_core::omlx::{Catalog, MIN_DECISION_VERSION};
 
-use crate::cli::ServerArgs;
+use crate::cli::CommonArgs;
 use crate::progress::plural;
 
 /// Run the command and return the process exit code.
-pub fn run(args: &ServerArgs) -> u8 {
-    let client = match args.client() {
+pub fn run(args: &CommonArgs) -> u8 {
+    let effective = match args.effective(args.overrides()) {
+        Ok(effective) => effective,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::Fatal.code();
+        }
+    };
+    let client = match args.client(&effective) {
         Ok(client) => client,
         Err(message) => {
             eprintln!("error: {message}");
@@ -33,7 +40,7 @@ pub fn run(args: &ServerArgs) -> u8 {
                     &catalog,
                     version.as_deref(),
                     client.endpoint().as_str(),
-                    args.model()
+                    args.alias(&effective)
                 )
             );
             ExitCode::Ok.code()

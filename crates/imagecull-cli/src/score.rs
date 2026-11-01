@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use imagecull_core::config::Effective;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel};
 use imagecull_core::systemone::Adapter;
@@ -20,11 +21,21 @@ use crate::progress::{Terminal, Verbosity, kilobytes, left_out, plural};
 
 /// Run the command and return the process exit code.
 pub fn run(args: &ScoreArgs) -> u8 {
+    // The effective config first: a bad config file, or a `--config` that names
+    // nothing, must stop the run before a single frame is read.
+    let effective = match args.common.effective(args.overrides()) {
+        Ok(effective) => effective,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::Fatal.code();
+        }
+    };
+
     if args.dry_run {
-        return dry_run_command(args);
+        return dry_run_command(args, &effective);
     }
 
-    let rubric = match Rubric::load(args.rubric.as_deref()) {
+    let rubric = match Rubric::load(effective.rubric.as_deref()) {
         Ok(rubric) => rubric,
         Err(error) => {
             eprintln!("error: {error}");
@@ -33,18 +44,21 @@ pub fn run(args: &ScoreArgs) -> u8 {
     };
     let mut config = scoring::Config::new(
         rubric,
-        args.server.model.clone(),
-        args.params(),
-        args.scan_options(),
-        args.shoot_context.clone(),
-        args.outputs(),
+        effective.model.clone(),
+        effective.params,
+        effective.scan(args.limit),
+        effective.shoot_context.clone(),
+        effective.outputs.clone(),
     );
     // What the run does with the ledger beside its CSV, whether an identical
-    // preview may reuse an outcome, and which server to record in the header.
+    // preview may reuse an outcome, which server to record in the header, and
+    // which config file these values came from.
     config.ledger = args.ledger_mode();
-    config.dedupe = !args.no_dedupe;
-    config.endpoint = Some(args.server.endpoint.clone());
-    let client = match args.server.client() {
+    config.dedupe = effective.dedupe;
+    config.csv_rewrite_every = effective.csv_rewrite_every;
+    config.endpoint = Some(effective.endpoint.clone());
+    config.source = effective.source.clone();
+    let client = match args.common.client(&effective) {
         Ok(client) => client,
         Err(message) => {
             eprintln!("error: {message}");
@@ -98,13 +112,14 @@ fn install_cancel_handler(cancel: &Arc<Cancel>) {
     }
 }
 
-/// `--dry-run`: the bytes a run would send, written out, no HTTP at all.
-fn dry_run_command(args: &ScoreArgs) -> u8 {
+/// `--dry-run`: the bytes a run would send, written out, no HTTP at all. It uses
+/// the same effective config, so a dry run previews what the real run would.
+fn dry_run_command(args: &ScoreArgs, effective: &Effective) -> u8 {
     match dry_run::render_previews(
         &args.dir,
         &args.previews_dir,
-        &args.scan_options(),
-        &args.params(),
+        &effective.scan(args.limit),
+        &effective.params,
     ) {
         Ok(export) => {
             print!("{}", render(&export));
