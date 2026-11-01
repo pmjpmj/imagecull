@@ -18,6 +18,71 @@ pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
 use imagecull_core::report::Outputs;
+use imagecull_core::rubric::Rubric;
+
+/// A rubric in TOML, written the way the embedded one is, so a test can change
+/// one word and see only the hash move.
+pub fn rubric_toml(model: &str, overall_instruction: &str) -> String {
+    let legend: String = (0..=10)
+        .map(|level| format!("{{ key = \"{level}\", description = \"level {level}\" }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
+model = "{model}"
+
+[[question]]
+id = "overall"
+type = "score"
+instructions = "{overall_instruction}"
+criteria = [{legend}]
+
+[[question]]
+id = "technical"
+type = "score"
+instructions = "Judge technical quality only."
+criteria = [{legend}]
+
+[[question]]
+id = "composition"
+type = "score"
+instructions = "Judge composition only."
+criteria = [{legend}]
+
+[[question]]
+id = "impact"
+type = "score"
+instructions = "Judge impact only."
+criteria = [{legend}]
+
+[[question]]
+id = "stars"
+type = "choice"
+instructions = "How many stars?"
+criteria = [
+    {{ key = "1", description = "reject" }},
+    {{ key = "2", description = "poor" }},
+    {{ key = "3", description = "ok" }},
+    {{ key = "4", description = "strong" }},
+    {{ key = "5", description = "excellent" }},
+]
+
+[[question]]
+id = "verdict"
+type = "choice"
+instructions = "Would you keep it?"
+criteria = [
+    {{ key = "dislike", description = "no" }},
+    {{ key = "neutral", description = "maybe" }},
+    {{ key = "like", description = "yes" }},
+]
+"#
+    )
+}
+
+pub fn rubric(model: &str, overall_instruction: &str) -> Rubric {
+    Rubric::from_toml(&rubric_toml(model, overall_instruction)).expect("a valid rubric")
+}
 
 /// A temp shoot folder holding `files`, creating subfolders as needed.
 pub fn shoot(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
@@ -32,12 +97,16 @@ pub fn shoot(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
     dir
 }
 
-/// Where the report of a test that reads the answers from the run itself goes:
-/// the null device. A run always writes its CSV, and it must never write into
-/// the folder it is scoring.
+/// Where the report of a test that reads the answers from the run itself goes: a
+/// throwaway directory nobody looks at.
+///
+/// A run always writes its CSV and the ledger beside it, and it must never write
+/// into the folder it is scoring. The directory is kept rather than deleted, so
+/// the path stays valid for the length of the run.
 pub fn unwatched() -> Outputs {
+    let dir = tempfile::tempdir().expect("a temp dir").keep();
     Outputs {
-        csv: "/dev/null".into(),
+        csv: dir.join("scores.csv"),
         json_scores: None,
         absolute: false,
     }

@@ -362,7 +362,7 @@ fn json_scores_keeps_the_raw_answer_document_of_every_frame() {
 }
 
 #[test]
-fn a_run_writes_the_csv_and_nothing_else_unless_json_scores_is_asked_for() {
+fn a_run_writes_the_csv_with_its_ledger_beside_it_and_nothing_else() {
     let shoot = Shoot::new(&[("DSC_0001.NEF", nef(support::jpeg(64, 32, 80)))]);
     let decider = Scripted::always_reading(1);
 
@@ -374,7 +374,7 @@ fn a_run_writes_the_csv_and_nothing_else_unless_json_scores_is_asked_for() {
     )
     .expect("a run");
 
-    let written: Vec<String> = fs::read_dir(shoot.out.path())
+    let mut written: Vec<String> = fs::read_dir(shoot.out.path())
         .expect("the report folder")
         .map(|entry| {
             entry
@@ -384,5 +384,10 @@ fn a_run_writes_the_csv_and_nothing_else_unless_json_scores_is_asked_for() {
                 .into_owned()
         })
         .collect();
-    assert_eq!(written, ["scores.csv"]);
+    written.sort();
+    assert_eq!(
+        written,
+        ["scores.csv", "scores.ledger.jsonl"],
+        "the CSV, and the ledger a resume reads: nothing else"
+    );
 }

@@ -15,7 +15,10 @@
 //! rules that keep a long run honest: the taxonomy's retries and its aborting
 //! kinds ([`error`]), the preflight that runs before the first frame, the
 //! cancellation flag between files ([`scoring::Cancel`]) and the run's own exit
-//! classification ([`scoring::Ending`]).
+//! classification ([`scoring::Ending`]). The ledger beside the CSV ([`ledger`])
+//! is what lets a run be interrupted: each frame is recorded and flushed as it
+//! is judged, `--resume` skips what is already there, and the CSV is rendered
+//! from those records.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -28,6 +31,7 @@ pub mod doctor;
 pub mod dry_run;
 pub mod error;
 pub mod ingest;
+pub mod ledger;
 pub mod omlx;
 pub mod preprocess;
 pub mod preview;
@@ -40,6 +44,7 @@ pub mod version;
 
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
+pub use ledger::{FileIdentity, Ledger, LedgerMode, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use reading::{Answers, Confidences, Reading, Verdict};
 pub use report::Outputs;

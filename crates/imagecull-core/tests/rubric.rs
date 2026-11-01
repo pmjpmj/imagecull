@@ -6,72 +6,11 @@
 
 use std::fs;
 
+mod support;
+
 use imagecull_core::omlx;
 use imagecull_core::rubric::{Criterion, QuestionKind, Rubric};
-
-/// A rubric in TOML, written the way the embedded one is, so a test can change
-/// one word and see only the hash move.
-fn rubric_toml(model: &str, overall_instruction: &str) -> String {
-    let legend: String = (0..=10)
-        .map(|level| format!("{{ key = \"{level}\", description = \"level {level}\" }}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        r#"
-model = "{model}"
-
-[[question]]
-id = "overall"
-type = "score"
-instructions = "{overall_instruction}"
-criteria = [{legend}]
-
-[[question]]
-id = "technical"
-type = "score"
-instructions = "Judge technical quality only."
-criteria = [{legend}]
-
-[[question]]
-id = "composition"
-type = "score"
-instructions = "Judge composition only."
-criteria = [{legend}]
-
-[[question]]
-id = "impact"
-type = "score"
-instructions = "Judge impact only."
-criteria = [{legend}]
-
-[[question]]
-id = "stars"
-type = "choice"
-instructions = "How many stars?"
-criteria = [
-    {{ key = "1", description = "reject" }},
-    {{ key = "2", description = "poor" }},
-    {{ key = "3", description = "ok" }},
-    {{ key = "4", description = "strong" }},
-    {{ key = "5", description = "excellent" }},
-]
-
-[[question]]
-id = "verdict"
-type = "choice"
-instructions = "Would you keep it?"
-criteria = [
-    {{ key = "dislike", description = "no" }},
-    {{ key = "neutral", description = "maybe" }},
-    {{ key = "like", description = "yes" }},
-]
-"#
-    )
-}
-
-fn rubric(model: &str, overall_instruction: &str) -> Rubric {
-    Rubric::from_toml(&rubric_toml(model, overall_instruction)).expect("a valid rubric")
-}
+use support::{rubric, rubric_toml};
 
 #[test]
 fn the_embedded_rubric_asks_the_six_questions_in_declaration_order() {
