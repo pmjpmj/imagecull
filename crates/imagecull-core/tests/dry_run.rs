@@ -92,7 +92,10 @@ fn every_accepted_file_gets_exactly_one_preview_and_the_folder_shape_is_mirrored
     let first = export.frames[0].outcome.as_ref().expect("a preview");
     assert_eq!((first.width, first.height), (64, 48));
     assert_eq!(first.preview, dsc1);
-    assert_eq!(first.jpeg_bytes, fs::metadata(&dsc1).expect("metadata").len() as usize);
+    assert_eq!(
+        first.jpeg_bytes,
+        fs::metadata(&dsc1).expect("metadata").len() as usize
+    );
 }
 
 #[test]
@@ -117,7 +120,10 @@ fn a_file_without_an_embedded_preview_is_classified_and_the_run_continues() {
 
     let failures: Vec<&dry_run::Frame> = export.failures().collect();
     assert_eq!(failures.len(), 1);
-    let error = failures[0].outcome.as_ref().expect_err("a classified error");
+    let error = failures[0]
+        .outcome
+        .as_ref()
+        .expect_err("a classified error");
     assert_eq!(error.kind(), Some(ErrorKind::NoPreview));
     assert!(
         error.message().contains("DSC_0001.NEF"),
@@ -194,7 +200,11 @@ fn a_dng_gets_a_row_that_says_this_build_cannot_read_it() {
     )
     .expect("an unreadable format is a row, not a stopped run");
 
-    assert_eq!(export.frames.len(), 2, "the .DNG is accepted and gets its row");
+    assert_eq!(
+        export.frames.len(),
+        2,
+        "the .DNG is accepted and gets its row"
+    );
     assert_eq!(export.written(), 1, "the NEF still scores");
     let dng = &export.frames[0];
     assert_eq!(dng.source.relative.to_string_lossy(), "DSC_0001.DNG");
@@ -304,5 +314,9 @@ fn the_cap_and_quality_flags_reach_the_previews() {
     let decoded = image::load_from_memory(&fs::read(&written.preview).expect("read"))
         .expect("decode")
         .to_rgb8();
-    assert_eq!(decoded.dimensions(), (100, 50), "the file on disk is capped too");
+    assert_eq!(
+        decoded.dimensions(),
+        (100, 50),
+        "the file on disk is capped too"
+    );
 }

@@ -34,7 +34,13 @@ fn accepted(scan: &ingest::Scan) -> Vec<String> {
 fn raw_extensions_are_accepted_in_any_case_and_the_rest_are_counted() {
     let dir = shoot();
     for name in [
-        "a.NEF", "b.nrw", "c.DnG", "d.nef.bak", "e.jpg", "f.MOV", "notes.txt",
+        "a.NEF",
+        "b.nrw",
+        "c.DnG",
+        "d.nef.bak",
+        "e.jpg",
+        "f.MOV",
+        "notes.txt",
     ] {
         touch(dir.path(), name);
     }
@@ -83,7 +89,12 @@ fn finder_noise_is_ignored_and_counted_and_hidden_directories_are_never_descende
 #[test]
 fn recursion_is_opt_in_and_still_never_descends_into_hidden_directories() {
     let dir = shoot();
-    for name in ["a.NEF", "sub/nested.NEF", ".cache/deep.NEF", "sub/.hidden/x.NEF"] {
+    for name in [
+        "a.NEF",
+        "sub/nested.NEF",
+        ".cache/deep.NEF",
+        "sub/.hidden/x.NEF",
+    ] {
         touch(dir.path(), name);
     }
 
@@ -100,7 +111,10 @@ fn recursion_is_opt_in_and_still_never_descends_into_hidden_directories() {
     .expect("scan");
 
     assert_eq!(accepted(&deep), ["a.NEF", "sub/nested.NEF"]);
-    assert_eq!(deep.counts.hidden_directories, 2, ".cache and sub/.hidden hold no shoot");
+    assert_eq!(
+        deep.counts.hidden_directories, 2,
+        ".cache and sub/.hidden hold no shoot"
+    );
 }
 
 #[test]

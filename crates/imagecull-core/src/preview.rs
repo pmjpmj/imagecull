@@ -67,13 +67,10 @@ pub fn extract(path: &Path) -> Result<Embedded> {
 /// choice is spelled out here because it is an acceptance criterion, not an
 /// upstream detail: the largest-by-bytes `Medium` preview must never win.
 fn largest_by_area(previews: &[Preview]) -> Option<Preview> {
-    previews
-        .iter()
-        .copied()
-        .max_by_key(|preview| {
-            let size = preview.size();
-            u64::from(size.width) * u64::from(size.height)
-        })
+    previews.iter().copied().max_by_key(|preview| {
+        let size = preview.size();
+        u64::from(size.width) * u64::from(size.height)
+    })
 }
 
 /// The file's name alone, for messages that end up in a CSV cell.
