@@ -2,9 +2,9 @@
 //!
 //! The columns are the spec's table verbatim (spec §9.2), in its order, so a
 //! photographer who has read the spec reads the file without a legend. A row is
-//! accumulated as each frame is produced rather than rebuilt from the finished
-//! run, so a long run can be flushed mid-flight and a ledger can become the
-//! source of the rows without touching this writer.
+//! rendered from a ledger record as that record is produced rather than rebuilt
+//! from the finished run, so a long run can be flushed mid-flight and the CSV is
+//! always the ledger's own account of itself.
 //!
 //! RFC 4180 above all: a filename may contain a comma, a quote or a line break,
 //! and every cell is UTF-8. Values are the model's own numbers at the precision
@@ -20,8 +20,7 @@ use serde_json::{Map, Value};
 use crate::error::{Error, ErrorKind, Result};
 use crate::ingest::SourceFile;
 use crate::reading::Answers;
-use crate::rubric::RubricHash;
-use crate::scoring::{Frame, Usage};
+use crate::scoring::Usage;
 
 /// The `status` a row carries when nothing went wrong (spec §10).
 pub const OK: &str = "ok";
@@ -77,8 +76,8 @@ pub struct Row {
     pub document: Option<Value>,
     /// Why the row has no answers; `None` means it has them.
     pub failure: Option<Failure>,
-    /// The first frame whose identical preview this row reuses (spec §9.3,
-    /// ticket 05). Empty until dedupe lands.
+    /// The first frame whose identical preview this row reuses (spec §9.3): the
+    /// frame that paid for the request this row's numbers came from.
     pub duplicate_of: Option<String>,
     /// The rubric's short hash: the row's provenance at a glance.
     pub rubric_hash: String,
@@ -87,32 +86,6 @@ pub struct Row {
 }
 
 impl Row {
-    /// The row for one frame, as the run just produced it.
-    pub fn of(frame: &Frame, rubric_hash: &RubricHash, model: &str) -> Row {
-        let mut row = Row {
-            source: frame.source.clone(),
-            answers: None,
-            usage: None,
-            document: None,
-            failure: None,
-            duplicate_of: None,
-            rubric_hash: rubric_hash.short().to_string(),
-            model: model.to_string(),
-        };
-        match &frame.outcome {
-            Err(error) => row.failure = Some(Failure::of(error)),
-            Ok(reading) => {
-                row.usage = Some(reading.usage);
-                row.document = Some(reading.document.clone());
-                match &reading.answers {
-                    Ok(answers) => row.answers = Some(answers.clone()),
-                    Err(error) => row.failure = Some(Failure::of(error)),
-                }
-            }
-        }
-        row
-    }
-
     /// The `status` column: `ok`, or the kind that cost the frame its values.
     pub fn status(&self) -> &'static str {
         self.failure
@@ -120,6 +93,10 @@ impl Row {
             .map_or(OK, |failure| failure.kind.as_str())
     }
 }
+
+// The rows are built from ledger records (`ledger::Record::row`) rather than
+// from whatever the run happens to hold in memory, so a resumed frame and a
+// freshly judged one are rendered by the same code.
 
 /// A failed row's `status` and `error` columns, kept together so they cannot
 /// disagree about whether the row failed.

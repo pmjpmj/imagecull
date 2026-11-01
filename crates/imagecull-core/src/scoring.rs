@@ -15,8 +15,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::error::{ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
+use crate::ledger::{FileIdentity, Header, Ledger, LedgerMode, Record, ResumeKey};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::reading::{self, Reading};
@@ -81,7 +85,10 @@ pub struct Response {
 }
 
 /// Token and latency numbers for one request (spec §9.1).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Recorded in the ledger as they were read, so a resumed frame costs nothing to
+/// report and a duplicate row reports what its request actually cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Prompt size, when the server reported it.
     pub input_tokens: Option<u64>,
@@ -188,6 +195,12 @@ impl RetryPolicy {
     }
 }
 
+/// How many rows accumulate between CSV rewrites: the spec's 25 (spec §9.3).
+///
+/// A run rewrites the CSV from what it has judged, so a killed run leaves a
+/// readable spreadsheet behind instead of nothing.
+pub const DEFAULT_CSV_REWRITE_EVERY: usize = 25;
+
 /// An effective scoring run: which rubric, which alias, how to look at the
 /// folder, how to prepare each frame, and where the report goes.
 #[derive(Debug, Clone)]
@@ -207,6 +220,17 @@ pub struct Config {
     pub retry: RetryPolicy,
     /// Where the CSV and the raw answers are written.
     pub outputs: Outputs,
+    /// What to do with a ledger that is already beside the CSV (spec §9.3).
+    pub ledger: LedgerMode,
+    /// Whether an identical preview may reuse an earlier frame's outcome
+    /// (spec §9.3); `--no-dedupe` turns it off.
+    pub dedupe: bool,
+    /// How many rows accumulate between CSV rewrites.
+    pub csv_rewrite_every: usize,
+    /// The server this run talks to, recorded in the ledger's header for
+    /// provenance. `None` when the decider has no endpoint of its own, as every
+    /// test's fake has.
+    pub endpoint: Option<String>,
 }
 
 impl Config {
@@ -232,6 +256,10 @@ impl Config {
             shoot_context,
             retry: RetryPolicy::default(),
             outputs,
+            ledger: LedgerMode::default(),
+            dedupe: true,
+            csv_rewrite_every: DEFAULT_CSV_REWRITE_EVERY,
+            endpoint: None,
         }
     }
 
@@ -256,6 +284,11 @@ pub struct Run {
     /// One entry per file the run got to, in ingest order. A run that stopped
     /// early has one entry for the frame that stopped it and nothing after.
     pub frames: Vec<Frame>,
+    /// How many frames the resumed ledger already held: judged, never re-asked.
+    pub resumed: usize,
+    /// How many frames reused an identical preview's outcome instead of costing
+    /// a request.
+    pub duplicates: usize,
     /// How the run ended, which is also what it exits as.
     pub ending: Ending,
 }
@@ -326,32 +359,61 @@ pub struct Frame {
 /// the other 399. The failures whose kind says a retry cannot help — a rejected
 /// rubric, a malformed body, a server that never answered — stop the run
 /// instead, and the rows judged so far are written either way. A cancellation
-/// stops the run between files, and its rows are written too. Each frame
-/// becomes its report row as it is produced, from the frame in hand rather than
-/// from the finished run, so the rows can be flushed as they arrive.
+/// stops the run between files, and its rows are written too.
+///
+/// Every frame becomes a ledger record as it is produced, and its report row is
+/// rendered from that record — so the CSV is a view of the ledger, the CSV can
+/// be rewritten mid-run, and a frame the ledger already holds is skipped rather
+/// than asked again (spec §9.3). An identical preview reuses the earlier frame's
+/// outcome and still gets its own row.
 pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel) -> Result<Run> {
     let scan = ingest::scan(shoot, &config.scan)?;
-    // Before the first frame, and before any report is written: a server that
-    // cannot answer must cost seconds, not a shoot.
+    // Before the first frame, and before any report or ledger is written: a
+    // server that cannot answer must cost seconds, not a shoot.
     decider.preflight()?;
     let rubric_hash = config.rubric_hash();
+    let header = Header::new(&rubric_hash, &config.model, config.endpoint.as_deref());
+    let mut ledger = Ledger::open(&config.outputs.csv, header, config.ledger)?;
     let mut frames = Vec::with_capacity(scan.files.len());
-    let mut rows = Vec::with_capacity(scan.files.len());
+    let mut rows: Vec<Row> = Vec::with_capacity(scan.files.len());
     let mut ending = Ending::Completed;
+    let mut resumed = 0;
+    let mut duplicates = 0;
     for source in &scan.files {
         if cancel.is_cancelled() {
             ending = Ending::Interrupted;
             break;
         }
-        let frame = judge(source, config, decider);
-        let stops_run = frame
+        let identity = FileIdentity::of(&source.path).ok();
+        if let Some(identity) = identity
+            && let Some(record) = ledger.recorded(&ResumeKey::new(display_name(source), identity))
+        {
+            frames.push(record.frame(source.clone()));
+            rows.push(record.row(source.clone(), &rubric_hash, &config.model));
+            resumed += 1;
+            continue;
+        }
+        let judged = judge(source, config, decider, &rubric_hash, identity, &ledger);
+        let stops_run = judged
+            .frame
             .outcome
             .as_ref()
             .err()
             .filter(|error| error.recovery().aborts_run())
             .map(ToString::to_string);
-        rows.push(Row::of(&frame, &rubric_hash, &config.model));
-        frames.push(frame);
+        if judged.record.duplicate_of.is_some() {
+            duplicates += 1;
+        }
+        rows.push(
+            judged
+                .record
+                .row(source.clone(), &rubric_hash, &config.model),
+        );
+        frames.push(judged.frame);
+        ledger.append(judged.record)?;
+        if config.csv_rewrite_every > 0 && rows.len().is_multiple_of(config.csv_rewrite_every) {
+            report::write(&rows, &config.outputs)?;
+        }
         if let Some(reason) = stops_run {
             ending = Ending::Aborted { reason };
             break;
@@ -364,29 +426,138 @@ pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel
         counts: scan.counts,
         total: scan.files.len(),
         frames,
+        resumed,
+        duplicates,
         ending,
     })
 }
 
-/// One file, all the way to a reading: prepare, ask, read.
+/// One frame, judged: the run's frame, and the ledger's record of it.
+struct Judged {
+    frame: Frame,
+    record: Record,
+}
+
+/// One file, all the way to a record: prepare, reuse or ask, read.
 ///
 /// This is the only place a frame becomes a request, which is what makes the
-/// exact bytes, dimensions and questions handed to [`Decider`] assertable.
-fn judge(source: &SourceFile, config: &Config, decider: &dyn Decider) -> Frame {
-    let outcome = prepare(source, &config.params).and_then(|preview| {
-        let request = Request {
-            model: &config.model,
-            rubric: &config.rubric,
-            state: State::for_frame(display_name(source), config.shoot_context.clone()),
-            preview: &preview,
-        };
-        decide(decider, &request, &config.retry)
-            .map(|response| reading::read(&config.rubric, response))
-    });
-    Frame {
+/// exact bytes, dimensions and questions handed to [`Decider`] assertable, and
+/// the only place an outcome may be reused: the key covers the bytes that would
+/// go out, the state they would go out in, and the rubric that would read them.
+fn judge(
+    source: &SourceFile,
+    config: &Config,
+    decider: &dyn Decider,
+    rubric_hash: &RubricHash,
+    identity: Option<FileIdentity>,
+    ledger: &Ledger,
+) -> Judged {
+    let encoded = match prepare(source, &config.params) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            let frame = Frame {
+                source: source.clone(),
+                outcome: Err(error),
+            };
+            let record = Record::of(&frame, identity, None, None, None);
+            return Judged { frame, record };
+        }
+    };
+    let preview_sha256 = preview_sha256(&encoded);
+    let name = display_name(source);
+    let state = State::for_frame(name.clone(), config.shoot_context.clone());
+    let dedupe_key = config
+        .dedupe
+        .then(|| dedupe_key(&preview_sha256, &state, rubric_hash, &config.model));
+    // A frame is never a duplicate of itself: a file whose mtime changed is
+    // scored again even when the bytes it renders to did not (spec §32).
+    if let Some(reused) = dedupe_key
+        .as_deref()
+        .and_then(|key| ledger.reusable(key))
+        .filter(|reused| reused.file != name)
+    {
+        let frame = reused.frame(source.clone());
+        let record = Record::of(
+            &frame,
+            identity,
+            Some(&preview_sha256),
+            dedupe_key.as_deref(),
+            Some(&reused.file),
+        );
+        return Judged { frame, record };
+    }
+    let request = Request {
+        model: &config.model,
+        rubric: &config.rubric,
+        state,
+        preview: &encoded,
+    };
+    let outcome = decide(decider, &request, &config.retry)
+        .map(|response| reading::read(&config.rubric, response));
+    let frame = Frame {
         source: source.clone(),
         outcome,
+    };
+    let record = Record::of(
+        &frame,
+        identity,
+        Some(&preview_sha256),
+        dedupe_key.as_deref(),
+        None,
+    );
+    Judged { frame, record }
+}
+
+/// The SHA-256 of the bytes actually sent, as 64 lowercase hex characters: what
+/// the ledger records, and what a burst's identical previews have in common.
+fn preview_sha256(preview: &Encoded) -> String {
+    let mut digest = Sha256::new();
+    digest.update(&preview.jpeg);
+    hex(digest.finalize())
+}
+
+/// The key an identical preview is reused under: the bytes sent, the state the
+/// frame is judged in, and the rubric's identity (ADR 0002).
+///
+/// The filename is deliberately absent. It is part of the state the model reads,
+/// but it is the photographer's label and never something the picture shows, and
+/// two frames of one burst always have different names: a key that covered it
+/// could never fire, which is the opposite of what a dedupe key is for.
+fn dedupe_key(
+    preview_sha256: &str,
+    state: &State,
+    rubric_hash: &RubricHash,
+    model: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    // Length-prefixed, so no value can forge a field boundary.
+    let mut field = |value: &str| {
+        digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(value.as_bytes());
+    };
+    field("imagecull-dedupe-v1");
+    field(preview_sha256);
+    field(&state.task);
+    match &state.shoot_context {
+        Some(context) => {
+            field("with-context");
+            field(context);
+        }
+        None => field("without-context"),
     }
+    field(rubric_hash.as_str());
+    field(model);
+    hex(digest.finalize())
+}
+
+/// `bytes` as lowercase hex characters.
+fn hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Ask the model one frame's question, retrying only the transient failures
@@ -422,6 +593,6 @@ pub(crate) fn prepare(source: &SourceFile, params: &Params) -> Result<Encoded> {
 /// The name a frame is reported under: its path inside the shoot folder, so
 /// subfolder runs stay unambiguous and the CSV's `file` column is the same
 /// string the model was told.
-fn display_name(source: &SourceFile) -> String {
+pub(crate) fn display_name(source: &SourceFile) -> String {
     source.relative.to_string_lossy().into_owned()
 }

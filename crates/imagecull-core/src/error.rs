@@ -73,6 +73,15 @@ impl ErrorKind {
         }
     }
 
+    /// The kind a `status` string names, if it names one (`"ok"` names no kind:
+    /// that is the absence of an error). The ledger reads its records back with
+    /// this, so a stored status and a live one cannot drift apart.
+    pub fn from_status(status: &str) -> Option<ErrorKind> {
+        ErrorKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == status)
+    }
+
     /// The kind for an HTTP status this taxonomy names, if it names it.
     ///
     /// The whole 5xx range is one kind because the retry rule treats it as one:

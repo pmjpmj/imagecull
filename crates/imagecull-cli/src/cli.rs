@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use imagecull_core::ingest::ScanOptions;
+use imagecull_core::ledger::LedgerMode;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::Params;
 use imagecull_core::report::Outputs;
@@ -181,6 +182,20 @@ pub struct ScoreArgs {
     /// Write absolute paths in the CSV instead of paths inside the shoot folder
     #[arg(long)]
     pub absolute: bool,
+
+    /// Pick up an interrupted run: frames the ledger beside the CSV already
+    /// holds are not scored again
+    #[arg(long, conflicts_with = "fresh")]
+    pub resume: bool,
+
+    /// Throw the ledger beside the CSV away and score every frame again
+    #[arg(long)]
+    pub fresh: bool,
+
+    /// Score every frame independently instead of reusing the outcome of an
+    /// identical preview
+    #[arg(long)]
+    pub no_dedupe: bool,
 }
 
 /// The `--version` line: the version, and the rubric compiled into the binary.
@@ -236,6 +251,22 @@ impl ScoreArgs {
             csv: self.out.clone(),
             json_scores: self.json_scores.clone(),
             absolute: self.absolute,
+        }
+    }
+
+    /// What the run does with a ledger that is already beside its CSV.
+    ///
+    /// Neither flag is a deliberate choice too: a plain `score` is a new run, so
+    /// it starts the ledger over — after the same rubric-and-model check
+    /// `--resume` makes, because two rubrics silently sharing a ledger is the
+    /// failure that check exists to prevent (spec §28, §33).
+    pub fn ledger_mode(&self) -> LedgerMode {
+        if self.fresh {
+            LedgerMode::Discard
+        } else if self.resume {
+            LedgerMode::Resume
+        } else {
+            LedgerMode::Restart
         }
     }
 }
@@ -371,6 +402,41 @@ mod tests {
             Some("street at dusk, high ISO expected")
         );
         assert_eq!(args.server.timeout, 240);
+    }
+
+    /// The three flags that decide what a run does with a ledger it finds
+    /// beside its CSV: neither is a new run, and the two conflict.
+    #[test]
+    fn score_takes_the_ledger_and_dedupe_flags() {
+        let Command::Score(args) = parse(&["score", "shoot"]) else {
+            panic!("not a score command");
+        };
+        assert!(!args.resume && !args.fresh && !args.no_dedupe);
+        assert_eq!(
+            args.ledger_mode(),
+            LedgerMode::Restart,
+            "a plain score starts the ledger over, after the mismatch check"
+        );
+
+        let Command::Score(args) = parse(&["score", "shoot", "--resume"]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(args.ledger_mode(), LedgerMode::Resume);
+
+        let Command::Score(args) = parse(&["score", "shoot", "--fresh"]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(args.ledger_mode(), LedgerMode::Discard);
+
+        let Command::Score(args) = parse(&["score", "shoot", "--no-dedupe"]) else {
+            panic!("not a score command");
+        };
+        assert!(args.no_dedupe);
+    }
+
+    #[test]
+    fn resuming_and_starting_fresh_are_opposite_answers() {
+        assert!(parse_result(&["score", "shoot", "--resume", "--fresh"]).is_err());
     }
 
     #[test]

@@ -167,7 +167,7 @@ One seam, at the top of the core:
 - A JSONL ledger lives beside the output CSV. First record is a versioned header (rubric hash, model, endpoint, start time); each subsequent record is a row with file name, size, mtime in nanoseconds, sent-preview SHA-256, status, the full outcome, and a timestamp.
 - Every record is appended and flushed immediately. Recovery scans for the last parseable line and truncates anything after it, so a `SIGKILL` mid-write cannot poison the file.
 - Resume key is `(file, size, mtime_ns)`: any change means re-score.
-- Dedupe key is the SHA-256 of the **sent preview bytes**: an identical preview reuses the earlier outcome, since the model is deterministic for identical bytes. Disabled with `--no-dedupe`.
+- Dedupe key is the SHA-256 of the **sent preview bytes**, plus everything else the model reads — task framing, shoot context, rubric hash, model alias — but **not the filename**: an identical preview judged in the same state reuses the earlier outcome, since the model is deterministic for identical bytes, while two frames of one burst (which always have different names) still dedupe. Disabled with `--no-dedupe`. `docs/adr/0002-dedupe-keys-the-state-but-not-the-filename.md` records why the filename is excluded.
 - **Burst policy:** every NEF gets its own CSV row; deduplicated frames carry the first frame's scores plus `duplicate_of`. The ledger saves the requests; the CSV stays one row per file so a filename is never missing.
 - `--fresh` discards the ledger. A rubric-hash or model mismatch without `--fresh` is a hard error with an actionable message.
 - The CSV is rewritten from the ledger every 25 rows (configurable) and at exit.
@@ -232,7 +232,7 @@ Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad argum
 
 ### Determinism
 
-A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce a byte-identical CSV. This is an acceptance criterion, not an aspiration, and the cache key `(preview_sha256, rubric_hash, model)` encodes it.
+A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce a byte-identical CSV. This is an acceptance criterion, not an aspiration, and the reuse key — sent bytes, request state, rubric hash and model (ADR 0002) — encodes it.
 
 ### Defaults locked in this session
 

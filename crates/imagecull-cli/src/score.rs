@@ -29,7 +29,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
             return ExitCode::Fatal.code();
         }
     };
-    let config = scoring::Config::new(
+    let mut config = scoring::Config::new(
         rubric,
         args.server.model.clone(),
         args.params(),
@@ -37,6 +37,11 @@ pub fn run(args: &ScoreArgs) -> u8 {
         args.shoot_context.clone(),
         args.outputs(),
     );
+    // What the run does with the ledger beside its CSV, whether an identical
+    // preview may reuse an outcome, and which server to record in the header.
+    config.ledger = args.ledger_mode();
+    config.dedupe = !args.no_dedupe;
+    config.endpoint = Some(args.server.endpoint.clone());
     let client = match args.server.client() {
         Ok(client) => client,
         Err(message) => {
@@ -137,6 +142,12 @@ pub fn render_run(run: &Run) -> String {
 /// and — when it did not finish — what stopped it.
 fn summary(run: &Run) -> String {
     let mut parts = vec![format!("{} of {} scored", run.scored(), run.total)];
+    if run.resumed > 0 {
+        parts.push(format!("{} resumed", run.resumed));
+    }
+    if run.duplicates > 0 {
+        parts.push(format!("{} deduplicated", run.duplicates));
+    }
     if run.failed() > 0 {
         parts.push(format!("{} failed", run.failed()));
     }
@@ -316,6 +327,8 @@ mod tests {
             counts: ScanCounts::default(),
             total: frames.len(),
             frames,
+            resumed: 0,
+            duplicates: 0,
             ending: Ending::Completed,
         }
     }
