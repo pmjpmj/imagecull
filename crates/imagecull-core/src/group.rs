@@ -37,6 +37,9 @@
 //! rubric wording invalidates scores.
 
 use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
@@ -346,10 +349,15 @@ pub struct Grouping {
 /// names. Which group they land in does not depend on that: equal times are
 /// inside any gap, and the serial, settings and scene gates are blind to names.
 pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
-    let timed: Vec<usize> = (0..facts.len())
-        .filter(|&index| facts[index].captured.is_some() && facts[index].signature.is_some())
+    // A frame is timed when it can be placed in a moment at all: no capture
+    // time or no signature and there is nothing to compare, so it is its own
+    // group. The mask is read once per frame in the loop below, which is what
+    // keeps the undated tail linear on a shoot of thousands.
+    let timed: Vec<bool> = facts
+        .iter()
+        .map(|frame| frame.captured.is_some() && frame.signature.is_some())
         .collect();
-    let mut ordered = timed.clone();
+    let mut ordered: Vec<usize> = (0..facts.len()).filter(|&index| timed[index]).collect();
     ordered.sort_by_key(|&index| (facts[index].captured, index));
 
     let mut groups: Vec<Grouping> = Vec::new();
@@ -365,8 +373,8 @@ pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
         });
     }
 
-    for index in 0..facts.len() {
-        if !timed.contains(&index) {
+    for (index, &timed) in timed.iter().enumerate() {
+        if !timed {
             groups.push(Grouping {
                 members: vec![index],
             });
@@ -430,6 +438,13 @@ pub struct Options {
     pub scan: ScanOptions,
     /// How close two frames must be.
     pub thresholds: Thresholds,
+    /// How many frames to read at once: `None` is one per core the machine has.
+    ///
+    /// A scheduling decision, not a semantic one. A reading is a pure function
+    /// of one path, so the degree changes how long the pass takes and nothing it
+    /// says — the same frames under the same thresholds give the same plan, the
+    /// same CSV and the same [`grouping_hash`] at any degree.
+    pub jobs: Option<usize>,
 }
 
 /// One frame of the plan: where it is, which group it is in, and what the pixels
@@ -473,7 +488,13 @@ pub struct Plan {
     pub counts: ScanCounts,
     /// How long the whole pass took: the measured cost, which is evidence, not
     /// an estimate.
+    ///
+    /// Wall clock, so with more than one job it is the shoot's price rather
+    /// than one frame's, and [`Plan::jobs`] is what makes the per-frame figure
+    /// readable as the price it is.
     pub elapsed: Duration,
+    /// How many frames were read at once.
+    pub jobs: usize,
 }
 
 impl Plan {
@@ -519,18 +540,24 @@ pub struct GroupRow<'a> {
 /// One pass, one decode per frame, no requests. A frame that cannot be read is a
 /// row with empty measures and a status, and a group of its own: one odd file
 /// never costs the photographer the other 399.
+///
+/// The frames are independent of each other — a reading is a pure function of
+/// one path, and grouping is a pass over what the readings said — so they are
+/// read [`Options::jobs`] at a time, and the plan is assembled in the scan's
+/// order whatever order they finished in. Everything the pass costs is local
+/// CPU, which is why this command is worth threading where `score` is not: no
+/// server is serialising anything here.
 pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
     check(&options.thresholds)?;
     let started = Instant::now();
     let scan = ingest::scan(shoot, &options.scan)?;
 
-    let mut readings: Vec<FrameRead> = Vec::with_capacity(scan.files.len());
-    let mut facts: Vec<Facts> = Vec::with_capacity(scan.files.len());
-    for source in &scan.files {
-        let reading = read(source);
-        facts.push(reading.facts.clone());
-        readings.push(reading);
-    }
+    let jobs = degree(options.jobs, scan.files.len());
+    let readings = read_all(&scan.files, jobs);
+    let facts: Vec<Facts> = readings
+        .iter()
+        .map(|reading| reading.facts.clone())
+        .collect();
 
     let groupings = assign(&facts, &options.thresholds);
     let mut frames = Vec::with_capacity(scan.files.len());
@@ -554,6 +581,7 @@ pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
         hash: grouping_hash(&options.thresholds),
         counts: scan.counts,
         elapsed: started.elapsed(),
+        jobs,
     })
 }
 
@@ -573,6 +601,50 @@ fn check(thresholds: &Thresholds) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// How many frames to read at once: what was asked for, or one per core, and
+/// never more workers than there are frames to read.
+fn degree(asked: Option<usize>, frames: usize) -> usize {
+    asked
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+        .clamp(1, frames.max(1))
+}
+
+/// Read every frame, `jobs` of them at a time, and return them in the scan's
+/// order.
+///
+/// The slot is the frame's index, not the order a worker happened to finish, so
+/// the plan, the CSV and the hash are the same bytes at any degree. Below two
+/// jobs this is a plain loop: a shoot of one file has nothing to overlap, and
+/// keeping the serial path exact is what lets a slow run be reproduced.
+fn read_all(sources: &[SourceFile], jobs: usize) -> Vec<FrameRead> {
+    if jobs < 2 || sources.len() < 2 {
+        return sources.iter().map(read).collect();
+    }
+    let slots: Vec<OnceLock<FrameRead>> = sources.iter().map(|_| OnceLock::new()).collect();
+    let cursor = AtomicUsize::new(0);
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                while let Some(index) = next(&cursor, sources.len()) {
+                    // The only writer of slot `index` is the worker that claimed
+                    // it, so a lost race is impossible and nothing locks.
+                    let _ = slots[index].set(read(&sources[index]));
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.into_inner().expect("a joined scope filled every slot"))
+        .collect()
+}
+
+/// The next unclaimed frame index, or `None` when the shoot has been handed out.
+fn next(cursor: &AtomicUsize, frames: usize) -> Option<usize> {
+    let index = cursor.fetch_add(1, Ordering::Relaxed);
+    (index < frames).then_some(index)
 }
 
 /// What one file yielded.

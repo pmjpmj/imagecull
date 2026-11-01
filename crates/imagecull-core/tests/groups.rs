@@ -83,6 +83,19 @@ fn plan(dir: &Path, thresholds: Thresholds) -> group::Plan {
         &group::Options {
             scan: ScanOptions::default(),
             thresholds,
+            jobs: None,
+        },
+    )
+    .expect("a folder that scans")
+}
+
+/// Run the grouping pass at a fixed degree of parallelism.
+fn plan_at(dir: &Path, jobs: usize) -> group::Plan {
+    group::run(
+        dir,
+        &group::Options {
+            jobs: Some(jobs),
+            ..group::Options::default()
         },
     )
     .expect("a folder that scans")
@@ -512,5 +525,49 @@ fn frames_that_share_a_timestamp_group_the_same_whatever_they_are_called() {
         sizes(&plan(first.path(), Thresholds::default())),
         sizes(&plan(second.path(), Thresholds::default())),
         "a name cannot move a frame between groups"
+    );
+}
+
+#[test]
+fn reading_frames_at_a_time_changes_the_cost_and_nothing_else() {
+    // A degree of parallelism is a scheduling decision: the same folder has to
+    // give the same bytes at one job and at many, which is what makes the plan,
+    // the CSV and the grouping hash comparable between machines.
+    let image = scene();
+    let other = scenes::tilted_scene(WIDTH, HEIGHT, 30.0);
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "20"),
+        moment("DSC_0003.NEF", &other, 0, "40"),
+        moment("DSC_0004.NEF", &image, 3, "00"),
+        moment("DSC_0005.NEF", &image, 3, "20"),
+        moment("DSC_0006.NEF", &other, 9, "00"),
+    ]);
+    // A frame nothing can be read from keeps its row, and its place, at any
+    // degree: a failure must not reorder the plan around it.
+    std::fs::write(dir.path().join("DSC_0007.NEF"), b"not a raw file")
+        .expect("write a broken file");
+
+    let serial = plan_at(dir.path(), 1);
+    for jobs in [2, 3, 8] {
+        let parallel = plan_at(dir.path(), jobs);
+        assert_eq!(parallel.jobs, jobs.min(serial.frames.len()));
+        assert_eq!(
+            group::render_csv(&parallel),
+            group::render_csv(&serial),
+            "{jobs} jobs wrote a different CSV"
+        );
+        assert_eq!(parallel.hash, serial.hash);
+        assert_eq!(
+            groups_by_name(&parallel),
+            groups_by_name(&serial),
+            "{jobs} jobs grouped the frames differently"
+        );
+    }
+    assert_eq!(serial.jobs, 1);
+    assert_eq!(
+        serial.failures().count(),
+        1,
+        "the unreadable frame is the only failure"
     );
 }

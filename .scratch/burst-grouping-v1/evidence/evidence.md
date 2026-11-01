@@ -118,6 +118,39 @@ Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
 is the determinism claim: every column is a function of the files and the two
 thresholds.
 
+### Frames are read a few at a time (2026-11-02, after this slice landed)
+
+Everything the pass costs is local CPU and every frame's reading is a pure
+function of one path, so `group::run` now reads `--jobs` frames at once (`-j`,
+every core when unset) and assembles the plan in the scan's order whatever order
+the workers finished in. `score` is left alone: its wall time is the server's,
+not the client's (SPEC §14).
+
+Same 3000×2000 folder, 40 frames, release build, M-series:
+
+| `--jobs` | wall | ms/frame |
+|---|---|---|
+| 1 (the old serial path) | 2.82 s | 70.5 |
+| 2 | 1.43 s | 35.9 |
+| 4 | 0.73 s | 18.2 |
+| 8 | 0.38 s | 9.4 |
+| 12 | 0.33 s | 8.2 |
+
+7.4× at 8 jobs, so the decode is scaling and not a shared lock. The summary now
+qualifies `ms/frame` with how many frames were in flight, because the number is
+wall clock: it is the shoot's price, not one frame's.
+
+A degree of parallelism is a scheduling decision, so the bytes must not move:
+`reading_frames_at_a_time_changes_the_cost_and_nothing_else` asserts that 1, 2, 3
+and 8 jobs give the same CSV, the same hash and the same groups over a folder
+with a pan, a gap and one unreadable file in it. `assign` also stopped scanning
+the timed list once per frame (O(n²) → linear), which is invisible at 400 frames
+and not at 20,000.
+
+Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
+is the determinism claim: every column is a function of the files and the two
+thresholds.
+
 Grouping sanity, the same 3000×2000 folder (frames one second apart):
 
 | command | result | grouping hash |

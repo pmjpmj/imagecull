@@ -124,6 +124,9 @@ fn summary(plan: &Plan, written: &Path) -> String {
         "{} measured, {per_frame:.0} ms/frame",
         duration_text(plan.elapsed)
     ));
+    if plan.jobs > 1 {
+        parts.push(format!("{0} frames at a time", plan.jobs));
+    }
     parts.push(format!("grouping hash {}", short_hash(&plan.hash)));
     parts.push(format!("wrote {}", written.display()));
     parts.extend(left_out(&plan.counts));
@@ -191,6 +194,7 @@ mod tests {
             hash: "0123456789abcdef".to_string(),
             counts: ScanCounts::default(),
             elapsed: Duration::from_secs(2),
+            jobs: 1,
         }
     }
 
@@ -234,6 +238,19 @@ mod tests {
              grouping hash 01234567 · wrote out/groups.csv\n"
         ));
         assert_eq!(exit_code(&plan), ExitCode::Ok.code());
+    }
+
+    #[test]
+    fn a_pass_that_read_frames_together_says_how_many() {
+        let mut plan = plan(vec![measured("DSC_0001.NEF", 1, 1, 1)], 1);
+        plan.jobs = 8;
+
+        let rendered = render(&plan, Path::new("groups.csv"));
+
+        assert!(
+            rendered.contains("8 frames at a time"),
+            "the per-frame figure is wall clock, so the degree belongs beside it: {rendered}"
+        );
     }
 
     #[test]
