@@ -65,6 +65,25 @@ A frame's place within its group under the ranking rule, 1 being the group's
 best. Not comparable between groups, and not a score.
 _Avoid_: winner score, rating, position
 
+**Keeper**:
+The frame of a group the group's comparison chose to keep, when the group has
+more than one. A judgement about a set of frames, made once for the group, never
+a claim about the frame's quality on its own — a keeper can be rated below
+another shoot's best frame.
+_Avoid_: pick, winner, best, hero, selection
+
+**Non-keeper**:
+Every other frame of a group. The frame the cull has to get past, not a frame the
+tool has judged bad.
+_Avoid_: loser, reject, reject flag, duplicate, outtake
+
+**Red mark**:
+The `xmp:Label` value `Red`, written to a group's non-keepers so the cull can
+filter for them. A statement about the group, not a rating and not a reject:
+written only where the label is ours to write, and never removed, because a
+label this tool did not write is not a label it may delete.
+_Avoid_: flag, reject, colour label, label (unqualified)
+
 ### What a run reads
 
 **Rubric**:
@@ -116,8 +135,9 @@ _Avoid_: global config, default config
 ### What a run leaves behind
 
 **Sidecar**:
-The `.xmp` file beside a frame, carrying its rating and the provenance of that
-rating. The run's only lasting record of a frame.
+The `.xmp` file beside a frame, carrying its rating, the provenance of that
+rating, and — when a group decided one — whether the frame is its keeper and the
+red mark that follows from that. The run's only lasting record of a frame.
 _Avoid_: metadata file, XMP file, report, output
 
 **Skip**:

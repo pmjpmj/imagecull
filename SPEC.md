@@ -323,10 +323,12 @@ opened read-only and never modified.
 | `imagecull:version` | the binary's version | provenance: which build wrote it |
 
 There is no `imagecull:stars`: the rating is `xmp:Rating`, and two properties
-holding one number is a disagreement waiting to happen. `xmp:Label` and
-`xmpDM:pick` are never written — the colour label and the pick flag are the
-photographer's, and `xmp:Rating=-1` (the destructive reject) is never written by
-this tool.
+holding one number is a disagreement waiting to happen. `xmpDM:pick` is never
+written, and `xmp:Rating=-1` (the destructive reject) is never written by this
+tool. `xmp:Label` is written in exactly one case — `Red` on a group's
+non-keepers, and only where the label is absent or was written by a previous run
+([ADR 0007](docs/adr/0007-the-red-label-marks-the-non-keepers.md)); every other
+label, on every other frame, stays the photographer's.
 
 ### 9.2 Merge, not replace
 

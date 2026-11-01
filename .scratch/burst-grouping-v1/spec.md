@@ -238,6 +238,16 @@ and `group_note` naming the deciding clause (`rating`, `only_survivor`,
 `excluded:focus`, `excluded:sharpness`, `excluded:roll`) — the same spirit as
 `duplicate_of`: a column that explains itself.
 
+> **Amended 2026-11-19 by [ADR 0007](../../docs/adr/0007-the-red-label-marks-the-non-keepers.md).**
+> The columns above have no container left: the CSV and the ledger are deleted, and
+> a group rank in a sidecar is unreadable without the folder. The winner is now
+> chosen by one **comparative request** over the group's previews, the keeper
+> gets no label, and every other frame of the group gets `xmp:Label="Red"`;
+> the verdict and its provenance are recorded in the `imagecull:` namespace.
+> The ordered criteria below survive as the **shortlist** that decides who enters
+> the comparison when the request's context budget binds — they no longer choose
+> a winner, and they never change a rating.
+
 The summary prints the group count and the mean and largest group size. (The
 rule-disagreement rate this section used to specify compared the group winner to
 the frame with the highest `overall`; [ADR 0005](../../docs/adr/0005-one-rating-replaces-six-questions.md)
@@ -330,7 +340,7 @@ loudly.
 | issue | scope | done when |
 |---|---|---|
 | 01 | `group` + `measure` in core, and `imagecull groups <DIR>` — grouping and measures, model-free, no report wiring | the synthetic answer key ranks as expected, and a real shoot's groups have been eyeballed against the photographer's own picks |
-| 02 | `score` records grouping and measures; ranking rule; CSV columns; `grouping_hash` in the ledger; summary stats | a burst-heavy shoot lands with a best-of-group column that the photographer agrees with more often than not |
+| 02 | `score` groups and measures; one comparative request per group; the keeper unmarked and every other frame `xmp:Label="Red"`; verdict in the `imagecull:` namespace; summary warnings for unmarked and stale reds | a burst-heavy shoot culls by filtering Red, and the photographer disagrees with the keeper more often than not only on frames they would have kept anyway |
 
 Issue 02 is `needs-info` until 01's evidence lands, because two of its inputs are
 numbers the evidence has to supply: which acutance formulation wins (`p95` local
