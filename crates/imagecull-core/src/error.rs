@@ -39,8 +39,8 @@ pub enum ErrorKind {
     Timeout,
     /// The answer was missing, misnamed, or of the wrong type.
     BadResponse,
-    /// The frame's existing sidecar has no description this tool can safely
-    /// write into, so the sidecar was left alone.
+    /// The frame's existing sidecar cannot be read as text, or has no
+    /// description this tool can safely write into, so it was left alone.
     XmpUnreadable,
     /// The frame's sidecar could not be written: a read-only mount, a full
     /// disk, a file that is not ours to replace.

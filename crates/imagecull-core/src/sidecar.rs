@@ -13,7 +13,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
@@ -191,21 +190,14 @@ fn our_properties(properties: &Properties) -> [(&'static str, String); 6] {
     ]
 }
 
-/// Whether the tag already carries exactly the properties this run would write.
+/// Whether the tag already carries exactly the properties this run would write:
+/// one list of what we own, so a comparison and a write can never disagree.
 fn is_current(attributes: &[Attribute], properties: &Properties) -> bool {
-    let value = |name: &str| {
+    our_properties(properties).iter().all(|(name, expected)| {
         attributes
             .iter()
-            .find(|attribute| attribute.name == name)
-            .map(|attribute| attribute.value.clone())
-    };
-    value("xmp:Rating").as_deref() == Some(properties.rating.to_string().as_str())
-        && value("imagecull:confStars").as_deref()
-            == Some(properties.conf_stars.to_string().as_str())
-        && value("imagecull:model").as_deref() == Some(properties.model.as_str())
-        && value("imagecull:rubricHash").as_deref() == Some(properties.rubric_hash.as_str())
-        && value("imagecull:scoredAt").as_deref() == Some(properties.scored_at.as_str())
-        && value("imagecull:version").as_deref() == Some(properties.version.as_str())
+            .any(|attribute| attribute.name == *name && attribute.value == *expected)
+    })
 }
 
 /// One attribute of an opening tag, as the spans a text edit needs.
@@ -651,55 +643,8 @@ impl Properties {
             conf_stars,
             model: model.to_string(),
             rubric_hash: rubric_hash.to_string(),
-            scored_at: scored_at_now(),
+            scored_at: crate::time::now_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
-}
-
-/// The current time, RFC 3339 in UTC.
-pub fn scored_at_now() -> String {
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    timestamp(since_epoch.as_secs())
-}
-
-/// `seconds` since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
-fn timestamp(seconds: u64) -> String {
-    let (year, month, day) = civil_from_days(seconds / 86_400);
-    let rest = seconds % 86_400;
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        (rest % 3600) / 60,
-        rest % 60
-    )
-}
-
-/// The calendar date of a day count from 1970-01-01: Howard Hinnant's
-/// `civil_from_days`, which is the whole of the calendar arithmetic a timestamp
-/// needs and one dependency cheaper than a date crate.
-fn civil_from_days(days: u64) -> (i64, u64, u64) {
-    let days = i64::try_from(days).unwrap_or(i64::MAX);
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    (
-        year,
-        u64::try_from(month).unwrap_or(0),
-        u64::try_from(day).unwrap_or(0),
-    )
 }

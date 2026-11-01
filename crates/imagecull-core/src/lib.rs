@@ -53,6 +53,7 @@ pub mod rubric;
 pub mod scoring;
 pub mod sidecar;
 pub mod systemone;
+pub mod time;
 pub mod version;
 
 pub use config::{ConfigFile, Effective, Env, Loaded, Resolved};

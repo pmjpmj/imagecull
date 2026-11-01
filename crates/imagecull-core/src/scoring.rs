@@ -386,6 +386,9 @@ pub enum Outcome {
         /// The rating that was already there.
         rating: u8,
     },
+    /// The run refused the frame before asking: its sidecar could not be read or
+    /// written into, or belonged to another application.
+    Refused(Error),
 }
 
 /// What became of a frame's sidecar.
@@ -409,14 +412,16 @@ impl Frame {
         }
     }
 
-    /// The answer, when this frame has one that was persisted or is about to be.
+    /// The answer, when this frame has one the run can stand behind.
     pub fn answers(&self) -> Option<&Answers> {
         match (&self.outcome, &self.persisted) {
             // A rating whose sidecar could not be written is nowhere: the run
             // scored nothing it can stand behind, so it does not claim to have.
             (Outcome::Asked(_), Persisted::Failed(_)) => None,
             (Outcome::Asked(Ok(reading)), _) => reading.answers.as_ref().ok(),
-            (Outcome::Kept { .. }, _) | (Outcome::Asked(Err(_)), _) => None,
+            (Outcome::Kept { .. }, _) | (Outcome::Asked(Err(_)), _) | (Outcome::Refused(_), _) => {
+                None
+            }
         }
     }
 
@@ -424,7 +429,7 @@ impl Frame {
     pub fn kept(&self) -> Option<u8> {
         match self.outcome {
             Outcome::Kept { rating } => Some(rating),
-            Outcome::Asked(_) => None,
+            Outcome::Asked(_) | Outcome::Refused(_) => None,
         }
     }
 
@@ -438,7 +443,7 @@ impl Frame {
         }
         match &self.outcome {
             Outcome::Kept { .. } => None,
-            Outcome::Asked(Err(error)) => Some(Failure::of(error)),
+            Outcome::Refused(error) | Outcome::Asked(Err(error)) => Some(Failure::of(error)),
             Outcome::Asked(Ok(reading)) => reading.answers.as_ref().err().map(Failure::of),
         }
     }
@@ -512,8 +517,10 @@ pub fn run(
             Err(error) => {
                 // A sidecar nobody can read is a frame this run cannot write, and
                 // no reason to spend a request on it.
-                let judged = Judged::refused(source, error);
-                account.judged(position + 1, judged);
+                if let Some(reason) = account.refused(position + 1, source, error) {
+                    ending = Ending::Aborted { reason };
+                    break;
+                }
                 continue;
             }
         };
@@ -539,8 +546,10 @@ pub fn run(
                     path.display()
                 ),
             );
-            let judged = Judged::refused(source, error);
-            account.judged(position + 1, judged);
+            if let Some(reason) = account.refused(position + 1, source, error) {
+                ending = Ending::Aborted { reason };
+                break;
+            }
             continue;
         }
         // A sidecar another application owns is not ours to write into, whatever
@@ -554,10 +563,7 @@ pub fn run(
                     path.display()
                 ),
             );
-            let judged = Judged::refused(source, error);
-            let stops_run = judged.stops_run();
-            account.judged(position + 1, judged);
-            if let Some(reason) = stops_run {
+            if let Some(reason) = account.refused(position + 1, source, error) {
                 ending = Ending::Aborted { reason };
                 break;
             }
@@ -703,6 +709,19 @@ impl<'a> Account<'a> {
         self.record(index, frame, None, None);
     }
 
+    /// A frame the run refused before asking: an unreadable sidecar, a document
+    /// nothing can be written into, another application's file.
+    ///
+    /// Returns the reason the run must stop, when the refusal is one that would
+    /// repeat for every frame after it — one door, so the three refusals cannot
+    /// drift apart about whether they stop a run.
+    fn refused(&mut self, index: usize, source: &SourceFile, error: Error) -> Option<String> {
+        let judged = Judged::refused(source, error);
+        let stops_run = judged.stops_run();
+        self.judged(index, judged);
+        stops_run
+    }
+
     /// A frame this run judged, and what became of its sidecar.
     fn judged(&mut self, index: usize, judged: Judged) {
         if judged.duplicate_of.is_some() {
@@ -733,10 +752,7 @@ impl<'a> Account<'a> {
             duplicate_of.as_deref(),
             self.began.elapsed(),
         )));
-        let reading = match &frame.outcome {
-            Outcome::Asked(Ok(reading)) => Some(reading),
-            _ => None,
-        };
+        let reading = frame.reading();
         let row = Row {
             source: frame.source.clone(),
             answers: frame.answers().cloned(),
@@ -822,7 +838,7 @@ impl Judged {
         Judged {
             frame: Frame {
                 source: source.clone(),
-                outcome: Outcome::Asked(Err(error)),
+                outcome: Outcome::Refused(error),
                 persisted: Persisted::NotAttempted,
             },
             preview: None,

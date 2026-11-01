@@ -13,7 +13,7 @@ mod support;
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use imagecull_core::Error;
 use imagecull_core::error::ErrorKind;
@@ -611,11 +611,4 @@ fn the_summary_says_how_much_of_the_folder_this_run_rated() {
         "kept ratings are not re-counted"
     );
     assert_eq!(summary.rating.map(|rating| rating.median), Some(4.0));
-}
-
-/// The dedupe map lives in `run`, so a `&mut` slot for a scripted decider is only
-/// ever read: this keeps the decider's own accounting honest.
-#[allow(dead_code)]
-fn _parallel_safe(decider: Arc<Scripted>) {
-    let _ = decider.seen();
 }

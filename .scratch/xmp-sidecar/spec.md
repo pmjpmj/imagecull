@@ -235,9 +235,10 @@ frame says `kept`, and the headline counts only what this run rated.
 1. **Skip check.** Read the frame's existing sidecar. If `xmp:Rating` there is an
    integer 1–5 and `--force` was not given: no preview extraction, no request, no
    write. The frame is reported `4★ kept` and counted as skipped.
-2. **Foreign guard.** If `--force` was given and the sidecar carries a
-   `darktable:` namespace and `--allow-foreign` was not given: `xmp_foreign`, no
-   write, no request.
+2. **Foreign guard.** If the sidecar carries a `darktable:` namespace and
+   `--allow-foreign` was not given: `xmp_foreign`, no write, no request. `--force`
+   does not bypass this — the two flags answer different questions ("rate again"
+   and "write into another application's file"), and one must not imply the other.
 3. **Prepare, dedupe, request, read** — unchanged from today, except that the
    dedupe memory is an in-process map from dedupe key to the earlier frame's
    answers. Dedupe no longer reaches across processes; that is the accepted cost
@@ -287,9 +288,12 @@ empty file, no touch.
   `imagecull.toml` that sets them fails with a message naming what moved and
   where the ratings go now.
 - **Rendering:**
-  - frame line, skipped frame: `DSC_0421.NEF   4/412   4★ kept   0.0s`
-  - headline: `scored 20 of 400 in 0m41s · ok 20 · 380 skipped`
-    (`scored` counts only ratings this run produced)
+  - frame line, skipped frame: `4/412  DSC_0421.NEF  4★ kept  eta 6m2s` — the
+    existing line's field order and spacing, with `kept` where a latency would be
+  - headline (`--quiet`'s single line, the one a script reads): `scored 20 of 400
+    in 0m41s · ok 20 · 380 skipped`, where `scored` counts only ratings this run
+    produced. The default summary block keeps its `scored:` and `status:` lines
+    and adds `skipped: N` to its optional second line.
   - optional second line, only when non-zero: `skipped: 380`
   - every frame skipped: exits 0, with one warning: every frame already had a
     rating, pass `--force` to rate them again.
