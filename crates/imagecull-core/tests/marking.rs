@@ -1,7 +1,7 @@
 //! The group's keeper, and the red mark on everyone else: a folder in, sidecars
 //! with a verdict out.
 //!
-//! Every test here runs a real `scoring::run` over a synthetic burst — NEF-shaped
+//! Every test here runs a real `scoring::run` over a synthetic group — NEF-shaped
 //! files with a real capture time, one body, one exposure and one scene — with a
 //! scripted [`Decider`] behind the same seam every per-frame request goes through.
 //! Nothing here needs a server, and nothing here asserts on an internal helper:
@@ -21,23 +21,23 @@ use imagecull_core::ErrorKind;
 use imagecull_core::error::Error;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
-use imagecull_core::progress::{Event, Reporter, Silent};
+use imagecull_core::progress::Silent;
 use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, Groups, Run};
-use imagecull_core::sidecar::{self, Outputs, Prior, Writer, Written};
-use support::ExifFacts;
+use imagecull_core::sidecar::{self, Outputs, Prior, Properties, Writer, Written};
 use support::decider::{Scripted, document, keeper};
 use support::scenes;
+use support::{ExifFacts, Warnings};
 use tempfile::TempDir;
 
-/// The size the burst tests draw at: above the comparison edge, so a comparison
+/// The size the group tests draw at: above the comparison edge, so a comparison
 /// preview really is rendered down, and small enough that a decode costs
 /// milliseconds.
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 427;
 
-/// One frame of a synthetic burst.
-struct Shot {
+/// One frame of a synthetic group.
+struct Frame {
     name: &'static str,
     image: RgbImage,
     /// The second of `10:00:0s` it was taken in.
@@ -53,9 +53,9 @@ struct Shot {
 /// The brightness is what makes two frames different pictures of one moment: the
 /// bytes differ, so dedupe does not merge them, and the grouping signature is
 /// mean-subtracted, so they are still the same scene.
-fn shot(name: &'static str, stops: f32, second: u8, subsecond: &'static str) -> Shot {
+fn frame(name: &'static str, stops: f32, second: u8, subsecond: &'static str) -> Frame {
     let scene = scenes::scene(WIDTH, HEIGHT);
-    Shot {
+    Frame {
         name,
         image: if stops == 0.0 {
             scene
@@ -67,14 +67,14 @@ fn shot(name: &'static str, stops: f32, second: u8, subsecond: &'static str) -> 
     }
 }
 
-/// Write `shots` into a fresh folder as NEFs of one moment.
-fn burst(shots: &[Shot]) -> TempDir {
+/// Write `frames` into a fresh folder as NEFs of one moment.
+fn group(frames: &[Frame]) -> TempDir {
     let dir = tempfile::tempdir().expect("a temp dir");
-    for shot in shots {
-        let jpeg = support::jpeg_of(&shot.image, 92);
+    for frame in frames {
+        let jpeg = support::jpeg_of(&frame.image, 92);
         let facts = ExifFacts {
-            captured: Some(format!("2026:11:02 10:00:{:02}", shot.second)),
-            subsecond: Some(shot.subsecond.to_string()),
+            captured: Some(format!("2026:11:02 10:00:{:02}", frame.second)),
+            subsecond: Some(frame.subsecond.to_string()),
             serial: Some("3001".to_string()),
             iso: Some(200),
             exposure_time: Some((1, 500)),
@@ -82,7 +82,7 @@ fn burst(shots: &[Shot]) -> TempDir {
             focal_length: Some((50, 1)),
         };
         fs::write(
-            dir.path().join(shot.name),
+            dir.path().join(frame.name),
             support::nef_with(1, &[jpeg], &facts),
         )
         .expect("write a NEF");
@@ -147,26 +147,6 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// A reporter that keeps every warning.
-#[derive(Default)]
-struct Warnings {
-    messages: Mutex<Vec<String>>,
-}
-
-impl Reporter for Warnings {
-    fn event(&self, event: Event) {
-        if let Event::Warning(warning) = event {
-            self.messages.lock().expect("a lock").push(warning.message);
-        }
-    }
-}
-
-impl Warnings {
-    fn messages(&self) -> Vec<String> {
-        self.messages.lock().expect("a lock").clone()
-    }
-}
-
 /// A writer that refuses every write, so the abort path is reachable without
 /// fighting the filesystem.
 struct Refusing;
@@ -219,11 +199,11 @@ impl Recorder {
 
 #[test]
 fn a_group_of_two_or_more_gets_one_comparative_request_and_a_lone_frame_gets_none() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
         // Forty seconds later: a different moment, and a group of one.
-        shot("DSC_0003.NEF", 0.4, 40, "00"),
+        frame("DSC_0003.NEF", 0.4, 40, "00"),
     ]);
     let decider = Scripted::answering(vec![
         Ok(document("5")),
@@ -239,7 +219,7 @@ fn a_group_of_two_or_more_gets_one_comparative_request_and_a_lone_frame_gets_non
     assert_eq!(
         compared.len(),
         1,
-        "one request for the burst, and none for the frame of its own"
+        "one request for the group, and none for the frame of its own"
     );
     assert_eq!(compared[0].previews.len(), 2, "both frames of the group");
     assert_eq!(
@@ -262,10 +242,10 @@ fn a_group_of_two_or_more_gets_one_comparative_request_and_a_lone_frame_gets_non
 
 #[test]
 fn the_keeper_wears_no_label_and_every_other_frame_of_its_group_wears_red() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
-        shot("DSC_0003.NEF", 0.4, 0, "30"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.4, 0, "30"),
     ]);
     let decider = Scripted::answering(vec![
         Ok(document("5")),
@@ -291,41 +271,47 @@ fn the_keeper_wears_no_label_and_every_other_frame_of_its_group_wears_red() {
     );
 
     for name in ["DSC_0001.NEF", "DSC_0003.NEF"] {
-        let loser = sidecar_of(shoot.path(), name);
+        let non_keeper = sidecar_of(shoot.path(), name);
         assert!(
-            loser.contains("xmp:Label=\"Red\""),
-            "every other frame of the group is red: {name}: {loser}"
+            non_keeper.contains("xmp:Label=\"Red\""),
+            "every other frame of the group is red: {name}: {non_keeper}"
         );
         assert!(
-            loser.contains("imagecull:labeledBy=\"imagecull\""),
-            "a red this tool wrote says so, so a later run may rewrite it: {loser}"
-        );
-        assert!(loser.contains("imagecull:groupKeeper=\"false\""), "{loser}");
-        assert!(
-            loser.contains("imagecull:pickBy=\"comparison\""),
-            "a red is explained by what chose the keeper: {loser}"
-        );
-        assert!(loser.contains("imagecull:pickConf=\"0.71\""), "{loser}");
-        assert!(
-            loser.contains("imagecull:groupSize=\"3\"")
-                && loser.contains("imagecull:groupStart=\"2026-11-02T10:00:00.100\""),
-            "the group it lost is readable without the folder: {loser}"
+            non_keeper.contains("imagecull:labeledBy=\"imagecull\""),
+            "a red this tool wrote says so, so a later run may rewrite it: {non_keeper}"
         );
         assert!(
-            loser.contains(&format!(
+            non_keeper.contains("imagecull:groupKeeper=\"false\""),
+            "{non_keeper}"
+        );
+        assert!(
+            non_keeper.contains("imagecull:pickBy=\"comparison\""),
+            "a red is explained by what chose the keeper: {non_keeper}"
+        );
+        assert!(
+            non_keeper.contains("imagecull:pickConf=\"0.71\""),
+            "{non_keeper}"
+        );
+        assert!(
+            non_keeper.contains("imagecull:groupSize=\"3\"")
+                && non_keeper.contains("imagecull:groupStart=\"2026-11-02T10:00:00.100\""),
+            "the group it lost is readable without the folder: {non_keeper}"
+        );
+        assert!(
+            non_keeper.contains(&format!(
                 "imagecull:groupingHash=\"{}\"",
                 imagecull_core::group::grouping_hash(&imagecull_core::group::Thresholds::default())
             )),
-            "the thresholds it was decided under travel with it: {loser}"
+            "the thresholds it was decided under travel with it: {non_keeper}"
         );
-        assert!(loser.contains("imagecull:pickedAt=\""), "{loser}");
+        assert!(non_keeper.contains("imagecull:pickedAt=\""), "{non_keeper}");
     }
 
     assert_eq!(
         run.groups,
         Groups {
             groups: 1,
-            marked: 3,
+            non_keepers: 2,
             red: 2,
             ..Groups::default()
         }
@@ -334,10 +320,10 @@ fn the_keeper_wears_no_label_and_every_other_frame_of_its_group_wears_red() {
 
 #[test]
 fn a_group_larger_than_the_request_can_carry_is_narrowed_and_the_rest_are_red_and_not_compared() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
-        shot("DSC_0003.NEF", 0.4, 0, "30"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.4, 0, "30"),
     ]);
     let decider = Scripted::answering(vec![
         Ok(document("5")),
@@ -367,7 +353,7 @@ fn a_group_larger_than_the_request_can_carry_is_narrowed_and_the_rest_are_red_an
     assert!(
         left_out.contains("imagecull:groupNote=\"not_compared\"")
             && left_out.contains("imagecull:groupKeeper=\"false\""),
-        "a frame the request could not carry says so, and is red like any other loser: {left_out}"
+        "a frame the request could not carry says so, and is red like any other non-keeper: {left_out}"
     );
     assert!(
         left_out.contains("xmp:Label=\"Red\"") && left_out.contains("xmp:Rating=\"3\""),
@@ -378,10 +364,71 @@ fn a_group_larger_than_the_request_can_carry_is_narrowed_and_the_rest_are_red_an
 }
 
 #[test]
+fn a_later_groups_left_out_frame_is_the_one_that_says_so() {
+    let shoot = group(&[
+        // One moment at 10:00:00, and a second one forty seconds later: two
+        // groups, and the second one starts above frame 0 of the run.
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.4, 40, "00"),
+        frame("DSC_0004.NEF", 0.6, 40, "10"),
+        frame("DSC_0005.NEF", 0.8, 40, "20"),
+    ]);
+    let decider = Scripted::answering(vec![
+        Ok(document("4")),
+        Ok(document("4")),
+        Ok(document("3")),
+        Ok(document("5")),
+        Ok(document("4")),
+    ])
+    .comparing(vec![Ok(keeper("2", 0.90)), Ok(keeper("2", 0.80))]);
+    let mut config = config();
+    config.comparison.max = 2;
+
+    let run = run(shoot.path(), &config, &decider);
+
+    assert_eq!(
+        decider.compared().len(),
+        2,
+        "the second group is judged like the first"
+    );
+    let left_out = sidecar_of(shoot.path(), "DSC_0003.NEF");
+    assert!(
+        left_out.contains("imagecull:groupNote=\"not_compared\"")
+            && left_out.contains("imagecull:groupKeeper=\"false\"")
+            && left_out.contains("xmp:Label=\"Red\""),
+        "the weakest frame of the second group was left out, and is the one that says so: \
+         {left_out}"
+    );
+    for name in ["DSC_0004.NEF", "DSC_0005.NEF"] {
+        let compared = sidecar_of(shoot.path(), name);
+        assert!(
+            !compared.contains("imagecull:groupNote"),
+            "a frame the request did carry says nothing about being left out: {name}: {compared}"
+        );
+    }
+    let noted = [
+        "DSC_0001.NEF",
+        "DSC_0002.NEF",
+        "DSC_0003.NEF",
+        "DSC_0004.NEF",
+        "DSC_0005.NEF",
+    ]
+    .iter()
+    .filter(|name| sidecar_of(shoot.path(), name).contains("imagecull:groupNote"))
+    .count();
+    assert_eq!(
+        noted, run.groups.not_compared,
+        "the summary's count and the notes on disk are the same comparison"
+    );
+    assert_eq!(run.groups.not_compared, 1);
+}
+
+#[test]
 fn a_group_the_model_was_unsure_about_is_marked_anyway_and_counted() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
         .comparing(vec![Ok(keeper("1", 0.42))]);
@@ -390,9 +437,9 @@ fn a_group_the_model_was_unsure_about_is_marked_anyway_and_counted() {
 
     assert_eq!(
         run.groups.low_confidence, 1,
-        "a near-tie is the common case for a burst, and it is reported rather than suppressed"
+        "a near-tie is the common case for a group, and it is reported rather than suppressed"
     );
-    assert_eq!(run.groups.red, 1, "and the loser is marked anyway");
+    assert_eq!(run.groups.red, 1, "and the non-keeper is marked anyway");
     assert!(
         sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Red\""),
         "the mark is what a cull filters on, so 0.42 would have to be very wrong to withhold it"
@@ -401,9 +448,9 @@ fn a_group_the_model_was_unsure_about_is_marked_anyway_and_counted() {
 
 #[test]
 fn a_comparison_that_fails_marks_nothing_and_reports_the_group_as_undecided() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider =
         Scripted::answering(vec![Ok(document("4")), Ok(document("4"))]).comparing(vec![Err(
@@ -436,7 +483,7 @@ fn a_comparison_that_fails_marks_nothing_and_reports_the_group_as_undecided() {
         );
     }
     assert_eq!(run.groups.undecided, 1);
-    assert_eq!(run.groups.marked, 0);
+    assert_eq!(run.groups.non_keepers, 0);
     let messages = warnings.messages();
     assert_eq!(messages.len(), 1, "{messages:?}");
     assert!(
@@ -448,9 +495,9 @@ fn a_comparison_that_fails_marks_nothing_and_reports_the_group_as_undecided() {
 
 #[test]
 fn a_comparison_that_answers_nothing_is_undecided_rather_than_a_guess() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
         .comparing(vec![Ok(serde_json::json!({"answers": {}}))]);
@@ -458,7 +505,7 @@ fn a_comparison_that_answers_nothing_is_undecided_rather_than_a_guess() {
     let run = run(shoot.path(), &config(), &decider);
 
     assert_eq!(run.groups.undecided, 1);
-    assert_eq!(run.groups.marked, 0);
+    assert_eq!(run.groups.non_keepers, 0);
     assert!(
         !sidecar_of(shoot.path(), "DSC_0001.NEF").contains("xmp:Label"),
         "an unreadable answer is not a keeper, and not a red either"
@@ -467,9 +514,9 @@ fn a_comparison_that_answers_nothing_is_undecided_rather_than_a_guess() {
 
 #[test]
 fn a_label_the_photographer_wrote_is_left_alone_and_the_verdict_is_still_recorded() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let yellow = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
                   <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
@@ -499,13 +546,17 @@ fn a_label_the_photographer_wrote_is_left_alone_and_the_verdict_is_still_recorde
         "the delete set is incomplete and says so"
     );
     assert_eq!(run.groups.red, 0, "this run marked no frame red");
+    assert_eq!(
+        run.groups.non_keepers, 1,
+        "and the non-keeper it could not tint still counts as one"
+    );
 }
 
 #[test]
 fn a_red_this_tool_did_not_write_is_the_photographers_and_is_left_alone() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     // Red, and no `imagecull:labeledBy`: the photographer culls in red too, and a
     // run that assumed every red was its own would rewrite their filter.
@@ -541,10 +592,10 @@ fn a_red_this_tool_did_not_write_is_the_photographers_and_is_left_alone() {
 
 #[test]
 fn no_comparative_answer_changes_a_rating() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
-        shot("DSC_0003.NEF", 0.4, 0, "30"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.4, 0, "30"),
     ]);
     // The model keeps the frame it rated 3, so the 5★ frame of the same group is
     // the one that goes red: the mark is a judgement about the group, and the
@@ -582,9 +633,9 @@ fn no_comparative_answer_changes_a_rating() {
 
 #[test]
 fn a_frame_promoted_to_keeper_keeps_its_red_and_the_run_warns_the_folder_disagrees() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let first = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
         .comparing(vec![Ok(keeper("2", 0.62))]);
@@ -625,10 +676,63 @@ fn a_frame_promoted_to_keeper_keeps_its_red_and_the_run_warns_the_folder_disagre
 }
 
 #[test]
+fn a_forced_preview_shows_the_verdict_beside_the_rating_this_run_gave() {
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+    ]);
+    // An earlier run left a 3★ rating and no verdict, and `--force` rates the
+    // folder again: the preview must show the verdict on the rating this run
+    // produced, not on the one still in the folder.
+    let earlier = sidecar::render(
+        None,
+        &Properties {
+            rating: 3,
+            conf_stars: 0.51,
+            model: "clef-flash-oQ4e".to_string(),
+            rubric_hash: "0f1e2d3c".to_string(),
+            scored_at: "2026-11-01T09:00:00Z".to_string(),
+            version: "0.1.0".to_string(),
+        },
+    )
+    .expect("an earlier document");
+    for name in ["DSC_0001.NEF", "DSC_0002.NEF"] {
+        fs::write(sidecar::path_for(&shoot.path().join(name)), &earlier)
+            .expect("an earlier sidecar");
+    }
+    let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
+        .comparing(vec![Ok(keeper("2", 0.81))]);
+    let mut config = config();
+    config.force = true;
+    let recorder = Recorder::default();
+
+    run_through(shoot.path(), &config, &decider, &recorder);
+
+    let verdict = recorder
+        .documents()
+        .into_iter()
+        .map(|(_, document)| document)
+        .find(|document| document.contains("imagecull:groupKeeper"))
+        .expect("a verdict is previewed for every frame");
+    assert!(
+        verdict.contains("xmp:Rating=\"4\""),
+        "the verdict previews on the rating this run wrote, not the one in the folder: {verdict}"
+    );
+    assert!(
+        !verdict.contains("xmp:Rating=\"3\""),
+        "and the rating it replaced is gone, exactly as a real run would leave it: {verdict}"
+    );
+    assert!(
+        verdict.contains("imagecull:confStars=\"0.63\""),
+        "the rating's own provenance travels with it: {verdict}"
+    );
+}
+
+#[test]
 fn every_frame_is_rated_on_disk_before_any_group_is_judged() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
         .comparing(vec![Ok(keeper("1", 0.9))]);
@@ -657,23 +761,23 @@ fn every_frame_is_rated_on_disk_before_any_group_is_judged() {
     );
 
     let keeper = &written[2].1;
-    let loser = &written[3].1;
+    let non_keeper = &written[3].1;
     assert!(!keeper.contains("xmp:Label"), "{keeper}");
     assert!(
-        loser.contains("xmp:Label=\"Red\"") && loser.contains("imagecull:labeledBy"),
-        "the preview shows the label line with what was there before: {loser}"
+        non_keeper.contains("xmp:Label=\"Red\"") && non_keeper.contains("imagecull:labeledBy"),
+        "the preview shows the label line with what was there before: {non_keeper}"
     );
     assert!(
-        loser.contains("xmp:Rating=\"4\""),
-        "and the rating it was written beside: {loser}"
+        non_keeper.contains("xmp:Rating=\"4\""),
+        "and the rating it was written beside: {non_keeper}"
     );
 }
 
 #[test]
 fn a_group_the_model_cannot_hold_is_reported_with_its_own_status_and_marks_nothing() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider =
         Scripted::answering(vec![Ok(document("4")), Ok(document("4"))]).comparing(vec![Err(
@@ -696,7 +800,7 @@ fn a_group_the_model_cannot_hold_is_reported_with_its_own_status_and_marks_nothi
     .expect("a rejected group is not a rejected run");
 
     assert_eq!(run.groups.undecided, 1);
-    assert_eq!(run.groups.marked, 0);
+    assert_eq!(run.groups.non_keepers, 0);
     assert_eq!(
         decider.compared().len(),
         1,
@@ -712,9 +816,9 @@ fn a_group_the_model_cannot_hold_is_reported_with_its_own_status_and_marks_nothi
 
 #[test]
 fn a_run_that_stopped_writes_no_marks_for_the_frames_it_did_judge() {
-    let shoot = burst(&[
-        shot("DSC_0001.NEF", 0.0, 0, "10"),
-        shot("DSC_0002.NEF", 0.2, 0, "20"),
+    let shoot = group(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
     ]);
     let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("4"))])
         .comparing(vec![Ok(keeper("1", 0.9))]);

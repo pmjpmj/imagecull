@@ -394,6 +394,11 @@ pub struct Frame {
     pub outcome: Outcome,
     /// What became of the sidecar, when the run got that far.
     pub persisted: Persisted,
+    /// The document this run's rating write left beside the frame, when it left
+    /// one: what the group's verdict is merged into. A writer that prints rather
+    /// than writes leaves nothing on disk, so without this the verdict would be
+    /// merged into an earlier run's rating.
+    pub rating_document: Option<String>,
 }
 
 /// The two ways a frame leaves the model: asked, or left alone.
@@ -526,7 +531,7 @@ pub fn run(
     let total = scan.files.len();
     let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
     // Dedupe's memory: one run's answers, keyed by the question that produced
-    // them. It dies with the process, which is where bursts live anyway.
+    // them. It dies with the process, which is where groups live anyway.
     let mut reused: HashMap<String, Reused> = HashMap::new();
     let mut ending = Ending::Completed;
     for (position, source) in scan.files.iter().enumerate() {
@@ -700,10 +705,13 @@ fn persist(
             return;
         }
     };
-    frame.persisted = match writer.write(&frame.source.path, &document, Prior::earlier(existing)) {
-        Ok(_) => Persisted::Written,
-        Err(error) => Persisted::Failed(Failure::of(&error)),
-    };
+    match writer.write(&frame.source.path, &document, Prior::earlier(existing)) {
+        Ok(_) => {
+            frame.persisted = Persisted::Written;
+            frame.rating_document = Some(document);
+        }
+        Err(error) => frame.persisted = Persisted::Failed(Failure::of(&error)),
+    }
 }
 
 /// What a run made of the folder's groups: the frames it marked, the frames it
@@ -711,12 +719,16 @@ fn persist(
 ///
 /// Every count counts frames except the four that say otherwise: `groups`,
 /// `low_confidence`, `undecided` and `unwritten` count groupings or verdicts.
+/// The three that describe non-keepers — `non_keepers`, `red` and `unmarked` —
+/// count the same population, so `non_keepers` is `red` plus `unmarked` and the
+/// summary's arithmetic adds up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Groups {
     /// How many groups of two or more frames the run judged.
     pub groups: usize,
-    /// How many frames carry this run's verdict.
-    pub marked: usize,
+    /// How many non-keepers carry this run's verdict: every frame it wrote a
+    /// losing verdict beside, whether red or left to the photographer's colour.
+    pub non_keepers: usize,
     /// How many frames this run wrote `Red` on.
     pub red: usize,
     /// How many non-keepers the run left unmarked because the label on the frame
@@ -750,13 +762,22 @@ impl Groups {
 struct Rated<'a> {
     source: &'a SourceFile,
     stars: u8,
-    /// The model's confidence in the rating, kept so the document a preview run
-    /// prints is the document a real run would write.
-    confidence: f64,
+    /// The document the rating write left, and so the document the verdict is
+    /// merged into.
+    document: &'a str,
 }
 
 /// One moment under judgement: the frames of a group, what their own pixels said
 /// about them, and the hash the grouping was computed under.
+///
+/// A group's frames have two index spaces, and they are never interchangeable:
+/// a **place** is a frame's position in this group's capture order, `0..size()`,
+/// which is what [`keeper::compared`] returns and what a comparative answer
+/// names; a **member** is an index into `rated`/`readings`, which hold the run's
+/// whole rated folder. [`Moment::member`] is the only conversion between them —
+/// the two spaces coincide only for the folder's first group, so a line that
+/// compares one to the other is right for group one and wrong for every group
+/// after it.
 struct Moment<'a> {
     rated: &'a [Rated<'a>],
     readings: &'a [group::Reading],
@@ -765,7 +786,8 @@ struct Moment<'a> {
 }
 
 impl Moment<'_> {
-    /// The frame at `place` in the group's capture order.
+    /// The frame at `place` in the group's capture order, as an index into the
+    /// run's `rated` and `readings`.
     fn member(&self, place: usize) -> usize {
         self.members[place]
     }
@@ -785,7 +807,17 @@ impl Moment<'_> {
     }
 }
 
+/// Whether the group's comparison carried the frame at `place`.
+///
+/// `compared` holds places, never members. This is the one place the question is
+/// asked, so the note a frame carries and the summary's `not_compared` count are
+/// always the same comparison.
+fn carried_by_comparison(compared: &[usize], place: usize) -> bool {
+    compared.contains(&place)
+}
+
 /// What writing a frame's verdict does to its colour label.
+#[derive(Clone, Copy)]
 enum Marking {
     /// The label was written, under this tool's name: the frame is red.
     Red,
@@ -796,6 +828,47 @@ enum Marking {
     StaleRed,
     /// The keeper, whose mark is its rating.
     Keeper,
+}
+
+impl Marking {
+    /// What this frame's verdict does to its colour label, from the two facts that
+    /// decide it: whether the frame is the keeper, and what the folder already
+    /// says.
+    ///
+    /// The colour is the marking's own, so no caller can pair a verdict with the
+    /// wrong label.
+    fn of(keeper: bool, existing: Option<&str>) -> Marking {
+        let carried = existing.and_then(sidecar::existing_label);
+        if keeper {
+            // The keeper's mark is its rating. This run writes no label on it and
+            // removes none: a red it still wears is a red a later grouping
+            // disagrees with, and the summary is the only remedy the decision
+            // allows.
+            let stale = carried
+                .as_ref()
+                .is_some_and(|label| label.ours && label.value == sidecar::RED);
+            return if stale {
+                Marking::StaleRed
+            } else {
+                Marking::Keeper
+            };
+        }
+        if sidecar::label_is_ours_to_write(existing) {
+            Marking::Red
+        } else {
+            // The photographer's colour stays and the frame stays out of the
+            // delete set: the verdict is recorded, the label is not ours.
+            Marking::Unmarked
+        }
+    }
+
+    /// The label this verdict writes, when it writes one.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Marking::Red => Some(sidecar::RED),
+            Marking::Unmarked | Marking::StaleRed | Marking::Keeper => None,
+        }
+    }
 }
 
 /// The run's group pass: one comparative request per group of two or more
@@ -821,10 +894,14 @@ impl GroupPass<'_> {
             .iter()
             .filter_map(|frame| {
                 let answers = frame.answers()?;
+                // A frame whose rating reached the sidecar has the document it
+                // reached it in: the rating write and the answer are two faces of
+                // the same success.
+                let document = frame.rating_document.as_deref()?;
                 Some(Rated {
                     source: &frame.source,
                     stars: answers.stars,
-                    confidence: answers.confidence,
+                    document,
                 })
             })
             .collect();
@@ -920,22 +997,28 @@ impl GroupPass<'_> {
                 return;
             }
         };
-        counts.not_compared += moment.size() - compared.len();
+        counts.not_compared += (0..moment.size())
+            .filter(|&place| !carried_by_comparison(&compared, place))
+            .count();
         if choice.confidence < self.config.comparison.floor {
             counts.low_confidence += 1;
         }
         self.mark(moment, &compared, choice, counts);
     }
 
-    /// Write the verdict beside every member, keeper and loser alike.
+    /// Write the verdict beside every frame of the group, keeper and non-keeper
+    /// alike.
     fn mark(&self, moment: &Moment<'_>, compared: &[usize], choice: Choice, counts: &mut Groups) {
-        let keeper = moment.member(compared[choice.index()]);
+        // The keeper, as a place: the answer counted positions in the request,
+        // which carries `compared`, which holds places.
+        let keeper = compared[choice.index()];
         let start = moment.readings[moment.member(0)]
             .facts
             .captured
             .map_or_else(String::new, |captured| captured.to_string());
         let picked_at = crate::time::now_rfc3339();
-        for &member in moment.members {
+        for place in 0..moment.size() {
+            let member = moment.member(place);
             let frame = moment.rated[member];
             let path = sidecar::path_for(&frame.source.path);
             let existing = match read_sidecar(&path) {
@@ -946,95 +1029,57 @@ impl GroupPass<'_> {
                     continue;
                 }
             };
-            let is_keeper = member == keeper;
-            let (label, marking) = self.label(is_keeper, existing.as_deref());
-            let rated_document = match &existing {
-                Some(text) => Ok(text.clone()),
-                // Nothing on disk to merge into: a preview run, where writing is
-                // printing. Show the document the run would leave — the rating,
-                // then the verdict — rather than a verdict with no rating beside
-                // it.
-                None => sidecar::render(
-                    None,
-                    &Properties::now(
-                        frame.stars,
-                        frame.confidence,
-                        &self.config.model,
-                        self.config.rubric_hash().short(),
-                    ),
-                ),
-            };
+            let keeper_here = place == keeper;
+            let marking = Marking::of(keeper_here, existing.as_deref());
+            let label = marking.label();
+            // The verdict is merged into the document this run's rating write
+            // left, never into what the folder holds: a preview run writes
+            // nothing, so the sidecar on disk still carries an earlier run's
+            // rating, and a verdict previewed on top of that would show a rating
+            // no run would leave.
+            let rated = frame.document;
             let mark = sidecar::Mark {
                 label,
-                keeper: is_keeper,
+                keeper: keeper_here,
                 group_start: start.clone(),
                 group_size: moment.size(),
                 grouping_hash: moment.hash.to_string(),
                 pick_by: keeper::BY_COMPARISON.to_string(),
                 pick_conf: choice.confidence,
                 picked_at: picked_at.clone(),
-                note: (!compared.contains(&member)).then_some(sidecar::NOT_COMPARED),
+                note: (!carried_by_comparison(compared, place)).then_some(sidecar::NOT_COMPARED),
             };
-            let document =
-                match rated_document.and_then(|rated| sidecar::render_mark(&rated, &mark)) {
-                    Ok(document) => document,
-                    Err(error) => {
-                        self.unwritten(frame.source, &error);
-                        counts.unwritten += 1;
-                        continue;
-                    }
-                };
+            let document = match sidecar::render_mark(rated, &mark) {
+                Ok(document) => document,
+                Err(error) => {
+                    self.unwritten(frame.source, &error);
+                    counts.unwritten += 1;
+                    continue;
+                }
+            };
             // What this write replaces is this run's own text — the rating it
             // wrote a moment ago — so no `.bak` is owed for it.
-            let prior = match existing.as_deref() {
-                Some(text) => Prior::ThisRun(text),
-                None => Prior::Absent,
-            };
+            let prior = Prior::ThisRun(rated);
             match self.writer.write(&frame.source.path, &document, prior) {
-                Ok(_) => {
-                    counts.marked += 1;
-                    match marking {
-                        Marking::Red => counts.red += 1,
-                        Marking::Unmarked => counts.unmarked += 1,
-                        Marking::StaleRed => counts.stale_reds += 1,
-                        Marking::Keeper => {}
+                Ok(_) => match marking {
+                    // Red and unmarked are the two ways a non-keeper carries the
+                    // verdict, and they are the population the summary adds up.
+                    Marking::Red => {
+                        counts.non_keepers += 1;
+                        counts.red += 1;
                     }
-                }
+                    Marking::Unmarked => {
+                        counts.non_keepers += 1;
+                        counts.unmarked += 1;
+                    }
+                    Marking::StaleRed => counts.stale_reds += 1,
+                    Marking::Keeper => {}
+                },
                 Err(error) => {
                     self.unwritten(frame.source, &error);
                     counts.unwritten += 1;
                 }
             }
-        }
-    }
-
-    /// Whether this frame's label is written, and what that means for the
-    /// summary.
-    fn label(&self, keeper: bool, existing: Option<&str>) -> (Option<&'static str>, Marking) {
-        let carried = existing.and_then(sidecar::existing_label);
-        if keeper {
-            // The keeper's mark is its rating. This run writes no label on it and
-            // removes none: a red it still wears is a red a later grouping
-            // disagrees with, and the summary is the only remedy the decision
-            // allows.
-            let stale = carried
-                .as_ref()
-                .is_some_and(|label| label.ours && label.value == sidecar::RED);
-            return (
-                None,
-                if stale {
-                    Marking::StaleRed
-                } else {
-                    Marking::Keeper
-                },
-            );
-        }
-        if sidecar::label_is_ours_to_write(existing) {
-            (Some(sidecar::RED), Marking::Red)
-        } else {
-            // The photographer's colour stays and the frame stays out of the
-            // delete set: the verdict is recorded, the label is not ours.
-            (None, Marking::Unmarked)
         }
     }
 
@@ -1113,6 +1158,7 @@ impl<'a> Account<'a> {
             source: source.clone(),
             outcome: Outcome::Kept { rating },
             persisted: Persisted::NotAttempted,
+            rating_document: None,
         };
         self.record(index, frame, None, None);
     }
@@ -1248,6 +1294,7 @@ impl Judged {
                 source: source.clone(),
                 outcome: Outcome::Refused(error),
                 persisted: Persisted::NotAttempted,
+                rating_document: None,
             },
             preview: None,
             duplicate_of: None,
@@ -1293,6 +1340,7 @@ fn judge(
                     source: source.clone(),
                     outcome: Outcome::Asked(Err(error)),
                     persisted: Persisted::NotAttempted,
+                    rating_document: None,
                 },
                 preview: None,
                 duplicate_of: None,
@@ -1325,6 +1373,7 @@ fn judge(
                 document: reused.document.clone(),
             })),
             persisted: Persisted::NotAttempted,
+            rating_document: None,
         };
         return Judged {
             frame,
@@ -1340,8 +1389,8 @@ fn judge(
     };
     let outcome = decide(decider, &request, &config.retry)
         .map(|response| reading::read(&config.rubric, response));
-    // Only an answer is worth reusing: a timeout is not an answer, so a burst
-    // partner gets its own attempt.
+    // Only an answer is worth reusing: a timeout is not an answer, so the other
+    // frames of its group get their own attempt.
     if let Some(key) = dedupe_key
         && let Ok(reading) = &outcome
         && let Ok(answers) = &reading.answers
@@ -1361,6 +1410,7 @@ fn judge(
             source: source.clone(),
             outcome: Outcome::Asked(outcome),
             persisted: Persisted::NotAttempted,
+            rating_document: None,
         },
         preview: Some(preview),
         duplicate_of: None,
@@ -1368,7 +1418,7 @@ fn judge(
 }
 
 /// The SHA-256 of the bytes actually sent, as 64 lowercase hex characters: what
-/// the ledger records, and what a burst's identical previews have in common.
+/// the ledger records, and what a group's identical previews have in common.
 fn preview_sha256(preview: &Encoded) -> String {
     let mut digest = Sha256::new();
     digest.update(&preview.jpeg);
@@ -1380,7 +1430,7 @@ fn preview_sha256(preview: &Encoded) -> String {
 ///
 /// The filename is deliberately absent. It is part of the state the model reads,
 /// but it is the photographer's label and never something the picture shows, and
-/// two frames of one burst always have different names: a key that covered it
+/// two frames of one group always have different names: a key that covered it
 /// could never fire, which is the opposite of what a dedupe key is for.
 fn dedupe_key(
     preview_sha256: &str,

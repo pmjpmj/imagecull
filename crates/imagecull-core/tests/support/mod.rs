@@ -17,9 +17,34 @@ pub mod decider;
 pub mod scenes;
 pub mod stub;
 
+use std::sync::Mutex;
+
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
+use imagecull_core::progress::{Event, Reporter};
 use imagecull_core::rubric::Rubric;
 use imagecull_core::sidecar::Outputs;
+
+/// A reporter that keeps every warning, for the tests that assert on what a
+/// photographer is told.
+#[derive(Default)]
+pub struct Warnings {
+    messages: Mutex<Vec<String>>,
+}
+
+impl Reporter for Warnings {
+    fn event(&self, event: Event) {
+        if let Event::Warning(warning) = event {
+            self.messages.lock().expect("a lock").push(warning.message);
+        }
+    }
+}
+
+impl Warnings {
+    /// Every warning the run reported, in order.
+    pub fn messages(&self) -> Vec<String> {
+        self.messages.lock().expect("a lock").clone()
+    }
+}
 
 /// A rubric in TOML, written the way the embedded one is, so a test can change
 /// one word and see only the hash move.

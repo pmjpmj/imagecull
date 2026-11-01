@@ -140,7 +140,7 @@ pub fn render(plan: &Plan, written: &Path) -> String {
 
 /// One group: its number, its size, and the frames it spans.
 ///
-/// The span rather than every name: a photographer reading a 34-frame burst
+/// The span rather than every name: a photographer reading a 34-frame group
 /// wants to know where it starts and ends, and the CSV has the rest.
 fn group_line(row: &group::GroupRow<'_>) -> String {
     let size = row.frames.len();

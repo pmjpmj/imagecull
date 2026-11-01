@@ -97,10 +97,10 @@ impl Default for Thresholds {
 
 /// When a frame was taken, to subseconds, as the camera's clock recorded it.
 ///
-/// Ordering is by the clock's own fields, which is the order a burst happened
+/// Ordering is by the clock's own fields, which is the order a group happened
 /// in: one body's frames share a clock, and two bodies' clocks are separated by
 /// the serial gate long before their times are compared. The zone offset is not
-/// part of the order, because a burst cannot change zone.
+/// part of the order, because a group cannot change zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Capture {
     /// The year the camera's clock showed.
@@ -156,7 +156,7 @@ impl fmt::Display for Capture {
     /// which is what the file recorded and all a group's start can honestly say.
     ///
     /// The fraction is written with the digits it needs — none when there is
-    /// none, else three, six or nine — so two bursts inside one second stay
+    /// none, else three, six or nine — so two groups inside one second stay
     /// distinguishable in a sidecar read a year later.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1124,7 +1124,7 @@ mod tests {
         ];
         assert_eq!(sizes(&assign(&two_exposures, &thresholds)), vec![1, 1]);
 
-        // And an orientation that changed mid-burst is not the same
+        // And an orientation that changed mid-group is not the same
         // composition.
         let turned = vec![
             facts(0, "1", 0),

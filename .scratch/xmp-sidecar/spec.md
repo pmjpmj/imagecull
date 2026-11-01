@@ -64,7 +64,11 @@ frame says `kept`, and the headline counts only what this run rated.
    low rating is never silently turned into the destructive reject I did not ask
    for.
 5. As a photographer, I want the tool to never write `xmp:Label` or `xmpDM:pick`,
-   so that the colour label and pick flag stay mine.
+   so that the colour label and pick flag stay mine. *(One exception, decided
+   later: a group's non-keepers get `xmp:Label="Red"` — see
+   [ADR 0007](../../docs/adr/0007-the-red-label-marks-the-non-keepers.md). The
+   rule holds for every other case: a label this tool did not write is never
+   overwritten, no label is ever removed, and `xmpDM:pick` is never written.)*
 6. As a photographer, I want the rating's provenance — rubric hash, model alias,
    confidence, when it was scored, which version scored it — in a private
    namespace inside the same sidecar, so that a suspicious 4 can be traced
@@ -385,7 +389,10 @@ writer happened to be called.
 
 - Reading sidecars as resume state beyond the skip rule (no reuse of a previous
   run's confidence, latency or raw document).
-- `xmp:Label`, `xmpDM:pick`, rejection (`-1`), collections, keywords, GPS or any
+- `xmp:Label` (with the one exception of [ADR
+  0007](../../docs/adr/0007-the-red-label-marks-the-non-keepers.md): the `Red` on
+  a group's non-keepers, written only where the label is ours to write and never
+  removed), `xmpDM:pick`, rejection (`-1`), collections, keywords, GPS or any
   other catalogue field — including the spec's old "confidence in our namespace is
   preserved by other apps" claim, which stays untested here.
 - XMP embedded in the RAW. The RAW is opened read-only and never modified.

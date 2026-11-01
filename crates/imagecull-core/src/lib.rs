@@ -69,7 +69,7 @@ pub use group::{
     Thresholds,
 };
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
-pub use keeper::{Candidate, Choice, Comparison};
+pub use keeper::{Budget, Candidate, Choice, Comparison};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
     Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter, Silent, Started,
