@@ -172,7 +172,7 @@ pub struct Record {
     /// A short message, on a frame that has no answers.
     #[serde(default)]
     pub error: Option<String>,
-    /// The six answers, on a frame the model answered.
+    /// The answer, on a frame the model answered.
     #[serde(default)]
     pub answers: Option<Answers>,
     /// What the request cost, when it got far enough to cost anything.

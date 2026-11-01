@@ -121,12 +121,11 @@ report columns on `score`.
 18. As a photographer, I want the rule to be an ordered list of criteria over
     named measures, never a weighted composite, so that no invented weighting
     can hide inside a number.
-19. As a photographer, I want the model's `impact` to decide between frames that
-    are technically equal, so that the axis the model is actually good at makes
-    the call the measures cannot.
-20. As a photographer, I want the disagreement between "group winner" and
-    "highest `overall`" reported as a rate, the way `stars`/`overall` already
-    is, so that a bad rule shows up as a number instead of being reconciled away.
+19. As a photographer, I want the model's rating to decide between frames that
+    are technically equal, so that the judgement the model is actually good at
+    makes the call the measures cannot.
+20. As a photographer, I want the rule's exclusions reported per frame, so that a
+    bad rule shows up in `group_note` instead of being reconciled away.
 21. As a photographer, I want the grouping algorithm and its thresholds hashed
     into the ledger header, so that changing a threshold invalidates group ranks
     exactly as changing rubric wording invalidates scores — and never silently.
@@ -231,18 +230,18 @@ issue 01's validation:
 3. **Exclude** frames whose `roll_deg` deviates more than `roll_tolerance`
    (0.5°) from the group's median roll, **only when the group has a horizon**
    (`roll_strength` above the strength floor on a majority of the group).
-4. **Among survivors**, choose the highest `impact`; tie-break `overall`, then the
-   lowest `shake`, then filename for stability.
+4. **Among survivors**, choose the highest rating; tie-break the lowest `shake`,
+   then filename for stability.
 
 Recorded per frame: `group`, `group_size`, `group_rank` (1 = best), `is_best`,
-and `group_note` naming the deciding clause (`impact`, `only_survivor`,
+and `group_note` naming the deciding clause (`rating`, `only_survivor`,
 `excluded:focus`, `excluded:sharpness`, `excluded:roll`) — the same spirit as
 `duplicate_of`: a column that explains itself.
 
-The summary prints the group count, the mean and largest group size, and the
-**rule disagreement rate** — how often the group winner differs from the frame
-with the highest `overall` — the way `stars`/`overall` disagreement already
-prints. It is signal, not error, and it is not reconciled.
+The summary prints the group count and the mean and largest group size. (The
+rule-disagreement rate this section used to specify compared the group winner to
+the frame with the highest `overall`; [ADR 0005](../../docs/adr/0005-one-rating-replaces-six-questions.md)
+made the rating the only answer, so there is no second number to disagree with.)
 
 ---
 
@@ -316,7 +315,7 @@ loudly.
 - **Collapsing a burst to one CSV row.** Answering SPEC §17 open question 4: no.
   One row per frame, group columns added; a filename never disappears.
 - **Face, eye or expression detection.** "Eyes closed" is a model judgement in
-  this slice — it reaches the ranking only through `impact`.
+  this slice — it reaches the ranking only through the rating.
 - **Aesthetic quality from the measures.** `acutance` is not a score out of ten
   and is never to be presented as one; it ranks, in a group, against frames of
   the same scene.

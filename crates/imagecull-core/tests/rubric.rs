@@ -1,8 +1,9 @@
 //! The rubric is a file a photographer edits, so these tests treat it as one:
-//! which rubrics ship inside the binary, how one is selected, and what the hash
-//! does when the text changes. The hash is the identity of a rubric — it decides
-//! whether two CSVs may be compared and whether a resume may reuse a cached
-//! score — so its stability rules are asserted here rather than discovered later.
+//! which rubrics ship inside the binary, how one is selected, what the one
+//! question may say, and what the hash does when the text changes. The hash is
+//! the identity of a rubric — it decides whether two CSVs may be compared and
+//! whether a resume may reuse a cached answer — so its stability rules are
+//! asserted here rather than discovered later.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,21 +11,30 @@ use std::path::{Path, PathBuf};
 mod support;
 
 use imagecull_core::omlx;
-use imagecull_core::rubric::{Builtin, Criterion, QuestionKind, Rubric, RubricSource};
+use imagecull_core::rubric::{Builtin, Rubric, RubricSource};
 use support::{rubric, rubric_toml};
 
-/// The six ids, in the order every report has a column for.
-const SIX_IDS: [&str; 6] = [
-    "overall",
-    "technical",
-    "composition",
-    "impact",
-    "stars",
-    "verdict",
-];
+/// The one id, which is also the one column a report keeps values in.
+const ONE_ID: [&str; 1] = ["stars"];
 
 fn ids(rubric: &Rubric) -> Vec<&str> {
     rubric.questions().iter().map(|q| q.id()).collect()
+}
+
+/// The legend a shipped rubric offers, in key order.
+fn legend(rubric: &Rubric) -> Vec<(String, String)> {
+    rubric
+        .question("stars")
+        .expect("the one question")
+        .criteria()
+        .iter()
+        .map(|criterion| {
+            (
+                criterion.key().to_string(),
+                criterion.description().to_string(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -32,50 +42,26 @@ fn the_general_rubric_is_what_a_run_uses_when_nothing_selects_another() {
     let general = Rubric::select(None).expect("the default built-in must parse");
 
     assert_eq!(general.builtin(), Some(Builtin::General));
-    assert_eq!(ids(&general), SIX_IDS);
+    assert_eq!(ids(&general), ONE_ID);
     assert_eq!(general.model(), omlx::DEFAULT_MODEL);
 
     // General is the one rubric that runs before anyone said what the folder
     // holds, so it may not assume a genre: that is the whole of its difference
     // from `press` and `holiday`, whose names are their genres.
-    let overall = general
-        .question("overall")
-        .expect("a score question")
+    let instructions = general
+        .question("stars")
+        .expect("the one question")
         .instructions()
         .to_lowercase();
     assert!(
-        overall.contains("genre"),
-        "general must say it has no genre to go on: {overall}"
+        instructions.contains("genre"),
+        "general must say it has no genre to go on: {instructions}"
     );
     for assumed in ["photojournal", "album", "client"] {
         assert!(
-            !overall.contains(assumed),
-            "general must not assume `{assumed}`: {overall}"
+            !instructions.contains(assumed),
+            "general must not assume `{assumed}`: {instructions}"
         );
-    }
-
-    // Four scores with one shared legend is what ticket 08 measured as keeping
-    // the axes collapsed. General is new, so nothing is invalidated by writing
-    // each axis its own.
-    let legends: Vec<Vec<&str>> = ["overall", "technical", "composition", "impact"]
-        .iter()
-        .map(|id| {
-            general
-                .question(id)
-                .expect("a required score question")
-                .criteria()
-                .iter()
-                .map(Criterion::description)
-                .collect()
-        })
-        .collect();
-    for (index, legend) in legends.iter().enumerate() {
-        for other in legends.iter().skip(index + 1) {
-            assert_ne!(
-                legend, other,
-                "the legend is the question: these two axes must not share one"
-            );
-        }
     }
 }
 
@@ -100,7 +86,7 @@ fn all_three_built_ins_are_compiled_in_and_each_is_its_own_judgement() {
         assert_eq!(shipped.builtin(), Some(builtin));
         assert_eq!(
             ids(&shipped),
-            SIX_IDS,
+            ONE_ID,
             "a second rubric is a second set of words, not a second schema"
         );
         assert_eq!(
@@ -108,7 +94,6 @@ fn all_three_built_ins_are_compiled_in_and_each_is_its_own_judgement() {
             omlx::DEFAULT_MODEL,
             "all three were written for the installed alias"
         );
-        assert_the_four_axes_are_independent(&shipped);
         hashes.push((builtin.name(), shipped.hash(shipped.model())));
     }
 
@@ -228,7 +213,7 @@ fn a_rubric_from_a_file_remembers_no_built_in() {
     assert_eq!(loaded.builtin(), None);
     assert_eq!(loaded.model(), "clef-27b-oQ4e");
     assert_eq!(
-        loaded.question("overall").expect("overall").instructions(),
+        loaded.question("stars").expect("stars").instructions(),
         "Rate for print."
     );
     assert_ne!(
@@ -242,52 +227,52 @@ fn a_rubric_from_a_file_remembers_no_built_in() {
 }
 
 #[test]
-fn the_four_scores_are_independent_questions_with_a_zero_to_ten_legend() {
+fn every_rubric_asks_one_question_with_five_ordered_levels() {
     for builtin in Builtin::ALL {
         let shipped = builtin.rubric().expect("parse");
-        for id in ["overall", "technical", "composition", "impact"] {
-            let question = shipped.question(id).expect("a required score question");
-            assert_eq!(question.kind(), QuestionKind::Score, "{id} must be a score");
-            let keys: Vec<&str> = question.criteria().iter().map(Criterion::key).collect();
-            assert_eq!(
-                keys,
-                ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
-                "{id} of {} needs an ordered 0-10 legend",
-                builtin.name()
-            );
-            assert!(
-                question
-                    .criteria()
-                    .iter()
-                    .all(|criterion| !criterion.description().is_empty()),
-                "{id} must describe every level"
-            );
-        }
+        assert_eq!(
+            ids(&shipped),
+            ONE_ID,
+            "one answer is one column and one question: {}",
+            builtin.name()
+        );
+
+        let levels = legend(&shipped);
+        assert_eq!(
+            levels
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3", "4", "5"],
+            "the keys are what the CSV's integer column parses"
+        );
+        assert!(
+            levels
+                .iter()
+                .all(|(_, description)| !description.is_empty()),
+            "{} must describe every level",
+            builtin.name()
+        );
     }
 }
 
-/// Without this, four "independent" scores collapse into one taste: the model
-/// has to be told, per question, which axes are somebody else's. Every rubric
-/// shipped with the tool owes this, so every one is held to it here.
-fn assert_the_four_axes_are_independent(rubric: &Rubric) {
-    for (id, others) in [
-        ("technical", ["composition", "impact"]),
-        ("composition", ["technical", "impact"]),
-        ("impact", ["technical", "composition"]),
-    ] {
-        let instructions = rubric
-            .question(id)
-            .expect("a required score question")
-            .instructions()
-            .to_lowercase();
-        assert!(
-            instructions.contains("ignore"),
-            "{id} must tell the model what to ignore: {instructions}"
-        );
-        for other in others {
+#[test]
+fn the_legend_says_delete_not_great_okay_good_and_great() {
+    for builtin in Builtin::ALL {
+        let shipped = builtin.rubric().expect("parse");
+        for (key, description) in legend(&shipped) {
+            let anchor = match key.as_str() {
+                "1" => "delete",
+                "2" => "not great",
+                "3" => "okay to keep",
+                "4" => "good",
+                "5" => "great",
+                other => panic!("unexpected key `{other}`"),
+            };
             assert!(
-                instructions.contains(other),
-                "{id} must name `{other}` as another question's job: {instructions}"
+                description.starts_with(anchor),
+                "{}'s level {key} must start with `{anchor}`: {description}",
+                builtin.name()
             );
         }
     }
@@ -296,16 +281,16 @@ fn assert_the_four_axes_are_independent(rubric: &Rubric) {
 #[test]
 fn the_press_rubric_judges_a_shoot_for_a_photo_editor() {
     let press = Builtin::Press.rubric().expect("parse");
-    let overall = press
-        .question("overall")
-        .expect("a score question")
+    let instructions = press
+        .question("stars")
+        .expect("the one question")
         .instructions()
         .to_lowercase();
 
     for expected in ["photo editor", "keeper", "distinctive moment"] {
         assert!(
-            overall.contains(expected),
-            "press is the photojournalistic cull and must still say so (`{expected}`): {overall}"
+            instructions.contains(expected),
+            "press is the photojournalistic cull and must still say so (`{expected}`): {instructions}"
         );
     }
 }
@@ -325,71 +310,17 @@ fn holiday_rubric_path() -> PathBuf {
 #[test]
 fn the_holiday_rubric_judges_a_frame_as_a_family_album_keeper() {
     let holiday = holiday_rubric();
-    assert_the_four_axes_are_independent(&holiday);
 
-    let overall = holiday
-        .question("overall")
-        .expect("a score question")
+    let instructions = holiday
+        .question("stars")
+        .expect("the one question")
         .instructions()
         .to_lowercase();
     for expected in ["family", "album", "landscape"] {
         assert!(
-            overall.contains(expected),
-            "overall must judge a holiday frame as a family-album keeper, naming `{expected}`: \
-             {overall}"
-        );
-    }
-
-    // Each score carries its own legend here, so a technical 3 and a
-    // composition 3 diagnose different things. The press rubric shares one
-    // legend across all four; this one must not be that copy.
-    let legends: Vec<Vec<&str>> = ["overall", "technical", "composition", "impact"]
-        .iter()
-        .map(|id| {
-            let question = holiday.question(id).expect("a required score question");
-            question
-                .criteria()
-                .iter()
-                .map(Criterion::description)
-                .collect()
-        })
-        .collect();
-    for (index, legend) in legends.iter().enumerate() {
-        for other in legends.iter().skip(index + 1) {
-            assert_ne!(
-                legend, other,
-                "the legend is the question: these two axes must not share one"
-            );
-        }
-    }
-}
-
-#[test]
-fn stars_is_five_ranked_options_and_verdict_is_the_three_way_choice() {
-    for builtin in Builtin::ALL {
-        let shipped = builtin.rubric().expect("parse");
-
-        let stars = shipped.question("stars").expect("a stars question");
-        assert_eq!(stars.kind(), QuestionKind::Choice);
-        assert_eq!(
-            stars
-                .criteria()
-                .iter()
-                .map(Criterion::key)
-                .collect::<Vec<_>>(),
-            ["1", "2", "3", "4", "5"],
-            "the star keys are what the CSV's integer column parses"
-        );
-
-        let verdict = shipped.question("verdict").expect("a verdict question");
-        assert_eq!(verdict.kind(), QuestionKind::Choice);
-        assert_eq!(
-            verdict
-                .criteria()
-                .iter()
-                .map(Criterion::key)
-                .collect::<Vec<_>>(),
-            ["dislike", "neutral", "like"]
+            instructions.contains(expected),
+            "the question must judge a holiday frame as a family-album keeper, naming \
+             `{expected}`: {instructions}"
         );
     }
 }
@@ -397,47 +328,19 @@ fn stars_is_five_ranked_options_and_verdict_is_the_three_way_choice() {
 #[test]
 fn the_same_schema_in_different_toml_formatting_hashes_the_same() {
     let plain = rubric("clef-flash-oQ4e", "Rate the frame.");
-    let reformatted = Rubric::from_toml(&format!(
+    let reformatted = Rubric::from_toml(
         "# a comment, different whitespace, and the keys in another order\n\
          model    =   'clef-flash-oQ4e'\n\
-         question = [\n{questions}\n]\n",
-        questions = [
-            ("overall", "Rate the frame."),
-            ("technical", "Judge technical quality only."),
-            ("composition", "Judge composition only."),
-            ("impact", "Judge impact only."),
-            ("stars", "How many stars?"),
-            ("verdict", "Would you keep it?"),
-        ]
-        .iter()
-        .map(|(id, instructions)| {
-            let legend = (0..=10)
-                .map(|level| format!("{{ key = \"{level}\", description = \"level {level}\" }}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            match *id {
-                "overall" | "technical" | "composition" | "impact" => format!(
-                    "  {{ type = 'score', id = '{id}', criteria = [{legend}], \
-                     instructions = '{instructions}' }}"
-                ),
-                "stars" => "  { type = 'choice', id = 'stars', instructions = 'How many stars?', \
-                     criteria = [{ key = '1', description = 'reject' }, \
-                     { key = '2', description = 'poor' }, \
-                     { key = '3', description = 'ok' }, \
-                     { key = '4', description = 'strong' }, \
-                     { key = '5', description = 'excellent' }] }"
-                    .to_string(),
-                _ => "  { type = 'choice', id = 'verdict', \
-                     instructions = 'Would you keep it?', \
-                     criteria = [{ key = 'dislike', description = 'no' }, \
-                     { key = 'neutral', description = 'maybe' }, \
-                     { key = 'like', description = 'yes' }] }"
-                    .to_string(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",\n")
-    ))
+         question = [\n\
+         \x20 { type = 'choice', id = 'stars', \
+         criteria = [{ key = '1', description = 'delete' }, \
+         { key = '2', description = 'not great' }, \
+         { key = '3', description = 'okay to keep' }, \
+         { key = '4', description = 'good' }, \
+         { key = '5', description = 'great' }], \
+         instructions = 'Rate the frame.' }\n\
+         ]\n",
+    )
     .expect("the reformatted rubric is the same schema");
 
     assert_eq!(
@@ -455,12 +358,13 @@ fn changing_an_instruction_a_criterion_or_the_model_changes_the_hash() {
     let reworded = rubric("clef-flash-oQ4e", "Rate this photograph.");
     assert_ne!(reworded.hash("clef-flash-oQ4e"), base_hash);
 
-    let reordered = Rubric::from_toml(&rubric_toml("clef-flash-oQ4e", "Rate the frame.").replace(
-        "{ key = \"3\", description = \"level 3\" }",
-        "{ key = \"3\", description = \"level three\" }",
-    ))
-    .expect("a valid rubric");
-    assert_ne!(reordered.hash("clef-flash-oQ4e"), base_hash);
+    let reworded_level =
+        Rubric::from_toml(&rubric_toml("clef-flash-oQ4e", "Rate the frame.").replace(
+            "description = \"okay to keep\"",
+            "description = \"keep it\"",
+        ))
+        .expect("a valid rubric");
+    assert_ne!(reworded_level.hash("clef-flash-oQ4e"), base_hash);
 
     assert_ne!(
         base.hash("clef-27b-oQ4e"),
@@ -485,10 +389,10 @@ fn the_hash_is_sha256_hex_and_its_short_form_is_the_first_eight_characters() {
 #[test]
 fn a_broken_rubric_is_a_fatal_error_that_says_what_is_wrong() {
     let valid = rubric_toml("clef-flash-oQ4e", "Rate the frame.");
-    let cases: [(&str, &str, String); 8] = [
+    let cases: [(&str, &str, String); 9] = [
         (
-            "missing stars",
-            "stars",
+            "an id a cull does not report",
+            "rating",
             valid.replace("id = \"stars\"", "id = \"rating\""),
         ),
         (
@@ -497,40 +401,50 @@ fn a_broken_rubric_is_a_fatal_error_that_says_what_is_wrong() {
             valid.replace("model = \"clef-flash-oQ4e\"", ""),
         ),
         (
-            "overall as a choice",
-            "overall",
+            "the question as a score",
+            "score",
+            valid.replace("type = \"choice\"", "type = \"score\""),
+        ),
+        (
+            "four options",
+            "must offer",
+            valid.replace("{ key = \"5\", description = \"great\" },", ""),
+        ),
+        (
+            "a key off the legend",
+            "must offer",
             valid.replace(
-                "id = \"overall\"\ntype = \"score\"",
-                "id = \"overall\"\ntype = \"choice\"",
+                "{ key = \"5\", description = \"great\" }",
+                "{ key = \"0\", description = \"great\" }",
             ),
         ),
         (
-            "stars with four options",
-            "stars",
-            valid.replace("{ key = \"5\", description = \"excellent\" },", ""),
-        ),
-        (
-            "verdict with the wrong keys",
-            "verdict",
-            valid.replace("{ key = \"like\", description = \"yes\" }", "{ key = \"love\", description = \"yes\" }"),
-        ),
-        (
-            "a legend that starts at one",
-            "overall",
-            valid.replace(
-                "{ key = \"0\", description = \"level 0\" }, ",
-                "{ key = \"1\", description = \"level 1\" }, { key = \"0\", description = \"level 0\" }, ",
-            ),
+            "an undescribed level",
+            "describe",
+            valid.replace("description = \"delete\"", "description = \"\""),
         ),
         (
             "a misspelled field",
             "instrcutions",
-            valid.replace("instructions = \"Rate the frame.\"", "instrcutions = \"Rate the frame.\""),
+            valid.replace(
+                "instructions = \"Rate the frame.\"",
+                "instrcutions = \"Rate the frame.\"",
+            ),
         ),
         (
             "an empty instruction",
-            "overall",
-            valid.replace("instructions = \"Rate the frame.\"", "instructions = \"  \""),
+            "instructions",
+            valid.replace(
+                "instructions = \"Rate the frame.\"",
+                "instructions = \"  \"",
+            ),
+        ),
+        (
+            "a second question",
+            "exactly one",
+            format!(
+                "{valid}\n[[question]]\nid = \"stars\"\ntype = \"choice\"\ninstructions = \"Again.\"\ncriteria = [\n    {{ key = \"1\", description = \"delete\" }},\n    {{ key = \"2\", description = \"not great\" }},\n    {{ key = \"3\", description = \"okay to keep\" }},\n    {{ key = \"4\", description = \"good\" }},\n    {{ key = \"5\", description = \"great\" }},\n]\n"
+            ),
         ),
     ];
 

@@ -56,7 +56,7 @@ impl Scripted {
 
     /// A decider that answers every frame with the same readable document.
     pub fn always_reading(frames: usize) -> Scripted {
-        Self::answering((0..frames).map(|_| Ok(document(6.4237, "4"))).collect())
+        Self::answering((0..frames).map(|_| Ok(document("4"))).collect())
     }
 
     /// Refuse the preflight with `error`, the way a real decider refuses a
@@ -141,17 +141,12 @@ impl Decider for Scripted {
     }
 }
 
-/// A readable six-answer document with a chosen `overall` and star key.
-pub fn document(overall: f64, stars: &str) -> Value {
+/// A readable answer document with a chosen star key.
+pub fn document(stars: &str) -> Value {
     json!({
         "model": "clef-flash-oQ4e",
         "answers": {
-            "overall": {"type": "score", "score": overall, "confidence": 0.41},
-            "technical": {"type": "score", "score": 7.8125, "confidence": 0.55},
-            "composition": {"type": "score", "score": 5.3398, "confidence": 0.33},
-            "impact": {"type": "score", "score": 4.9601, "confidence": 0.62},
-            "stars": {"type": "choice", "choice": stars, "confidence": 0.63},
-            "verdict": {"type": "choice", "choice": "like", "confidence": 0.88}
+            "stars": {"type": "choice", "choice": stars, "confidence": 0.63}
         },
         "usage": {"input_tokens": 1327}
     })

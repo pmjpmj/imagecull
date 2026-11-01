@@ -97,8 +97,8 @@ impl Shoot {
 }
 
 /// The header the spec's column table spells, in its order.
-const HEADER: &str = "file,overall,technical,composition,impact,stars,verdict,conf_overall,\
-conf_stars,conf_verdict,latency_ms,input_tokens,status,error,duplicate_of,rubric_hash,model\n";
+const HEADER: &str =
+    "file,stars,conf_stars,latency_ms,input_tokens,status,error,duplicate_of,rubric_hash,model\n";
 
 fn nef(frame: Vec<u8>) -> Vec<u8> {
     support::nef(1, &[frame])
@@ -135,7 +135,7 @@ fn a_folder_with_no_raw_files_still_gets_the_header_row() {
 #[test]
 fn a_scored_frame_is_one_row_with_its_answers_at_full_precision() {
     let shoot = Shoot::new(&[("DSC_0001.NEF", nef(support::jpeg(64, 32, 80)))]);
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4"))]);
+    let decider = Scripted::answering(vec![Ok(document("4"))]);
 
     scoring::run(
         shoot.path(),
@@ -149,7 +149,7 @@ fn a_scored_frame_is_one_row_with_its_answers_at_full_precision() {
     assert_eq!(
         shoot.csv(),
         format!(
-            "{HEADER}DSC_0001.NEF,6.4237,7.8125,5.3398,4.9601,4,like,0.41,0.63,0.88,812,1327,ok,,,{},clef-flash-oQ4e\n",
+            "{HEADER}DSC_0001.NEF,4,0.63,812,1327,ok,,,{},clef-flash-oQ4e\n",
             short_hash()
         )
     );
@@ -163,13 +163,13 @@ fn a_failed_row_carries_its_status_and_message_and_leaves_the_value_cells_empty(
         ("DSC_0002.NEF", support::nef(1, &[])),
         ("DSC_0003.NEF", nef(support::jpeg(48, 24, 80))),
     ]);
-    // The second document arrived but cannot be read: its `overall` answer has
-    // a score and no confidence.
+    // The second document arrived but cannot be read: its `stars` answer has a
+    // choice and no confidence.
     let unreadable = json!({
-        "answers": {"overall": {"score": 6.0}},
+        "answers": {"stars": {"choice": "4"}},
         "usage": {"input_tokens": 987}
     });
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4")), Ok(unreadable)]).taking(654);
+    let decider = Scripted::answering(vec![Ok(document("4")), Ok(unreadable)]).taking(654);
 
     scoring::run(
         shoot.path(),
@@ -183,7 +183,7 @@ fn a_failed_row_carries_its_status_and_message_and_leaves_the_value_cells_empty(
     assert_eq!(
         shoot.csv(),
         format!(
-            "{HEADER}DSC_0001.NEF,6.4237,7.8125,5.3398,4.9601,4,like,0.41,0.63,0.88,654,1327,ok,,,{},clef-flash-oQ4e\nDSC_0002.NEF,,,,,,,,,,,,no_preview,DSC_0002.NEF embeds no JPEG preview,,{},clef-flash-oQ4e\nDSC_0003.NEF,,,,,,,,,,654,987,bad_response,the `overall` answer has no numeric `confidence`,,{},clef-flash-oQ4e\n",
+            "{HEADER}DSC_0001.NEF,4,0.63,654,1327,ok,,,{},clef-flash-oQ4e\nDSC_0002.NEF,,,,,no_preview,DSC_0002.NEF embeds no JPEG preview,,{},clef-flash-oQ4e\nDSC_0003.NEF,,,654,987,bad_response,the `stars` answer has no numeric `confidence`,,{},clef-flash-oQ4e\n",
             short_hash(),
             short_hash(),
             short_hash()
@@ -205,7 +205,7 @@ fn a_dng_gets_an_unreadable_row_that_says_why_and_what_to_do() {
         ),
         ("DSC_0002.NEF", nef(support::jpeg(64, 32, 80))),
     ]);
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4"))]);
+    let decider = Scripted::answering(vec![Ok(document("4"))]);
 
     let run = scoring::run(
         shoot.path(),
@@ -259,7 +259,7 @@ fn a_filename_with_a_comma_a_quote_a_line_break_or_non_ascii_survives_the_round_
     assert_eq!(
         shoot.csv(),
         format!(
-            "{HEADER}\"Café, \"\"le pick\"\".NEF\",6.4237,7.8125,5.3398,4.9601,4,like,0.41,0.63,0.88,812,1327,ok,,,{},clef-flash-oQ4e\n\"line\nbreak.NEF\",6.4237,7.8125,5.3398,4.9601,4,like,0.41,0.63,0.88,812,1327,ok,,,{},clef-flash-oQ4e\n",
+            "{HEADER}\"Café, \"\"le pick\"\".NEF\",4,0.63,812,1327,ok,,,{},clef-flash-oQ4e\n\"line\nbreak.NEF\",4,0.63,812,1327,ok,,,{},clef-flash-oQ4e\n",
             short_hash(),
             short_hash()
         )
@@ -279,21 +279,16 @@ fn the_golden_report_pins_the_columns_the_numbers_and_the_failures() {
     ]);
     let second = json!({
         "answers": {
-            "overall": {"score": 9.125, "confidence": 0.77},
-            "technical": {"score": 8.0, "confidence": 0.5},
-            "composition": {"score": 7.5, "confidence": 0.25},
-            "impact": {"score": 9.875, "confidence": 0.9},
-            "stars": {"choice": "5", "confidence": 0.91},
-            "verdict": {"choice": "like", "confidence": 0.66}
+            "stars": {"choice": "5", "confidence": 0.91}
         },
         "usage": {"input_tokens": 1402, "latency_ms": 731}
     });
     let unreadable = json!({
-        "answers": {"overall": {"score": 6.0}},
+        "answers": {"stars": {"choice": "4"}},
         "usage": {"input_tokens": 987}
     });
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4")), Ok(second), Ok(unreadable)])
-        .taking(654);
+    let decider =
+        Scripted::answering(vec![Ok(document("4")), Ok(second), Ok(unreadable)]).taking(654);
 
     scoring::run(
         shoot.path(),
@@ -307,7 +302,7 @@ fn the_golden_report_pins_the_columns_the_numbers_and_the_failures() {
     assert_eq!(
         shoot.csv(),
         format!(
-            "{HEADER}DSC_0001.NEF,6.4237,7.8125,5.3398,4.9601,4,like,0.41,0.63,0.88,654,1327,ok,,,{},clef-flash-oQ4e\n\"DSC_0002, \"\"Café\"\".NEF\",9.125,8,7.5,9.875,5,like,0.77,0.91,0.66,731,1402,ok,,,{},clef-flash-oQ4e\nDSC_0003.NEF,,,,,,,,,,,,no_preview,DSC_0003.NEF embeds no JPEG preview,,{},clef-flash-oQ4e\nDSC_0004.NEF,,,,,,,,,,654,987,bad_response,the `overall` answer has no numeric `confidence`,,{},clef-flash-oQ4e\n",
+            "{HEADER}DSC_0001.NEF,4,0.63,654,1327,ok,,,{},clef-flash-oQ4e\n\"DSC_0002, \"\"Café\"\".NEF\",5,0.91,731,1402,ok,,,{},clef-flash-oQ4e\nDSC_0003.NEF,,,,,no_preview,DSC_0003.NEF embeds no JPEG preview,,{},clef-flash-oQ4e\nDSC_0004.NEF,,,654,987,bad_response,the `stars` answer has no numeric `confidence`,,{},clef-flash-oQ4e\n",
             short_hash(),
             short_hash(),
             short_hash(),
@@ -398,10 +393,10 @@ fn json_scores_keeps_the_raw_answer_document_of_every_frame() {
         ("DSC_0003.NEF", nef(support::jpeg(48, 24, 80))),
     ]);
     let unreadable = json!({
-        "answers": {"overall": {"score": 6.0}},
+        "answers": {"stars": {"choice": "4"}},
         "usage": {"input_tokens": 987}
     });
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4")), Ok(unreadable.clone())]);
+    let decider = Scripted::answering(vec![Ok(document("4")), Ok(unreadable.clone())]);
     let mut config = shoot.config(ScanOptions::default());
     let path = shoot.out.path().join("scores.json");
     config.outputs.json_scores = Some(path.clone());
@@ -412,7 +407,7 @@ fn json_scores_keeps_the_raw_answer_document_of_every_frame() {
     let documents: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     assert_eq!(
         documents["DSC_0001.NEF"],
-        document(6.4237, "4"),
+        document("4"),
         "the whole document the server sent, not a summary of it"
     );
     assert_eq!(

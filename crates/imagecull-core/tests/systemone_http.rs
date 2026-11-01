@@ -20,7 +20,7 @@ use imagecull_core::ingest;
 use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
 use imagecull_core::progress::Silent;
-use imagecull_core::reading::{self, Verdict};
+use imagecull_core::reading;
 use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::systemone::Adapter;
@@ -28,23 +28,14 @@ use serde_json::{Value, json};
 use support::stub::Stub;
 use tempfile::TempDir;
 
-/// A complete, well-formed answer: six answers for the six questions.
+/// A complete, well-formed answer: one choice for the one question.
 fn answer_document() -> String {
     json!({
         "model": "clef-flash-oQ4e",
         "answers": {
-            "overall": {"type": "score", "score": 6.4237, "confidence": 0.41,
-                        "legend": {"0": "delete"}, "probabilities": {"6": 0.41}},
-            "technical": {"type": "score", "score": 7.8125, "confidence": 0.55,
-                          "legend": {"0": "delete"}, "probabilities": [0.45, 0.55]},
-            "composition": {"type": "score", "score": 5.3398, "confidence": 0.33,
-                            "legend": {"0": "delete"}, "probabilities": {"5": 0.33}},
-            "impact": {"type": "score", "score": 4.9601, "confidence": 0.62,
-                       "legend": {"0": "delete"}, "probabilities": {"4": 0.62}},
             "stars": {"type": "choice", "choice": "4", "confidence": 0.63,
-                      "probabilities": {"4": 0.63}},
-            "verdict": {"type": "choice", "choice": "like", "confidence": 0.88,
-                        "probabilities": {"like": 0.88}}
+                      "probabilities": {"1": 0.01, "2": 0.03, "3": 0.12,
+                                        "4": 0.63, "5": 0.21}}
         },
         "usage": {"input_tokens": 1327, "output_tokens": 0}
     })
@@ -97,7 +88,7 @@ fn decide(stub: &Stub, state: State, preview: &Encoded, model: &str) -> Result<R
 }
 
 #[test]
-fn a_canned_answer_comes_back_as_a_reading_with_all_six_answers() {
+fn a_canned_answer_comes_back_as_a_reading_with_the_one_answer() {
     let stub = Stub::scripted(vec![(200, answer_document())]);
     let preview = preview(1568, 1045);
 
@@ -110,10 +101,9 @@ fn a_canned_answer_comes_back_as_a_reading_with_all_six_answers() {
     .expect("a 200 is an answer");
 
     let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
-    let answers = reading.answers.expect("six readable answers");
-    assert_eq!(answers.overall, 6.4237);
+    let answers = reading.answers.expect("a readable answer");
     assert_eq!(answers.stars, 4);
-    assert_eq!(answers.verdict, Verdict::Like);
+    assert_eq!(answers.confidence, 0.63);
     assert_eq!(reading.usage.input_tokens, Some(1327));
 
     let requests = stub.requests();
@@ -169,14 +159,7 @@ fn the_request_carries_one_image_one_state_and_the_questions_in_order() {
     let questions = body["questions"].as_object().expect("named questions");
     assert_eq!(
         questions.keys().map(String::as_str).collect::<Vec<_>>(),
-        [
-            "overall",
-            "technical",
-            "composition",
-            "impact",
-            "stars",
-            "verdict"
-        ],
+        ["stars"],
         "declaration order is part of the legend the model reads"
     );
 }
@@ -216,7 +199,7 @@ fn the_shoot_context_is_omitted_when_the_photographer_gave_none() {
 }
 
 #[test]
-fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
+fn the_question_sends_its_options_keyed_by_key_in_order() {
     let stub = Stub::scripted(vec![(200, answer_document())]);
     let preview = preview(100, 100);
 
@@ -231,54 +214,32 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
     let questions = stub.requests()[0].body["questions"].clone();
     let rubric = Builtin::General.rubric().expect("parse");
 
-    let overall = &questions["overall"];
-    assert_eq!(overall["type"], "score");
-    assert_eq!(
-        overall["instructions"],
-        rubric.question("overall").expect("overall").instructions()
-    );
-    let legend = overall["criteria"].as_array().expect("an ordered legend");
-    assert_eq!(legend.len(), 11, "keys 0-10, one description each");
-    let described: Vec<&str> = rubric
-        .question("overall")
-        .expect("overall")
-        .criteria()
-        .iter()
-        .map(|criterion| criterion.description())
-        .collect();
-    assert_eq!(
-        legend
-            .iter()
-            .map(|level| level.as_str().expect("a description"))
-            .collect::<Vec<_>>(),
-        described,
-        "the legend on the wire is the rubric's own, in key order"
-    );
-
     let stars = &questions["stars"];
     assert_eq!(stars["type"], "choice");
+    assert_eq!(
+        stars["instructions"],
+        rubric.question("stars").expect("stars").instructions()
+    );
     let options = stars["criteria"].as_object().expect("options keyed by key");
     assert_eq!(
         options.keys().map(String::as_str).collect::<Vec<_>>(),
         ["1", "2", "3", "4", "5"],
         "option order survives, because it is part of the legend"
     );
-    let stars_offered = rubric.question("stars").expect("stars");
+    let described: Vec<&str> = rubric
+        .question("stars")
+        .expect("stars")
+        .criteria()
+        .iter()
+        .map(|criterion| criterion.description())
+        .collect();
     assert_eq!(
-        options["1"],
-        stars_offered.criteria()[0].description(),
-        "each option carries the wording the rubric gives it"
-    );
-
-    let verdict = &questions["verdict"];
-    assert_eq!(
-        verdict["criteria"]
-            .as_object()
-            .expect("options keyed by key")
-            .keys()
-            .map(String::as_str)
+        options
+            .values()
+            .map(|option| option.as_str().expect("a description"))
             .collect::<Vec<_>>(),
-        ["dislike", "neutral", "like"]
+        described,
+        "each option carries the wording the rubric gives it, in key order"
     );
 }
 
@@ -287,12 +248,12 @@ fn an_adversarial_document_becomes_a_bad_response_not_a_guess() {
     let cases: [(&str, Value); 4] = [
         (
             "an answer key missing",
-            json!({"answers": {"overall": {"score": 6.0, "confidence": 0.4}}}),
+            json!({"answers": {"technical": {"score": 6.0, "confidence": 0.4}}}),
         ),
         (
             "only probabilities",
             json!({"answers": {
-                "overall": {"probabilities": {"6": 0.9}, "confidence": 0.4},
+                "stars": {"probabilities": {"4": 0.9}, "confidence": 0.4},
             }}),
         ),
         (
@@ -347,7 +308,7 @@ fn the_status_taxonomy_names_what_the_server_rejected() {
     let cases: [(u16, &str, ErrorKind); 3] = [
         (
             400,
-            r#"{"detail":"invalid criteria for question 'overall'"}"#,
+            r#"{"detail":"invalid criteria for question 'stars'"}"#,
             ErrorKind::Http400,
         ),
         (413, r#"{"detail":"context too long"}"#, ErrorKind::Http413),
@@ -575,8 +536,7 @@ fn a_run_over_http_reports_the_answers_it_read() {
 
     let frame = &run.frames[0];
     let reading = frame.outcome.as_ref().expect("the frame was prepared");
-    let answers = reading.answers.as_ref().expect("six answers");
-    assert_eq!(answers.overall, 6.4237);
+    let answers = reading.answers.as_ref().expect("a readable answer");
     assert_eq!(answers.stars, 4);
     assert_eq!(posts(&stub)[0].body["model"], "clef-27b-oQ4e");
     assert_eq!(

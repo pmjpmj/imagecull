@@ -1,7 +1,7 @@
 # imagecull
 
 Culling a shoot of mirrorless RAW files with a local decision model: a shoot
-folder goes in, one row of scores per frame comes out, alongside a record of
+folder goes in, one row of ratings per frame comes out, alongside a record of
 what the run did.
 
 ## Language
@@ -13,7 +13,7 @@ The directory of raw files one run covers.
 _Avoid_: input dir, source directory, library
 
 **Frame**:
-One photograph in the shoot folder, the unit a score is given to.
+One photograph in the shoot folder, the unit a rating is given to.
 _Avoid_: photo, image, file, shot
 
 **Preview**:
@@ -26,7 +26,7 @@ One invocation of scoring over a shoot folder, from the scan to the summary.
 _Avoid_: session, job, batch, process
 
 **Cull**:
-The act of deciding which frames to keep. The tool scores; the photographer
+The act of deciding which frames to keep. The tool rates; the photographer
 culls.
 
 ### How frames relate
@@ -56,7 +56,7 @@ _Avoid_: metric, score, technical score, quality score
 
 **Ranking rule**:
 The ordered criteria over named measures that names a group's best frame —
-exclusions first, then the model's impact among survivors. Declared in full,
+exclusions first, then the model's rating among survivors. Declared in full,
 never a weighted composite.
 _Avoid_: ranking score, picker, weighting
 
@@ -68,9 +68,15 @@ _Avoid_: winner score, rating, position
 ### What a run reads
 
 **Rubric**:
-The questions a frame is judged by, with the scoring legend each answer is
+The one question a frame is judged by, with the five-point legend the answer is
 chosen from.
 _Avoid_: prompt, template, config file
+
+**Rating**:
+The model's answer to the rubric's question: 1 delete, 2 not great, 3 okay to
+keep, 4 good, 5 great. The whole judgement of a frame, recorded as the `stars`
+column and written to `xmp:Rating` in v2.
+_Avoid_: score, grade, verdict, aesthetic score
 
 **Built-in rubric**:
 One of the rubrics compiled into the binary — `general`, `press`, `holiday` —
@@ -84,7 +90,7 @@ _Avoid_: default rubric, generic rubric, the default
 
 **Rubric hash**:
 The identity of a rubric, alias included. Two runs with different hashes did not
-judge the same way, and their scores are not comparable. Which built-in a run
+judge the same way, and their ratings are not comparable. Which built-in a run
 asked for is not part of it: the same words are the same judgement.
 _Avoid_: checksum, fingerprint, version
 
@@ -115,7 +121,7 @@ run can pick up where it stopped.
 _Avoid_: journal, state file, cache, checkpoint
 
 **Report**:
-The table of scores one row per frame, read in a spreadsheet.
+The table of ratings one row per frame, read in a spreadsheet.
 _Avoid_: output, CSV, results
 
 **Resume**:
@@ -132,7 +138,7 @@ _Avoid_: cache hit, skip
 
 **Frame line**:
 The one-line record a run prints as each frame is judged: where the frame sits
-in the run, its answers, what the request cost, and when the run will finish.
+in the run, its answer, what the request cost, and when the run will finish.
 One per frame and ended by a newline, so a redirected log reads the same as a
 terminal.
 _Avoid_: progress line, status line, log line

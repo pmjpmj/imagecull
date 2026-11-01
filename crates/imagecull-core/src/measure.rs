@@ -35,7 +35,7 @@
 //! Acutance is not a score out of ten. It ranks, within a group, frames of the
 //! same scene; comparing it across a grey wall and a crowded street means
 //! nothing, which is exactly why it is contrast-normalised per block and read at
-//! a percentile. Nothing here changes any of the six answers.
+//! a percentile. Nothing here changes the rating the model gave.
 
 use image::RgbImage;
 

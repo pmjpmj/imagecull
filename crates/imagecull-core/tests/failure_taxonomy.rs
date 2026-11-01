@@ -154,7 +154,7 @@ fn a_timeout_is_retried_and_then_recorded() {
         Err(failure(ErrorKind::Timeout, "POST /v1/systemone timed out")),
         Err(failure(ErrorKind::Timeout, "POST /v1/systemone timed out")),
         Err(failure(ErrorKind::Timeout, "POST /v1/systemone timed out")),
-        Ok(document(5.0, "3")),
+        Ok(document("3")),
     ]);
 
     let run = scoring::run(
@@ -190,7 +190,7 @@ fn a_timeout_is_retried_and_then_recorded() {
         "the row says the retries happened: {}",
         csv.cell(0, "error")
     );
-    assert_eq!(csv.cell(0, "overall"), "", "a failed row has no score");
+    assert_eq!(csv.cell(0, "stars"), "", "a failed row has no rating");
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn a_5xx_that_never_clears_is_recorded_after_its_retries() {
         Err(hiccup()),
         Err(hiccup()),
         Err(hiccup()),
-        Ok(document(6.0, "4")),
+        Ok(document("4")),
     ]);
 
     let run = scoring::run(
@@ -236,7 +236,7 @@ fn a_4xx_is_recorded_without_being_retried() {
             ErrorKind::Http413,
             "POST /v1/systemone returned HTTP 413 — lower --max-edge",
         )),
-        Ok(document(6.0, "4")),
+        Ok(document("4")),
     ]);
 
     let run = scoring::run(
@@ -272,8 +272,8 @@ fn a_bad_response_is_recorded_and_the_run_continues() {
     let shoot = shoot(2);
     let csv = shoot.path().join("scores.csv");
     let decider = Scripted::answering(vec![
-        Ok(json!({"answers": {"overall": {"score": 6.0}}})),
-        Ok(document(6.0, "4")),
+        Ok(json!({"answers": {"stars": {"choice": "9"}}})),
+        Ok(document("4")),
     ]);
 
     let run = scoring::run(
@@ -300,7 +300,7 @@ fn a_rejected_rubric_stops_the_run_at_the_first_frame() {
     let csv = shoot.path().join("scores.csv");
     let decider = Scripted::answering(vec![Err(failure(
         ErrorKind::Http400,
-        "POST /v1/systemone returned HTTP 400: invalid criteria for 'overall'",
+        "POST /v1/systemone returned HTTP 400: invalid criteria for 'stars'",
     ))]);
 
     let run = scoring::run(
@@ -405,7 +405,7 @@ fn an_unreachable_server_stops_the_run_after_its_retries() {
 fn the_exit_code_is_a_function_of_the_run() {
     let shoot = shoot(2);
     let decider = Scripted::answering(vec![
-        Ok(document(6.0, "4")),
+        Ok(document("4")),
         Err(failure(
             ErrorKind::NoPreview,
             "DSC_0002.NEF embeds no JPEG preview",
@@ -457,7 +457,7 @@ fn every_status_an_answer_can_carry_reaches_the_csv() {
     let cases: [(ErrorKind, &str, &str); 7] = [
         (
             ErrorKind::Http400,
-            "POST /v1/systemone returned HTTP 400: invalid criteria for 'overall'",
+            "POST /v1/systemone returned HTTP 400: invalid criteria for 'stars'",
             "invalid criteria",
         ),
         (
@@ -642,7 +642,7 @@ fn a_run_cancelled_between_files_keeps_the_rows_it_judged() {
         2,
         "the rows judged before the cancel are on disk"
     );
-    assert_eq!(csv.column(&csv.header[12]), ["ok", "ok"]);
+    assert_eq!(csv.column("status"), ["ok", "ok"]);
 }
 
 #[test]
@@ -667,7 +667,7 @@ fn a_run_cancelled_before_it_starts_writes_an_empty_report() {
     assert_eq!(run.exit_code(), ExitCode::Interrupted);
     let csv = Csv::read(&csv);
     assert!(csv.rows.is_empty(), "the header alone is still a report");
-    assert_eq!(csv.header.len(), 17);
+    assert_eq!(csv.header.len(), 10);
 }
 
 #[test]
@@ -677,9 +677,9 @@ fn a_synthetic_400_file_shoot_gets_a_status_on_every_row() {
     let answers = (0..400)
         .map(|index| {
             if index % 50 == 0 {
-                Ok(json!({"answers": {"overall": {"score": 6.0}}}))
+                Ok(json!({"answers": {"stars": {"choice": "9"}}}))
             } else {
-                Ok(document(6.4237, "4"))
+                Ok(document("4"))
             }
         })
         .collect();

@@ -66,33 +66,6 @@ pub struct Finished {
     pub summary: Summary,
 }
 
-/// The rule the disagreement rate counts, in the words the summary line shows
-/// it, so the number can be read without reading this file.
-///
-/// The spec names the metric but not its threshold (spec §29): `stars` and
-/// `overall` are two different questions and will sometimes disagree, and what
-/// matters is a disagreement you would notice, not the rounding noise between a
-/// 7.0 overall and three stars. One star of difference is noise; two is a
-/// judgement worth looking at, and it is counted, never averaged away.
-pub const DISAGREEMENT_RULE: &str =
-    "a frame disagrees when its stars are two or more away from round(overall / 2), clamped to 1-5";
-
-/// The star rating an `overall` score implies: its band out of five.
-///
-/// Clamped in `f64` before the cast, so a score outside the legend still lands
-/// in one of the five bands.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn implied_stars(overall: f64) -> u8 {
-    (overall / 2.0).round().clamp(1.0, 5.0) as u8
-}
-
-/// Whether a frame's `stars` and `overall` agree, by [`DISAGREEMENT_RULE`].
-pub fn agrees(stars: u8, overall: f64) -> bool {
-    let stars = i32::from(stars);
-    let implied = i32::from(implied_stars(overall));
-    (stars - implied).abs() < 2
-}
-
 /// How many frames carry one `status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusCount {
@@ -112,20 +85,6 @@ pub struct MeanMedian {
     pub median: f64,
 }
 
-/// Mean and median of each of the four scores, kept apart exactly as they are
-/// in every row (spec §19).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Scores {
-    /// The keeper judgement.
-    pub overall: MeanMedian,
-    /// Technical quality only.
-    pub technical: MeanMedian,
-    /// Framing and graphic design only.
-    pub composition: MeanMedian,
-    /// Moment, gesture and light only.
-    pub impact: MeanMedian,
-}
-
 /// What a run did, in the numbers a photographer judges it by.
 ///
 /// A summary is computed from a [`Run`], so it cannot disagree with the frames
@@ -137,7 +96,7 @@ pub struct Summary {
     pub total: usize,
     /// How many frames the run got to: the sum of every status count.
     pub judged: usize,
-    /// How many frames produced six readable answers.
+    /// How many frames produced a readable answer.
     pub scored: usize,
     /// How many did not, for any reason.
     pub failed: usize,
@@ -148,15 +107,10 @@ pub struct Summary {
     /// Counts by `status`: `ok` first, then the taxonomy's own order, omitting
     /// the kinds no frame hit.
     pub counts: Vec<StatusCount>,
-    /// The four scores' mean and median; `None` when nothing was scored.
-    pub scores: Option<Scores>,
+    /// The rating's mean and median; `None` when nothing was scored.
+    pub rating: Option<MeanMedian>,
     /// The star histogram, index 0 holding one star.
     pub stars: [usize; 5],
-    /// How many scored frames' `stars` and `overall` disagree.
-    pub disagreements: usize,
-    /// [`Summary::disagreements`] over the scored frames, `0.0` when there are
-    /// none. Reported, never reconciled (spec §29).
-    pub disagreement_rate: f64,
     /// The built-in rubric a name selected, when one did: provenance the hash
     /// cannot carry, because the same words are the same judgement however a
     /// run reached them.
@@ -181,12 +135,8 @@ impl Summary {
     /// Summarise a run that has finished, stopped, or been interrupted.
     pub fn of(run: &Run) -> Summary {
         let mut failures: BTreeMap<ErrorKind, usize> = BTreeMap::new();
-        let mut overall = Vec::new();
-        let mut technical = Vec::new();
-        let mut composition = Vec::new();
-        let mut impact = Vec::new();
+        let mut ratings = Vec::new();
         let mut stars = [0usize; 5];
-        let mut disagreements = 0;
         for frame in &run.frames {
             let answers = match frame.answers_or_failure() {
                 Ok(answers) => answers,
@@ -195,15 +145,9 @@ impl Summary {
                     continue;
                 }
             };
-            overall.push(answers.overall);
-            technical.push(answers.technical);
-            composition.push(answers.composition);
-            impact.push(answers.impact);
+            ratings.push(f64::from(answers.stars));
             let bucket = usize::from(answers.stars.clamp(1, 5)) - 1;
             stars[bucket] += 1;
-            if !agrees(answers.stars, answers.overall) {
-                disagreements += 1;
-            }
         }
         // How many frames have answers is the run's own count, not a second
         // tally kept here: the exit code and the printed summary must never
@@ -224,18 +168,7 @@ impl Summary {
                 });
             }
         }
-        let scores = (scored > 0).then(|| Scores {
-            overall: mean_median(overall),
-            technical: mean_median(technical),
-            composition: mean_median(composition),
-            impact: mean_median(impact),
-        });
-        #[allow(clippy::cast_precision_loss)]
-        let disagreement_rate = if scored == 0 {
-            0.0
-        } else {
-            disagreements as f64 / scored as f64
-        };
+        let rating = (scored > 0).then(|| mean_median(ratings));
         Summary {
             total: run.total,
             judged: run.frames.len(),
@@ -244,10 +177,8 @@ impl Summary {
             resumed: run.resumed,
             duplicates: run.duplicates,
             counts,
-            scores,
+            rating,
             stars,
-            disagreements,
-            disagreement_rate,
             builtin: run.builtin,
             rubric_hash: run.rubric_hash.clone(),
             model: run.model.clone(),
@@ -297,7 +228,7 @@ pub struct FrameEvent {
     pub total: usize,
     /// The name the CSV will use for this frame.
     pub filename: String,
-    /// The six answers, or the classified reason there are none.
+    /// The answer, or the classified reason there is none.
     pub judgement: Judgement,
     /// The latency of the request that produced this frame's outcome, when one
     /// was recorded: `None` for a frame that never reached the model.
@@ -316,7 +247,7 @@ pub struct FrameEvent {
 /// A frame's outcome, as the front end sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Judgement {
-    /// Six answers, at the precision the model gave them.
+    /// The answer, at the precision the model gave it.
     Answered(Answers),
     /// The row's `status` and `error` columns: the same failure the CSV carries.
     Failed(Failure),

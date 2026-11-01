@@ -6,7 +6,10 @@
 # landscape, an event, a street frame and a snapshot may all sit in it, and the
 # folder may be all five.
 #
-# The standard is fixed; the target is read off the frame. Focus, exposure and
+# One question, answered 1–5. The frame is judged whole in a single call — what
+# it is trying to be, how well it is made, and whether it holds anything worth
+# looking at — because a cull wants a keeper rating, not a diagnosis. The
+# standard is fixed; the target is read off the frame. Focus, exposure and
 # framing are judged as themselves whatever the frame is trying to be, while what
 # counts as the subject and as the moment is whatever the frame is pointing at —
 # a group caught mid-laugh is the moment in an event frame, the light on a ridge
@@ -18,30 +21,20 @@
 #   imagecull score ~/Pictures/import --rubric general
 #
 # `press` and `holiday` are named the same way; a path to any file that keeps the
-# six ids, the 0-10 legends and the star/verdict keys works instead. A name is
-# how the rubric was asked for, not what was judged: the hash covers the wording
-# and the alias, so two spellings of one rubric yield comparable reports and a
-# reworded rubric never does.
+# `stars` id and the 1–5 keys works instead. A name is how the rubric was asked
+# for, not what was judged: the hash covers the wording and the alias, so two
+# spellings of one rubric yield comparable reports and a reworded rubric never
+# does.
 #
 # Structure: `model` names the alias the wording was written for (`--model`
-# overrides it), then one `[[question]]` per question in declaration order.
-# Criteria are ordered arrays rather than tables, because the order is part of
-# the legend the model reads.
+# overrides it), then exactly one `[[question]]`: the `stars` choice, whose
+# ordered criteria are the 1–5 legend the model reads.
 
 model = "clef-flash-oQ4e"
 
-# --- the four independent scores -------------------------------------------
-#
-# Each `criteria` array is that score's own legend, "0"…"10" in order, so the
-# answer is the expected value over eleven levels. The legends are worded per
-# axis rather than shared: a technical 3 and a composition 3 are different
-# diagnoses, and the model reads the legend as the question. The four scores are
-# never combined and never rescaled to 100 — a sharp, dull frame and a warm,
-# slightly soft one must stay distinguishable.
-
 [[question]]
-id = "overall"
-type = "score"
+id = "stars"
+type = "choice"
 instructions = """
 You are culling a folder of photographs, deciding which frames are worth \
 keeping. No genre has been declared, so read the frame for what it is trying to \
@@ -51,126 +44,13 @@ does not move with the genre: is there something worth looking at, is it caught,
 and is the frame made well enough to carry it? A distinctive moment, gesture, \
 expression or quality of light counts for more than clinical perfection, and a \
 frame that is slightly soft but holds something beats a sharp frame in which \
-nothing happens.
+nothing happens. Answer with the one number that is your whole judgement of the \
+frame.
 """
 criteria = [
-    { key = "0", description = "delete — nothing in it anyone would keep" },
-    { key = "1", description = "failing — the frame does not work at all" },
-    { key = "2", description = "poor — a serious problem, hard to rescue" },
-    { key = "3", description = "weak — a flaw a viewer notices before the subject" },
-    { key = "4", description = "below par — mostly there, with one obvious shortcoming" },
-    { key = "5", description = "record — worth keeping as evidence of the moment and no more" },
-    { key = "6", description = "competent — solid and unremarkable" },
-    { key = "7", description = "good — clearly above the middle of the folder" },
-    { key = "8", description = "strong — one you would share or print without hesitating" },
-    { key = "9", description = "excellent — among the best frames in the folder" },
-    { key = "10", description = "keeper — the frame the folder is remembered by" },
-]
-
-[[question]]
-id = "technical"
-type = "score"
-instructions = """
-Judge technical image quality only: focus on the intended subject, motion blur, \
-noise at the sensitivity the frame was made at, exposure, white balance, lens \
-and sensor artifacts, clipped highlights and crushed shadows. Judge it as \
-itself, not against what the frame cost to make. Ignore composition and ignore \
-impact — how the frame is arranged, and whether the moment was worth catching, \
-are judged by other questions.
-"""
-criteria = [
-    { key = "0", description = "delete — unusable: nothing in focus, or blown out" },
-    { key = "1", description = "failing — the subject cannot be made out" },
-    { key = "2", description = "poor — soft where it had to be sharp, or a ruined exposure" },
-    { key = "3", description = "weak — a technical flaw a viewer sees first" },
-    { key = "4", description = "below par — usable, with one flaw that shows at any size" },
-    { key = "5", description = "record — fine small, not good enough to enlarge" },
-    { key = "6", description = "competent — clean and unremarkable" },
-    { key = "7", description = "good — sharp and well exposed at the sizes people look at" },
-    { key = "8", description = "strong — clean at full size and holds up cropped" },
-    { key = "9", description = "excellent — technically impeccable" },
-    { key = "10", description = "immaculate — nothing left to improve" },
-]
-
-[[question]]
-id = "composition"
-type = "score"
-instructions = """
-Judge framing and graphic design only: where the subject sits in the frame, \
-balance, leading lines, negative space, headroom, a level horizon, a \
-distracting background or edge intrusions, and the crop. Ignore technical \
-quality and ignore impact — focus, exposure and the pull of the moment are \
-other questions.
-"""
-criteria = [
-    { key = "0", description = "delete — it is not composed, it happened" },
-    { key = "1", description = "failing — the subject is lost in the frame" },
-    { key = "2", description = "poor — a distracting element dominates the frame" },
-    { key = "3", description = "weak — mis-framed in a way a viewer notices" },
-    { key = "4", description = "below par — a decent arrangement with one obvious flaw" },
-    { key = "5", description = "record — it documents the scene and nothing more" },
-    { key = "6", description = "competent — conventional and clean" },
-    { key = "7", description = "good — deliberate framing that reads at a glance" },
-    { key = "8", description = "strong — the arrangement carries the frame" },
-    { key = "9", description = "excellent — composition is the reason to keep it" },
-    { key = "10", description = "masterful — every element in its place" },
-]
-
-[[question]]
-id = "impact"
-type = "score"
-instructions = """
-Judge emotional and visual impact only: does the frame hold something that \
-makes someone stop and look — a glance, a gesture, a face mid-expression, the \
-light on a place at the one moment it looked like that? Judge the moment \
-against what the frame is rather than against what it might have been. Ignore \
-technical quality and ignore composition — those are judged by other questions.
-"""
-criteria = [
-    { key = "0", description = "delete — no moment and no place in it" },
-    { key = "1", description = "failing — a posed blank" },
-    { key = "2", description = "poor — the moment has already passed" },
-    { key = "3", description = "weak — a flicker of something, not enough" },
-    { key = "4", description = "below par — mild interest only" },
-    { key = "5", description = "record — it says where you were and nothing more" },
-    { key = "6", description = "competent — pleasant and unmemorable" },
-    { key = "7", description = "good — a real moment, caught" },
-    { key = "8", description = "strong — the frame people ask for a copy of" },
-    { key = "9", description = "excellent — a quality that makes a viewer stop" },
-    { key = "10", description = "unforgettable — the frame that holds the folder" },
-]
-
-# --- the two choice questions ----------------------------------------------
-#
-# `stars` is the portable channel into a catalogue (v2 writes it as
-# xmp:Rating), and `verdict` is the model's own keep/drop opinion. Both are
-# recorded as the model answered them: the star rating never comes from
-# thresholds over the four scores, and a `stars`/`overall` disagreement is
-# reported, never reconciled. Keys are fixed by the loader; the wording of each
-# option is not.
-
-[[question]]
-id = "stars"
-type = "choice"
-instructions = """
-Applying a typical star rating to this frame, how many stars?
-"""
-criteria = [
-    { key = "1", description = "reject — unusable, or a near-duplicate of a better frame" },
-    { key = "2", description = "poor — fine technically, nothing worth keeping" },
-    { key = "3", description = "ok — keep as a record of the moment" },
-    { key = "4", description = "strong — one to share or print" },
-    { key = "5", description = "excellent — the hero frame, worth a wall" },
-]
-
-[[question]]
-id = "verdict"
-type = "choice"
-instructions = """
-Would you keep this photograph?
-"""
-criteria = [
-    { key = "dislike", description = "I would not keep it" },
-    { key = "neutral", description = "I could keep it or not" },
-    { key = "like", description = "I would keep it and show it" },
+    { key = "1", description = "delete — nothing in it anyone would keep" },
+    { key = "2", description = "not great — a real flaw, or nothing to hold the eye" },
+    { key = "3", description = "okay to keep — fine, and worth keeping as a record" },
+    { key = "4", description = "good — clearly worth keeping; one to share or print" },
+    { key = "5", description = "great — the frame the folder is remembered by" },
 ]

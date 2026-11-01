@@ -13,10 +13,10 @@
 //! nothing.
 //!
 //! RFC 4180 above all: a filename may contain a comma, a quote or a line break,
-//! and every cell is UTF-8. Values are the model's own numbers at the precision
-//! it gave them — never rounded, never rescaled — and a failed row leaves its
-//! value cells empty rather than zero, because "no answer" and "a score of
-//! zero" are different facts.
+//! and every cell is UTF-8. Values are the model's own answer — the integer key
+//! it chose, and its confidence as the model reported it — and a failed row
+//! leaves its value cells empty rather than zero, because "no answer" and "a
+//! rating of one" are different facts.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -33,17 +33,10 @@ use crate::scoring::Usage;
 pub const OK: &str = "ok";
 
 /// The columns, in the order the spec's table lists them.
-pub const COLUMNS: [&str; 17] = [
+pub const COLUMNS: [&str; 10] = [
     "file",
-    "overall",
-    "technical",
-    "composition",
-    "impact",
     "stars",
-    "verdict",
-    "conf_overall",
     "conf_stars",
-    "conf_verdict",
     "latency_ms",
     "input_tokens",
     "status",
@@ -73,8 +66,8 @@ pub struct Row {
     /// The file, as the scan found it. The `file` column picks the absolute or
     /// the in-folder spelling from it.
     pub source: SourceFile,
-    /// The six answers at the precision the model gave them; `None` on a failed
-    /// row, whose value cells stay empty.
+    /// The answer at the precision the model gave it; `None` on a failed row,
+    /// whose value cells stay empty.
     pub answers: Option<Answers>,
     /// What the request cost, when it got far enough to cost anything.
     pub usage: Option<Usage>,
@@ -181,15 +174,8 @@ fn cells(row: &Row, absolute: bool) -> Vec<String> {
     let usage = row.usage;
     vec![
         file_cell(&row.source, absolute),
-        answers(|answers| number(answers.overall)),
-        answers(|answers| number(answers.technical)),
-        answers(|answers| number(answers.composition)),
-        answers(|answers| number(answers.impact)),
         answers(|answers| answers.stars.to_string()),
-        answers(|answers| answers.verdict.as_str().to_string()),
-        answers(|answers| number(answers.confidence.overall)),
-        answers(|answers| number(answers.confidence.stars)),
-        answers(|answers| number(answers.confidence.verdict)),
+        answers(|answers| number(answers.confidence)),
         // The one cell that measures the run instead of reporting the model:
         // two runs of the same folder agree on every other column (spec
         // §Determinism), and this is the reason they cannot agree on all of

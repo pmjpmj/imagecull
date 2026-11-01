@@ -1,14 +1,14 @@
-//! The rubric: the six questions, the TOML they are written in, and the hash
-//! that names them.
+//! The rubric: the one question, the TOML it is written in, and the hash that
+//! names it.
 //!
 //! A rubric is a file a photographer edits between shoots, so it is loaded,
 //! validated and turned into an identity before a single request goes out
 //! (spec §8). Three of them are compiled into the binary ([`Builtin`]) and
 //! selected by name; any other is a file selected by path ([`RubricSource`]).
-//! The four `score` questions are independent — never combined, never rescaled —
-//! and the two `choice` questions carry the star rating and the keep/drop
-//! verdict. Criteria are ordered arrays rather than tables because the order is
-//! part of the legend the model reads.
+//! A cull asks one `choice` question — the 1–5 rating — and nothing else: the
+//! frame is judged whole in a single call, so there is no set of sub-scores to
+//! combine or to reconcile. Criteria are ordered arrays rather than tables
+//! because the order is part of the legend the model reads.
 
 use std::fmt;
 use std::fs;
@@ -20,38 +20,17 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
-/// The four `score` questions, in the order a reading reports them.
-pub const SCORE_IDS: [&str; 4] = ["overall", "technical", "composition", "impact"];
-
-/// The five-way choice: the star rating.
-pub const STARS_ID: &str = "stars";
-
-/// The three-way choice: the keep/drop verdict.
-pub const VERDICT_ID: &str = "verdict";
+/// The five-way choice: the 1–5 rating, the whole of a cull's judgement.
+pub const RATING_ID: &str = "stars";
 
 /// The ids a rubric must ask, in the canonical order they are reported in.
 ///
 /// A rubric that renames or drops one is rejected at load: the CSV, the ledger
-/// and (v2) the XMP sidecar all have a column for each of these six.
-pub const REQUIRED_IDS: [&str; 6] = [
-    SCORE_IDS[0],
-    SCORE_IDS[1],
-    SCORE_IDS[2],
-    SCORE_IDS[3],
-    STARS_ID,
-    VERDICT_ID,
-];
+/// and (v2) the XMP sidecar all have a column for this one.
+pub const REQUIRED_IDS: [&str; 1] = [RATING_ID];
 
-/// The star keys, in order. They are also what the integer column parses.
-const STAR_KEYS: [&str; 5] = ["1", "2", "3", "4", "5"];
-
-/// The verdict keys, in order.
-const VERDICT_KEYS: [&str; 3] = ["dislike", "neutral", "like"];
-
-/// The legend keys a `score` question must offer, in order: the answer is the
-/// expected value over these levels, so a legend that starts at 1 or has twelve
-/// levels would silently shift every score.
-const SCORE_KEYS: [&str; 11] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
+/// The rating keys, in order. They are also what the integer column parses.
+const RATING_KEYS: [&str; 5] = ["1", "2", "3", "4", "5"];
 
 /// The rubrics compiled into the binary, one file each, each of which stays in
 /// the tree as the copy a photographer can read and start a rubric of their own
@@ -133,11 +112,9 @@ impl Rubric {
     /// The questions exactly as they go on the wire, keyed by id in
     /// declaration order.
     ///
-    /// A `score`'s criteria are the ordered legend of level descriptions, whose
-    /// index is the key (the loader guarantees the keys are `"0"`…`"10"` in
-    /// order): that is the shape the API's score head reads. A `choice`'s
-    /// criteria are an object keyed by option, in declaration order, because
-    /// that is the shape its choice head reads. Option order survives in both.
+    /// A `choice`'s criteria are an object keyed by option, in declaration
+    /// order, because that is the shape its choice head reads; the loader
+    /// guarantees the keys are `"1"`…`"5"` in order. Option order survives.
     pub(crate) fn questions_json(&self) -> Value {
         let mut questions = Map::new();
         for question in &self.questions {
@@ -161,7 +138,9 @@ impl Rubric {
             digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
             digest.update(value.as_bytes());
         };
-        field("imagecull-rubric-v1");
+        // v2: the schema is one `choice` question, so no hash from the
+        // six-question era can collide with one from this one.
+        field("imagecull-rubric-v2");
         field(model);
         field(&self.questions_json().to_string());
         RubricHash(hex(digest.finalize()))
@@ -170,9 +149,8 @@ impl Rubric {
 
 /// A rubric compiled into the binary, named the way a photographer names it.
 ///
-/// The three differ only in wording: the same six ids, the same 0-10 legends and
-/// the same star/verdict keys, so their reports share a shape and never share a
-/// hash.
+/// The three differ only in wording: the same `stars` id and the same 1–5
+/// keys, so their reports share a shape and never share a hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
     /// No assumed genre: what a run uses when nothing selects another.
@@ -356,10 +334,13 @@ impl fmt::Display for RubricHash {
 }
 
 /// One question, with its criteria in the order the model should read them.
+///
+/// A cull asks exactly one: the `stars` choice, whose criteria are the five
+/// rating levels. There is no question type field because there is no second
+/// type to distinguish it from — the wire always says `choice`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
     id: String,
-    kind: QuestionKind,
     instructions: String,
     criteria: Vec<Criterion>,
 }
@@ -369,11 +350,6 @@ impl Question {
     /// key in `answers`.
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    /// Whether this question asks for a score or a choice.
-    pub fn kind(&self) -> QuestionKind {
-        self.kind
     }
 
     /// What the model is asked, in words.
@@ -391,57 +367,24 @@ impl Question {
         self.criteria.iter().any(|criterion| criterion.key == key)
     }
 
-    /// This question as the request carries it.
+    /// This question as the request carries it: a `choice` renders its criteria
+    /// as an object keyed by option, in declaration order (ADR 0001).
     fn to_json(&self) -> Value {
-        let criteria = match self.kind {
-            QuestionKind::Score => Value::Array(
-                self.criteria
-                    .iter()
-                    .map(|criterion| Value::String(criterion.description.clone()))
-                    .collect(),
-            ),
-            QuestionKind::Choice => {
-                let mut options = Map::new();
-                for criterion in &self.criteria {
-                    options.insert(
-                        criterion.key.clone(),
-                        Value::String(criterion.description.clone()),
-                    );
-                }
-                Value::Object(options)
-            }
-        };
+        let mut criteria = Map::new();
+        for criterion in &self.criteria {
+            criteria.insert(
+                criterion.key.clone(),
+                Value::String(criterion.description.clone()),
+            );
+        }
         let mut question = Map::new();
-        question.insert(
-            "type".to_string(),
-            Value::String(self.kind.as_str().to_string()),
-        );
+        question.insert("type".to_string(), Value::String("choice".to_string()));
         question.insert(
             "instructions".to_string(),
             Value::String(self.instructions.clone()),
         );
-        question.insert("criteria".to_string(), criteria);
+        question.insert("criteria".to_string(), Value::Object(criteria));
         Value::Object(question)
-    }
-}
-
-/// The two question types a cull uses. `noul` exists in the wire contract but
-/// an image cull has no use for a yes/no question.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuestionKind {
-    /// An ordered legend; the answer is an expected value over it.
-    Score,
-    /// One named option, such as a star rating.
-    Choice,
-}
-
-impl QuestionKind {
-    /// The `type` on the wire.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            QuestionKind::Score => "score",
-            QuestionKind::Choice => "choice",
-        }
     }
 }
 
@@ -513,22 +456,21 @@ impl RubricFile {
             .iter()
             .map(|question| question.id.as_str())
             .collect();
+        if questions.len() != REQUIRED_IDS.len() {
+            return Err(Error::fatal(format!(
+                "a rubric asks exactly one question — `{}` — and this one asks: {}",
+                REQUIRED_IDS[0],
+                describe(&ids),
+            )));
+        }
         for id in REQUIRED_IDS {
             if !ids.contains(&id) {
                 return Err(Error::fatal(format!(
-                    "a rubric asks exactly six questions — {} — and this one asks: {}. `{id}` is \
-                     missing",
-                    REQUIRED_IDS.join(", "),
+                    "a rubric asks exactly one question — `{}` — and this one asks: {}",
+                    REQUIRED_IDS[0],
                     describe(&ids),
                 )));
             }
-        }
-        if questions.len() != REQUIRED_IDS.len() {
-            return Err(Error::fatal(format!(
-                "a rubric asks exactly six questions — {} — and this one asks: {}",
-                REQUIRED_IDS.join(", "),
-                describe(&ids),
-            )));
         }
 
         Ok(Rubric {
@@ -548,15 +490,13 @@ impl QuestionFile {
                 position + 1
             )));
         }
-        let kind = match self.kind.trim() {
-            "score" => QuestionKind::Score,
-            "choice" => QuestionKind::Choice,
-            other => {
-                return Err(Error::fatal(format!(
-                    "rubric question `{id}` has type `{other}`; a cull uses `score` or `choice`"
-                )));
-            }
-        };
+        let kind = self.kind.trim();
+        if kind != "choice" {
+            return Err(Error::fatal(format!(
+                "rubric question `{id}` has type `{kind}`; a cull asks one `choice` question, the \
+                 1-5 rating"
+            )));
+        }
         let instructions = self.instructions.trim().to_string();
         if instructions.is_empty() {
             return Err(Error::fatal(format!(
@@ -588,46 +528,33 @@ impl QuestionFile {
             });
         }
 
-        // Which id asks which kind of question, and what it must offer: the
-        // CSV, the ledger and the v2 sidecar all depend on these six shapes.
-        let (wanted, expected): (QuestionKind, &[&str]) = match id.as_str() {
-            STARS_ID => (QuestionKind::Choice, &STAR_KEYS),
-            VERDICT_ID => (QuestionKind::Choice, &VERDICT_KEYS),
-            overall if SCORE_IDS.contains(&overall) => (QuestionKind::Score, &SCORE_KEYS),
-            _ => {
-                return Err(Error::fatal(format!(
-                    "rubric question `{id}` is not one a cull reports; a rubric asks: {}",
-                    REQUIRED_IDS.join(", ")
-                )));
-            }
-        };
-        if kind != wanted {
+        // The one id a cull reports, and the exact legend it must offer: the
+        // CSV, the ledger and the v2 sidecar all depend on this shape.
+        if id != RATING_ID {
             return Err(Error::fatal(format!(
-                "rubric question `{id}` must be a `{}` question, not `{}`",
-                wanted.as_str(),
-                kind.as_str()
+                "rubric question `{id}` is not one a cull reports; a rubric asks: {}",
+                REQUIRED_IDS[0]
             )));
         }
         let keys: Vec<&str> = criteria
             .iter()
             .map(|criterion| criterion.key.as_str())
             .collect();
-        if keys != expected {
+        if keys != RATING_KEYS {
             return Err(Error::fatal(format!(
                 "rubric question `{id}` must offer {}, in that order; it offers: {}",
-                describe(expected),
+                describe(&RATING_KEYS),
                 describe(&keys),
             )));
         }
-        if kind == QuestionKind::Score && criteria.iter().any(|c| c.description.is_empty()) {
+        if criteria.iter().any(|c| c.description.is_empty()) {
             return Err(Error::fatal(format!(
-                "rubric score `{id}` must describe every level of its legend"
+                "rubric question `{id}` must describe every level of its legend"
             )));
         }
 
         Ok(Question {
             id,
-            kind,
             instructions,
             criteria,
         })

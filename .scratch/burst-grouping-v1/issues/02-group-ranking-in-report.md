@@ -7,15 +7,17 @@ carries `grouping_hash` beside `rubric_hash`, so a threshold change invalidates
 group ranks as explicitly as a wording change invalidates scores. The CSV gains
 `group`, `group_size`, `group_rank`, `is_best` and the measure columns, and gains
 one column that explains itself: `group_note` naming the clause that decided the
-frame's fate (`impact`, `only_survivor`, `excluded:focus`, `excluded:sharpness`,
+frame's fate (`rating`, `only_survivor`, `excluded:focus`, `excluded:sharpness`,
 `excluded:roll`). The ranking is a declared lexicographic rule over named
 measures — never a weighted composite: exclude frames the camera reports out of
 focus, exclude frames far below the group's best acutance, exclude frames whose
 roll deviates from the group's median when the group has a horizon, then choose
-the highest `impact` among survivors. The run summary prints the group count, the
-largest group and the rule-disagreement rate — how often the group winner differs
-from the frame with the highest `overall` — as signal, not as something to
-reconcile. `--no-group` produces exactly what v1 produced.
+the highest rating among survivors. The run summary prints the group count and the
+largest group; the rule-disagreement rate this ticket originally specified
+compared the winner to the highest `overall`, and
+[ADR 0005](../../../docs/adr/0005-one-rating-replaces-six-questions.md) leaves one
+answer, so there is nothing left to disagree with. `--no-group` produces exactly
+what v1 produced.
 
 **Blocked by:** 01
 

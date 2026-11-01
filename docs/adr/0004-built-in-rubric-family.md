@@ -29,8 +29,11 @@ it is trying to be — a portrait, a landscape, an event, a street frame, a
 snapshot — without holding it to something it never aimed at. The standard does
 not move with the genre (craft is judged absolutely); only what counts as the
 subject and the moment is read off the frame. `press` keeps the
-photojournalistic wording and the `overall` framing ticket 08 has not yet
-frozen; `holiday` keeps the family-album wording.
+photojournalistic wording ticket 08 has not yet frozen; `holiday` keeps the
+family-album wording. (Since
+[ADR 0005](0005-one-rating-replaces-six-questions.md) each built-in is that one
+wording of the same single rating question; the family is unchanged, the schema
+it varies is smaller.)
 
 **One setting, two forms.** `--rubric` and `[run] rubric` hold either a bare
 built-in name or a path:

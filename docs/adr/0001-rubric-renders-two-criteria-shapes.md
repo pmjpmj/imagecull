@@ -2,7 +2,11 @@
 
 Status: accepted · 2026-11-08 · Ticket 03 (rubric and wire adapter) ·
 amended by [ADR 0002](0002-dedupe-keys-the-state-but-not-the-filename.md) and
-[ADR 0004](0004-built-in-rubric-family.md)
+[ADR 0004](0004-built-in-rubric-family.md) · superseded in part by
+[ADR 0005](0005-one-rating-replaces-six-questions.md), which removes the `score`
+half: a cull now asks one `choice` question, so only the `choice` rendering is
+reached in practice. The wire contract still carries both types, and the argument
+below is why the authored form stays order-preserving.
 
 ## Context
 
@@ -46,8 +50,8 @@ sent the model byte-identical question schemas.
 
 Validation fixes the relationship in both directions: a score question must
 offer exactly `"0"`…`"10"` in order (otherwise the index is no longer the key),
-and a choice question must offer exactly the keys the output column parses
-(`1`–`5` for `stars`, `dislike`/`neutral`/`like` for `verdict`).
+and a choice question must offer exactly the keys the output column parses. Since
+ADR 0005 the only choice a cull asks is `stars`, whose keys are `1`–`5`.
 
 ## Consequences
 

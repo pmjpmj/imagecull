@@ -217,12 +217,12 @@ fn a_scored_frame_is_recorded_with_its_identity_the_bytes_that_were_sent_and_the
         "the hash of the bytes that actually went to the model"
     );
     assert_eq!(record["status"], Value::from("ok"));
-    assert_eq!(record["answers"]["overall"], Value::from(6.4237));
-    assert_eq!(record["answers"]["verdict"], Value::from("like"));
+    assert_eq!(record["answers"]["stars"], Value::from(4));
+    assert_eq!(record["answers"]["confidence"], Value::from(0.63));
     assert_eq!(record["usage"]["input_tokens"], Value::from(1327));
     assert_eq!(
         record["document"],
-        document(6.4237, "4"),
+        document("4"),
         "the raw answer, kept whole for --json-scores and the v2 sidecar"
     );
     assert_eq!(record["duplicate_of"], Value::Null);
@@ -381,7 +381,7 @@ fn two_full_runs_over_the_same_folder_agree_apart_from_the_latency_they_measured
     let compared = without_column(&first, "latency_ms");
     assert_eq!(compared.lines().count(), 4, "the header and three rows");
     assert!(
-        compared.contains("DSC_0002.NEF,6.4237,7.8125,5.3398,4.9601,4,like"),
+        compared.contains("DSC_0002.NEF,4,0.63"),
         "the cells being compared are still the run's own numbers: {compared}"
     );
     assert_eq!(
@@ -452,7 +452,7 @@ fn a_frame_whose_bytes_changed_since_it_was_scored_is_scored_again() {
 
     let mut config = config(out.path());
     config.ledger = LedgerMode::Resume;
-    let decider = Scripted::answering(vec![Ok(document(9.125, "5"))]);
+    let decider = Scripted::answering(vec![Ok(document("5"))]);
     let resumed = run(dir.path(), &config, &decider);
 
     assert_eq!(
@@ -496,7 +496,7 @@ fn a_frame_whose_modification_time_changed_is_scored_again() {
 
     let mut config = config(out.path());
     config.ledger = LedgerMode::Resume;
-    let decider = Scripted::answering(vec![Ok(document(3.5, "2"))]);
+    let decider = Scripted::answering(vec![Ok(document("2"))]);
     let resumed = run(dir.path(), &config, &decider);
 
     assert_eq!(resumed.resumed, 0);
@@ -633,7 +633,7 @@ fn a_ledger_written_by_another_version_is_refused() {
 fn an_identical_preview_reuses_the_earlier_outcome_and_still_gets_its_own_row() {
     let dir = burst();
     let out = out();
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4")), Ok(document(2.5, "2"))]);
+    let decider = Scripted::answering(vec![Ok(document("4")), Ok(document("2"))]);
 
     let run = run(dir.path(), &config(out.path()), &decider);
 
@@ -651,7 +651,7 @@ fn an_identical_preview_reuses_the_earlier_outcome_and_still_gets_its_own_row() 
         ["", "", "DSC_0001.NEF"],
         "the third frame names the one that paid for the request"
     );
-    for column_name in ["overall", "stars", "verdict", "conf_overall", "latency_ms"] {
+    for column_name in ["stars", "conf_stars", "latency_ms"] {
         assert_eq!(
             column(out.path(), column_name)[0],
             column(out.path(), column_name)[2],
@@ -677,9 +677,9 @@ fn no_dedupe_scores_every_frame_independently() {
     let mut config = config(out.path());
     config.dedupe = false;
     let decider = Scripted::answering(vec![
-        Ok(document(6.4237, "4")),
-        Ok(document(2.5, "2")),
-        Ok(document(8.25, "5")),
+        Ok(document("4")),
+        Ok(document("2")),
+        Ok(document("5")),
     ]);
 
     let run = run(dir.path(), &config, &decider);
@@ -707,8 +707,7 @@ fn dedupe_reaches_the_outcomes_a_resumed_ledger_holds() {
     scoring::run(
         dir.path(),
         &config(out.path()),
-        &Scripted::answering(vec![Ok(document(6.4237, "4"))])
-            .cancelling_after(1, Arc::clone(&cancel)),
+        &Scripted::answering(vec![Ok(document("4"))]).cancelling_after(1, Arc::clone(&cancel)),
         &Silent,
         &cancel,
     )
@@ -718,7 +717,7 @@ fn dedupe_reaches_the_outcomes_a_resumed_ledger_holds() {
     // the frame that is not a duplicate costs a request.
     let mut config = config(out.path());
     config.ledger = LedgerMode::Resume;
-    let decider = Scripted::answering(vec![Ok(document(2.5, "2"))]);
+    let decider = Scripted::answering(vec![Ok(document("2"))]);
     let resumed = run(dir.path(), &config, &decider);
 
     assert_eq!(decider.seen().len(), 1);
@@ -755,14 +754,14 @@ fn a_file_that_is_not_a_ledger_is_refused_rather_than_read() {
 fn a_resumed_run_keeps_the_documents_and_the_failures_the_ledger_recorded() {
     let dir = shoot(3);
     let out = out();
-    let unreadable = serde_json::json!({"answers": {"overall": {"score": 6.0}}});
+    let unreadable = serde_json::json!({"answers": {"stars": {"choice": "4"}}});
     let json = out.path().join("scores.json");
     let mut whole = config(out.path());
     whole.outputs.json_scores = Some(json.clone());
     let decider = Scripted::answering(vec![
-        Ok(document(6.4237, "4")),
+        Ok(document("4")),
         Ok(unreadable.clone()),
-        Ok(document(2.5, "2")),
+        Ok(document("2")),
     ]);
     run(dir.path(), &whole, &decider);
     let first_csv = csv_text(out.path());

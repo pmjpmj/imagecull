@@ -134,8 +134,8 @@ fn every_frame_is_reported_in_ingest_order_with_its_answers_and_latency() {
     let Judgement::Answered(answers) = &first.judgement else {
         panic!("the model answered this frame: {first:?}");
     };
-    assert_eq!(answers.overall, 6.4237, "the model's own precision");
-    assert_eq!(answers.stars, 4);
+    assert_eq!(answers.stars, 4, "the model's own choice");
+    assert_eq!(answers.confidence, 0.63, "the top-option probability");
     assert_eq!(first.latency_ms, Some(812), "the request's own latency");
     let preview = first.preview.as_ref().expect("the bytes that were sent");
     assert_eq!((preview.width, preview.height), (48, 32));
@@ -164,7 +164,7 @@ fn a_frame_without_answers_is_reported_with_its_status_and_message() {
 #[test]
 fn a_reading_that_could_not_be_read_is_reported_as_its_status() {
     let shoot = shoot(&[("DSC_0001.NEF", nef(support::jpeg(64, 32, 80)))]);
-    let unreadable = serde_json::json!({"answers": {"overall": {"score": 6.0}}});
+    let unreadable = serde_json::json!({"answers": {"stars": {"choice": "9"}}});
 
     let (reporter, _run) = driven(&shoot, &Scripted::answering(vec![Ok(unreadable)]));
 
@@ -306,7 +306,7 @@ fn a_deduplicated_frame_names_the_frame_it_reused() {
         ),
         ("DSC_0002.NEF", support::nef(1, &[preview])),
     ]);
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4"))]);
+    let decider = Scripted::answering(vec![Ok(document("4"))]);
 
     let (reporter, _run) = driven(&shoot, &decider);
 
@@ -444,7 +444,7 @@ fn the_run_finishes_with_the_summary_its_frames_add_up_to() {
         ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
         ("DSC_0002.NEF", b"not a NEF at all".to_vec()),
     ]);
-    let decider = Scripted::answering(vec![Ok(document(6.4237, "4"))]);
+    let decider = Scripted::answering(vec![Ok(document("4"))]);
 
     let (reporter, run) = driven(&shoot, &decider);
 

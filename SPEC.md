@@ -9,7 +9,7 @@
 
 A shoot lands as 300–800 NEFs. All of them are technically fine; maybe 10% are the keepers. Judging that today means opening every frame in a RAW editor and tapping stars — an hour or two of pure triage, before any editing starts.
 
-The task is *decision*, not generation: each frame gets a few numbers and a verdict. That maps exactly onto Cloudflare's **Clef**, served locally by **oMLX** on `POST /v1/systemone` — it reads a state plus a schema of typed questions and returns a probability for every allowed option in **one forward pass**, with no generated text to parse.
+The task is *decision*, not generation: each frame gets one keeper rating from 1 to 5. That maps exactly onto Cloudflare's **Clef**, served locally by **oMLX** on `POST /v1/systemone` — it reads a state plus a schema of typed questions and returns a probability for every allowed option in **one forward pass**, with no generated text to parse.
 
 ## 2. Goals
 
@@ -17,8 +17,8 @@ The task is *decision*, not generation: each frame gets a few numbers and a verd
 |---|---|
 | G1 | Point at a folder; get one row per Nikon mirrorless RAW with scores, no manual work. |
 | G2 | Preview-quality input: never decode RAW sensor data; use the JPEG the camera embedded. |
-| G3 | Raw scores recorded separately and **never combined** — `overall`, `technical`, `composition`, `impact`. |
-| G4 | Star rating and like/dislike come from the model itself, not from post-hoc thresholds. |
+| G3 | One keeper rating per frame, 1–5, recorded exactly as the model chose it. |
+| G4 | No post-hoc thresholds: the rating is the model's own `choice`, never derived from other numbers. |
 | G5 | Interruptible and resumable; a 400-file run survives Ctrl-C, sleep, or a server restart. |
 | G6 | Deterministic: same image + same rubric + same model ⇒ same numbers, so results are cacheable. |
 | G7 | v1 is read-only. Nothing is written into the photo folder except the CSV the user asked for. |
@@ -39,8 +39,8 @@ The task is *decision*, not generation: each frame gets a few numbers and a verd
 |---|---|---|
 | Language | **Rust** (clap CLI → Tauri GUI) | Strict types for the systemone request/answer contract; one fast binary; Tauri reuses the same core crate for the Mac GUI. |
 | Preview source | **Largest embedded JPEG** in the NEF | Camera-rendered, already sharpened; no colour pipeline to build. |
-| Scoring shape | **4 independent `score` questions, no combination** | Different failure modes stay diagnosable; no invented weighting. |
-| Stars / verdict | **Extra `choice` questions in the same forward pass** | Clef is a decision model; a 5-way and a 3-way choice are its native mode. Cost ≈ 0 latency. |
+| Scoring shape | **One `choice` question, answered 1–5** | A cull wants a keeper rating, not a diagnosis; a single 5-way choice is Clef's native mode and leaves nothing to combine. |
+| Rating legend | **1 = delete · 2 = not great · 3 = okay to keep · 4 = good · 5 = great** | Five named levels, so the answer is a decision the photographer can act on and a spreadsheet can sort. |
 | Sidecar target (v2) | **Lightroom Classic / ACR** — `DSC_0001.xmp` | LrC 13.2+ honours both `xmp:Rating` and `xmpDM:pick` from sidecars. |
 | Run model | **Sequential + resumable JSONL ledger** | oMLX serializes requests anyway; the win is crash-safety, not parallelism. |
 | v1 output | **CSV only** | Prove the numbers on a real shoot before anything writes into the library. |
@@ -64,7 +64,7 @@ The task is *decision*, not generation: each frame gets a few numbers and a verd
                                     ▼
                     ┌──────────────────────────────────────────────┐
                     │ decide     POST /v1/systemone (1 image,      │
-                    │            6 questions, 1 forward pass)      │
+                    │            1 question, 1 forward pass)       │
                     └───────────────┬──────────────────────────────┘
                                     ▼
                     ┌──────────────────────────────────────────────┐
@@ -201,9 +201,9 @@ Plus `usage.input_tokens` (and `usage.latency_ms` on the reference server).
 
 Parsing rules (defensive — this contract is new surface):
 
-- `answer.choice` is a **string** key from `criteria`; parse to `u8` for stars.
-- `answer.score` is a **float** (expected value over the legend). Never round it into the CSV; keep the model's precision.
-- `probabilities` may arrive as an ordered array or as an object keyed by option. Deserialize as `serde_json::Value` and only *display* it; **never** derive the recorded answer from it. `score`/`choice`/`confidence` are the source of truth.
+- `answer.choice` is a **string** key from `criteria`; parse to `u8` for the rating.
+- `answer.score` is a **float** (expected value over the legend). The cull asks no `score` question today, so none is recorded; the type stays part of the wire contract.
+- `probabilities` may arrive as an ordered array or as an object keyed by option. Deserialize as `serde_json::Value` and only *display* it; **never** derive the recorded answer from it. `choice` and `confidence` are the source of truth.
 - The full raw answer JSON is preserved for `--json-scores`, so nothing is lost if the shape shifts.
 - Treat an answer key that is missing from `answers` as `status=bad_response` for that file.
 
@@ -215,7 +215,7 @@ Parsing rules (defensive — this contract is new surface):
 
 ## 8. The rubric
 
-Six questions, one forward pass. Encoded as TOML so wording can be tuned without a rebuild; three rubrics ship via `include_str!`, `general` is the one a run uses when nothing selects another, and `--rubric` takes a name or a path. The effective rubric is hashed (§8.3) and the name it was selected by is provenance only.
+One question, one forward pass. Encoded as TOML so wording can be tuned without a rebuild; three rubrics ship via `include_str!`, `general` is the one a run uses when nothing selects another, and `--rubric` takes a name or a path. The effective rubric is hashed (§8.3) and the name it was selected by is provenance only.
 
 The wording is the judging, so three rubrics are compiled into the binary and
 selected by name: `general` (the default — no genre assumed, the frame judged on
@@ -223,10 +223,10 @@ the terms it appears to set for itself), `press` (a photo editor culling a
 photojournalistic shoot) and `holiday` (a family album from a trip, where a family
 member recognised and unguarded is the subject and a landscape must hold the
 place and its light). `--rubric` takes one of those three names or a path to any
-other file that keeps the six ids, the 0-10 legends and the star/verdict keys;
-`[run] rubric` in a config file takes the same value. Each rubric's file stays in
-the tree under `crates/imagecull-core/rubrics/` as the copy to read and to start
-a draft from; ADR 0004 records the family.
+other file that keeps the `stars` id and the five rating keys; `[run] rubric` in
+a config file takes the same value. Each rubric's file stays in the tree under
+`crates/imagecull-core/rubrics/` as the copy to read and to start a draft from;
+ADR 0004 records the family.
 
 Three rubrics differ only in words, and the hash keeps their reports from ever
 being compared. A name is provenance, not identity: `--rubric holiday` and a path
@@ -234,55 +234,58 @@ to a byte-identical copy of that file are the same judgement under the same hash
 because the hash covers the question schema and the alias, never how the rubric
 was named.
 
-### 8.1 The four scores
+### 8.1 The one question
 
-Each is an ordered `criteria` array `"0"…"10"`, so `score` is the legend index and the raw answer is a float in `[0, 10]`. **These are never combined and never rescaled to 100.**
+The cull asks one `choice` question, `stars`, answered on a five-point legend.
+The frame is judged whole in that one call — what it is trying to be, how well it
+is made, and whether it holds anything worth looking at — because a cull wants a
+keeper rating, not a diagnosis. The legend is fixed:
 
-| id | instructions (draft) |
-|---|---|
-| `overall` | "You are a photo editor culling a shoot. Rate this photograph as a keeper. 0 = delete, unusable. 5 = keep as a record. 8 = good enough to deliver to a client. 10 = portfolio-grade, the best frame of the shoot." |
-| `technical` | "Judge technical image quality only: focus on the intended subject, motion blur, noise, exposure, white balance, lens and sensor artifacts, clipped highlights or crushed shadows. Ignore whether the subject is interesting." |
-| `composition` | "Judge framing and graphic design only: subject placement, balance, leading lines, negative space, level horizon, distracting background or edge intrusions, crop. Ignore technical quality and the appeal of the subject." |
-| `impact` | "Judge emotional and visual impact only: does the frame capture a distinctive moment, gesture, expression or quality of light that makes someone stop and look? Ignore technical quality and rule-based composition." |
-
-Splitting them is what makes the output actionable: a blurry but decisive moment (`technical` 3, `impact` 9) is a different decision from a sterile, perfectly sharp frame (`technical` 9, `impact` 3), and a single blended number erases that distinction.
-
-### 8.2 Stars and verdict
-
-```jsonc
-"stars": {
-  "type": "choice",
-  "instructions": "Applying a typical star rating to this photograph, how many stars?",
-  "criteria": [
-    {"key": "1", "description": "reject — unusable, out of focus, or a duplicate"},
-    {"key": "2", "description": "poor — technically fine but nothing worth keeping"},
-    {"key": "3", "description": "ok — keep as a record of the moment"},
-    {"key": "4", "description": "strong — good enough to deliver to a client"},
-    {"key": "5", "description": "excellent — hero frame, portfolio or print"}
-  ]
-},
-"verdict": {
-  "type": "choice",
-  "instructions": "Would you personally keep this photograph?",
-  "criteria": [
-    {"key": "dislike", "description": "I would not keep it"},
-    {"key": "neutral", "description": "I could keep it or not"},
-    {"key": "like",    "description": "I would keep it and show it"}
-  ]
-}
+```toml
+[[question]]
+id = "stars"
+type = "choice"
+instructions = "…the rubric's own words…"
+criteria = [
+    { key = "1", description = "delete — nothing in it anyone would keep" },
+    { key = "2", description = "not great — a real flaw, or nothing to hold the eye" },
+    { key = "3", description = "okay to keep — fine, and worth keeping as a record" },
+    { key = "4", description = "good — clearly worth keeping; one to share or print" },
+    { key = "5", description = "great — the frame the folder is remembered by" },
+]
 ```
 
-`criteria` for `choice` is an **array of `{key, description}`** in TOML rather than a table, because TOML tables do not guarantee key order and the option order matters to the model's legend.
+- **1 = delete · 2 = not great · 3 = okay to keep · 4 = good · 5 = great.** The
+  gloss after the dash is the rubric's to write; the anchor word is not, because
+  those five words are what a report's reader is sorting by.
+- The keys are `"1"`…`"5"` in that order. The report's integer column parses
+  them, and the v2 sidecar maps the key straight to `xmp:Rating`.
+- Because the answer is the model's own choice, there is nothing to combine, rescale or
+  threshold. A frame is one number, and the number is the decision.
 
-On the wire the same authored form is rendered per question type: a `score` sends the ordered list of level descriptions (index = key), a `choice` sends an object keyed by option. Those are the shapes the Clef heads read; see `docs/adr/0001-rubric-renders-two-criteria-shapes.md`.
+`criteria` for `choice` is an **array of `{key, description}`** in TOML rather
+than a table, because TOML tables do not guarantee key order and the option order
+matters to the model's legend. On the wire it is rendered as an object keyed by
+option, the shape the Clef `choice` head reads; see
+`docs/adr/0001-rubric-renders-two-criteria-shapes.md` and
+`docs/adr/0005-one-rating-replaces-six-questions.md`.
+
+### 8.2 Confidence
+
+Each `choice` answer carries `confidence`, the top-option probability. It is
+recorded per frame (`conf_stars`) because it is the cheapest "the model is
+unsure" signal available, and the summary reports the distribution of ratings
+beside it. Confidence never changes an answer: a low number marks a frame a
+photographer may want to look at, not a frame to re-ask about.
 
 ### 8.3 Rubric hash
 
-`sha256` over the canonicalised question schema (ids, types, instructions, criteria, in declaration order) + `model` alias. Recorded in the ledger header, in the CSV's `rubric_hash` column, and (v2) in the XMP sidecar. `calibration` and `resume` both key off it: changing wording invalidates cached scores by design, and the run refuses to silently mix rubrics.
-
-### 8.4 Disagreement is signal, not error
-
-`stars` and `overall` will occasionally conflict. **Do not reconcile them.** Both are recorded; a `--report` summary prints the disagreement rate. If it is high, the rubric wording needs work (§13.2), not a fudge factor.
+`sha256` over the canonicalised question schema (id, instructions, criteria, in
+declaration order) + `model` alias, with the schema tag `imagecull-rubric-v2`.
+Recorded in the ledger header, in the CSV's `rubric_hash` column, and (v2) in the
+XMP sidecar. `calibration` and `resume` both key off it: changing wording
+invalidates cached answers by design, and the run refuses to silently mix
+rubrics.
 
 ---
 
@@ -303,24 +306,18 @@ row and the ledger already holds every document.
 | column | example | notes |
 |---|---|---|
 | `file` | `DSC_0421.NEF` | Relative to the input dir unless `--absolute`. |
-| `overall` | `6.42` | Model's expected value, full precision. Empty on error. |
-| `technical` | `7.81` | "" |
-| `composition` | `5.34` | "" |
-| `impact` | `4.96` | "" |
-| `stars` | `4` | Integer 1–5. |
-| `verdict` | `like` | `like` / `neutral` / `dislike`. |
-| `conf_overall` | `0.41` | Top-option probability. A low value here means "the model is unsure", which is the cheapest failure signal available. |
-| `conf_stars` | `0.63` | "" |
-| `conf_verdict` | `0.88` | "" |
+| `stars` | `4` | The model's own choice, integer 1–5. Empty on error. |
+| `conf_stars` | `0.63` | Top-option probability. A low value means "the model is unsure", the cheapest failure signal available. |
 | `latency_ms` | `812` | Server-side if provided, else client-measured. |
 | `input_tokens` | `1327` | Prompt size. |
 | `status` | `ok` | See §10 taxonomy. |
 | `error` | `` | Short message when `status != ok`. |
-| `duplicate_of` | `DSC_0418.NEF` | Set when the identical preview was already scored. |
+| `duplicate_of` | `DSC_0418.NEF` | Set when the identical preview was already judged. |
 | `rubric_hash` | `9f3c…` | First 8 hex chars. |
 | `model` | `clef-flash-oQ4e` | Whatever the server alias is. |
 
-Additions over the original ask (4 scores) are justified: `stars`/`verdict` are the v2 XMP payload and cost nothing now; confidences are the only honest measure of trust; `status`/`error` keep a 400-file CSV self-explaining.
+One answer, so one value column. Confidence is the only honest measure of trust;
+`status`/`error` keep a 400-file CSV self-explaining.
 
 `--json-scores scores.jsonl` writes the full raw `/v1/systemone` answer per file for debugging and future re-derivation.
 
@@ -453,19 +450,21 @@ consequences for what that leaves open.
 
 ## 12. v2 — XMP sidecars for Lightroom Classic
 
-**Not built in v1.** Specced now because it constrains v1's data model (all six questions, confidences, rubric hash and model must be recorded even though v1 only prints CSV).
+**Not built in v1.** Specced now because it constrains v1's data model (the rating, its confidence, the rubric hash and the model must be recorded even though v1 only prints CSV).
 
 ### 12.1 What actually survives the handoff
 
 | field | XMP property | LrC reads it | other apps |
 |---|---|---|---|
-| stars | `xmp:Rating` `0`–`5` | yes, at import or *Read Metadata from File* | yes (Bridge, dt, digiKam) |
-| rejected | `xmp:Rating` `-1` | yes | yes |
-| like tint | `xmp:Label` (`Green`/`Red`/none) | yes | partially (one colour label) |
-| pick / reject flag | `xmpDM:pick` `1`/`0`/`-1` + `xmpDM:good` | yes, LrC ≥ 13.2 only | mostly ignored |
-| the four raw scores | our own namespace | ignored (preserved) | ignored (preserved) |
+| stars | `xmp:Rating` `1`–`5` | yes, at import or *Read Metadata from File* | yes (Bridge, dt, digiKam) |
+| rejected | `xmp:Rating` `-1` | yes | yes — **never written by this tool** |
+| like tint | `xmp:Label` (`Green`/`Red`/none) | yes | partially (one colour label) — **not written: the cull has no verdict** |
+| pick / reject flag | `xmpDM:pick` `1`/`0`/`-1` + `xmpDM:good` | yes, LrC ≥ 13.2 only | mostly ignored — **not written: the reject is the photographer's** |
+| confidence | our own namespace | ignored (preserved) | ignored (preserved) |
 
-Design consequence: **stars are the portable channel, the flag is a bonus, and the scores live in a namespace nobody else touches** so nothing is lost or mangled on the round trip.
+Design consequence: **the rating is the portable channel (`xmp:Rating`), and
+everything else lives in a namespace nobody else touches** so nothing is lost or
+mangled on the round trip.
 
 ### 12.2 Filename
 
@@ -480,18 +479,9 @@ A sidecar may already carry ACR develop settings (`crs:`), keywords, GPS or dark
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-    xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/"
     xmlns:imagecull="https://ns.imagecull.app/1.0/"
     xmp:Rating="4"
-    xmp:Label="Green"
-    xmpDM:pick="1"
-    xmpDM:good="True"
-    imagecull:overall="6.42"
-    imagecull:technical="7.81"
-    imagecull:composition="5.34"
-    imagecull:impact="4.96"
     imagecull:stars="4"
-    imagecull:verdict="like"
     imagecull:confStars="0.63"
     imagecull:model="clef-flash-oQ4e"
     imagecull:rubricHash="9f3c1a77"
@@ -501,7 +491,11 @@ A sidecar may already carry ACR develop settings (`crs:`), keywords, GPS or dark
 </x:xmpmeta>
 ```
 
-Mapping: `stars` → `xmp:Rating`; `verdict=like` → `xmp:Label=Green` + `xmpDM:pick=1` + `xmpDM:good=True`; `verdict=dislike` → `xmp:Label=Red` + `xmpDM:pick=-1`; `neutral` → no label, `pick=0`. **Never** set `xmp:Rating=-1` automatically — that is the user's destructive reject, and it belongs to them.
+Mapping: `stars` → `xmp:Rating`, one for one, `1`–`5`. A low rating is not a
+rejection: **never** set `xmp:Rating=-1` automatically — that is the user's
+destructive reject, and it belongs to them. Pick/reject flags (`xmpDM:pick`,
+`xmp:Label`) are the photographer's, not the model's, because the cull answers
+one question and that question is the rating.
 
 ### 12.4 Safety rules
 
@@ -525,9 +519,9 @@ No new scoring logic: `imagecull-gui` links `imagecull-core` and replaces the `R
 
 | pane | content |
 |---|---|
-| grid | thumbnail wall sorted by `overall` descending; each cell shows 4 scores, stars, verdict, and a confidence delta. Thumbnails come from the same embedded preview that was scored, so **what the model saw is what you see.** |
-| filters | star range, verdict, min `impact`, "disagreements only", `conf_stars < 0.5` |
-| detail | preview + the 6 probability distributions as small bar charts; the single most useful debugging view in the whole app |
+| grid | thumbnail wall sorted by `stars` descending; each cell shows the rating and its confidence. Thumbnails come from the same embedded preview that was judged, so **what the model saw is what you see.** |
+| filters | star range, `conf_stars < 0.5` |
+| detail | preview + the five rating probabilities as a small bar chart; the single most useful debugging view in the whole app |
 | cull | keyboard `0`–`5` overrides, `P`/`X` pick/reject, then *Write XMP* for the visible selection |
 | run | folder picker, live progress row, cancel button, resume-on-relaunch |
 
@@ -570,17 +564,17 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 |---|---|
 | `landscape.nef` | baseline, orientation 1 |
 | `portrait.nef` | orientation 6/8 — the rotation regression test |
-| `high_iso.nef` | expect low `technical` |
-| `blurred.nef` | expect low `technical`, maybe high `impact` |
+| `high_iso.nef` | expect a low rating |
+| `blurred.nef` | expect a low rating even when the moment is strong |
 | `burst_a.nef`, `burst_b.nef` | identical preview bytes for dedupe (or use `--no-dedupe` fixtures) |
 | `broken.nef` | truncated file → `unreadable`, no panic |
 
 ### 16.2 Layers
 
 - **Unit:** orientation application (all 8 tags), largest-preview selection by area, downscale never upscales, base64 round-trip, CSV escaping (filenames with commas/quotes/unicode), ledger truncation repair, rubric canonicalisation/hash stability.
-- **Contract:** `httpmock` serves recorded `/v1/systemone` bodies — including adversarial ones (`probabilities` as array *and* as object, float `score`, `choice` as string) — and asserts our deserialisation. No network in CI.
+- **Contract:** `httpmock` serves recorded `/v1/systemone` bodies — including adversarial ones (`probabilities` as array *and* as object, `choice` as string, a key off the legend) — and asserts our deserialisation. No network in CI.
 - **Golden:** `insta` snapshots of the CSV for the fixture set against the mock server.
-- **Live (ignored by default, `--ignored`):** one real NEF against a real oMLX; asserts `status=ok` and that all four scores land in `[0,10]`.
+- **Live (ignored by default, `--ignored`):** one real NEF against a real oMLX; asserts `status=ok` and that the rating lands in `1..=5`.
 - **Acceptance:**
   1. 400-file run completes; every row has a status.
   2. `Ctrl-C` at 50% then `--resume` produces the same CSV as one uninterrupted run, with no duplicate rows.
@@ -595,8 +589,8 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 | # | risk | mitigation |
 |---|---|---|
 | R1 | **Which Clef checkpoint?** 27B scores higher; Flash is 4× faster and runs in 16 GB. Unknown which is installed. | `doctor`/`models` report the alias and size; rubric hash includes the model so results never silently mix. Ask before M4. |
-| R2 | **Is Clef actually good at absolute aesthetic scores?** These four questions are a *new* use of a model trained on typed decisions. | M4 calibration against `xmp:Rating` the user already applied to past shoots (§11 `calibrate`). No tuning before evidence. |
-| R3 | Composition/scoring may saturate (everything 6–8). | Watch the histogram in the run summary; if `composition` variance is low, the criteria descriptions need work, not the thresholds. |
+| R2 | **Is Clef actually good at an absolute keeper rating?** One 5-way choice is a *new* use of a model trained on typed decisions. | M4 calibration against `xmp:Rating` the user already applied to past shoots (§11 `calibrate`). No tuning before evidence. |
+| R3 | The rating may saturate (everything 3–4). | Watch the histogram in the run summary; if the spread is flat, the rubric's instructions and level glosses need work, not the thresholds — there are no thresholds. |
 | R4 | `/v1/systemone` is new surface that may drift. | Defensive parsing, raw answers preserved, contract tests, version check in `doctor`. |
 | R5 | Embedded preview ≠ the edit the user would make. | Deliberate: the preview is the camera's rendering and the thing a cull actually judges. Full RAW demosaic stays a non-goal. |
 | R6 | Long runs on battery / sleep kills the server. | Ledger + resume; `doctor` preflight; `caffeinate -i` suggested in docs. |
@@ -605,7 +599,7 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 
 Open questions for the user:
 1. Which Clef build is installed (27B / Flash, 4-bit / 8-bit), and which oMLX version?
-2. Aesthetic target: photojournalistic keepers, or technically-clean deliverables? It changes the `overall` instructions.
+2. Aesthetic target: photojournalistic keepers, or technically-clean deliverables? It changes the rubric's instructions.
 3. Are there existing star-rated shoots we can use as calibration ground truth (with XMP already written)?
 4. Should bursts be collapsed in the CSV (one row per distinct frame, with `duplicate_of`) or always one row per NEF?
 
@@ -617,7 +611,7 @@ Open questions for the user:
 |---|---|---|
 | **M0** | workspace scaffold, `--version`, `doctor`, error taxonomy | `imagecull doctor` explains a missing/old oMLX clearly |
 | **M1** | ingest + preview extraction + orientation + downscale + `--dry-run` | portrait fixture exports upright at 1568 px |
-| **M2** | systemone client + rubric + single-file score | one NEF prints six answers; contract tests green |
+| **M2** | systemone client + rubric + single-file score | one NEF prints its rating; contract tests green |
 | **M3** | ledger, resume, CSV, progress, summary | acceptance tests 1–5 pass |
 | **M4** | real-shoot validation + rubric tuning + optional `calibrate` | scores agree with the user's own stars on a known shoot; rubric frozen |
 | **M5** | v2 XMP writer for Lightroom Classic | dry-run diff reviewed, 20 sidecars verified in LrC |

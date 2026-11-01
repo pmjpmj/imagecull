@@ -65,12 +65,12 @@ pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
 pub use ledger::{FileIdentity, Ledger, LedgerMode, Provenance, Record, ResumeKey};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
-    DISAGREEMENT_RULE, Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter,
-    Scores, Silent, Started, StatusCount, Summary, Warning, agrees, implied_stars,
+    Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter, Silent, Started,
+    StatusCount, Summary, Warning,
 };
-pub use reading::{Answers, Confidences, Reading, Verdict};
+pub use reading::{Answers, Reading};
 pub use report::Outputs;
-pub use rubric::{Builtin, Question, QuestionKind, Rubric, RubricHash, RubricSource};
+pub use rubric::{Builtin, Question, Rubric, RubricHash, RubricSource};
 pub use scoring::{
     Cancel, Config, Decider, Ending, Request, Response, RetryPolicy, Run, State, Usage,
 };

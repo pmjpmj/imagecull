@@ -1,4 +1,4 @@
-//! One frame in, six answers out: the scoring entry point, and the one seam
+//! One frame in, one answer out: the scoring entry point, and the one seam
 //! the pipeline has.
 //!
 //! Everything the model would see is decided here and passed across
@@ -302,7 +302,7 @@ pub struct Run {
 }
 
 impl Run {
-    /// How many frames produced six readable answers.
+    /// How many frames produced a readable answer.
     pub fn scored(&self) -> usize {
         self.frames
             .iter()
@@ -365,7 +365,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The six answers, or the failure the row's `status` and `error` carry.
+    /// The answer, or the failure the row's `status` and `error` carry.
     ///
     /// One of the two always applies: a document that arrived but could not be
     /// read is a [`Failure`] too, exactly as the CSV records it. This is the
@@ -378,7 +378,7 @@ impl Frame {
         }
     }
 
-    /// The six answers, when this frame has them.
+    /// The answer, when this frame has it.
     pub fn answers(&self) -> Option<&Answers> {
         self.answers_or_failure().ok()
     }

@@ -16,9 +16,7 @@
 use std::io::Write;
 
 use imagecull_core::ingest::ScanCounts;
-use imagecull_core::progress::{
-    DISAGREEMENT_RULE, Event, FrameEvent, Judgement, Reporter, Started, Summary, Warning,
-};
+use imagecull_core::progress::{Event, FrameEvent, Judgement, Reporter, Started, Summary, Warning};
 use imagecull_core::rubric::{Builtin, RubricHash};
 use imagecull_core::scoring::Ending;
 
@@ -157,8 +155,8 @@ fn frame_text(frame: &FrameEvent, verbosity: Verbosity) -> Option<String> {
     }
 }
 
-/// The per-frame line: index, name, the scores and stars, what it cost, whether
-/// an identical preview paid for it, and when the run will be done.
+/// The per-frame line: index, name, the rating, what it cost, whether an
+/// identical preview paid for it, and when the run will be done.
 fn frame_line(frame: &FrameEvent) -> String {
     let mut parts = vec![
         format!("{}/{}", frame.index, frame.total),
@@ -166,11 +164,7 @@ fn frame_line(frame: &FrameEvent) -> String {
     ];
     match &frame.judgement {
         Judgement::Answered(answers) => {
-            parts.push(format!(
-                "{:.2}/{:.2}/{:.2}/{:.2}",
-                answers.overall, answers.technical, answers.composition, answers.impact
-            ));
-            parts.push(format!("{}★ {}", answers.stars, answers.verdict.as_str()));
+            parts.push(format!("{}★", answers.stars));
         }
         Judgement::Failed(failure) => parts.push(failure.kind.as_str().to_string()),
     }
@@ -205,10 +199,9 @@ fn verbose_line(frame: &FrameEvent) -> String {
                 parts.push(format!("{latency_ms}ms"));
             }
             parts.push(format!(
-                "overall {}  technical {}  composition {}  impact {}",
-                answers.overall, answers.technical, answers.composition, answers.impact
+                "{}★  confidence {:.2}",
+                answers.stars, answers.confidence
             ));
-            parts.push(format!("{}★ {}", answers.stars, answers.verdict.as_str()));
         }
         Judgement::Failed(failure) => {
             parts.push(failure.kind.as_str().to_string());
@@ -252,28 +245,13 @@ fn summary_block(summary: &Summary) -> String {
         duration_text(summary.elapsed)
     ));
     out.push_str(&format!("status: {}\n", statuses(summary)));
-    if let Some(scores) = &summary.scores {
+    if let Some(rating) = &summary.rating {
         out.push_str(&format!(
-            "scores: overall {:.2} mean / {:.2} median · technical {:.2} / {:.2} · \
-             composition {:.2} / {:.2} · impact {:.2} / {:.2}\n",
-            scores.overall.mean,
-            scores.overall.median,
-            scores.technical.mean,
-            scores.technical.median,
-            scores.composition.mean,
-            scores.composition.median,
-            scores.impact.mean,
-            scores.impact.median,
+            "rating: {:.2} mean / {:.2} median\n",
+            rating.mean, rating.median,
         ));
         out.push_str(&format!("stars: {}\n", histogram(&summary.stars)));
     }
-    out.push_str(&format!(
-        "disagreements: {} of {} ({}%) · {} — reported, never reconciled\n",
-        summary.disagreements,
-        summary.scored,
-        percent(summary.disagreement_rate),
-        DISAGREEMENT_RULE,
-    ));
     if summary.resumed > 0 || summary.duplicates > 0 {
         out.push_str(&format!(
             "resumed: {} · deduplicated: {}\n",
@@ -366,11 +344,6 @@ fn histogram(stars: &[usize; 5]) -> String {
         .join(" · ")
 }
 
-/// A rate as the summary spells it: one decimal place of a percentage.
-fn percent(rate: f64) -> String {
-    format!("{:.1}", rate * 100.0)
-}
-
 /// A duration as a photographer reads it: `42s`, `8m12s`, `1h02m`.
 pub(crate) fn duration_text(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
@@ -425,8 +398,8 @@ mod tests {
 
     use imagecull_core::error::ErrorKind;
     use imagecull_core::ingest::ScanCounts;
-    use imagecull_core::progress::{MeanMedian, PreviewShape, Scores, StatusCount, Warning};
-    use imagecull_core::reading::{Answers, Confidences, Verdict};
+    use imagecull_core::progress::{MeanMedian, PreviewShape, StatusCount, Warning};
+    use imagecull_core::reading::Answers;
     use imagecull_core::report::Failure;
     use imagecull_core::rubric::Builtin;
     use imagecull_core::scoring::Ending;
@@ -435,20 +408,8 @@ mod tests {
 
     fn answers() -> Answers {
         Answers {
-            overall: 6.4237,
-            technical: 7.8125,
-            composition: 5.3398,
-            impact: 4.9601,
             stars: 4,
-            verdict: Verdict::Like,
-            confidence: Confidences {
-                overall: 0.41,
-                technical: 0.55,
-                composition: 0.33,
-                impact: 0.62,
-                stars: 0.63,
-                verdict: 0.88,
-            },
+            confidence: 0.63,
         }
     }
 
@@ -524,27 +485,11 @@ mod tests {
                     count: 2,
                 },
             ],
-            scores: Some(Scores {
-                overall: MeanMedian {
-                    mean: 6.42,
-                    median: 6.51,
-                },
-                technical: MeanMedian {
-                    mean: 7.8,
-                    median: 7.9,
-                },
-                composition: MeanMedian {
-                    mean: 5.3,
-                    median: 5.4,
-                },
-                impact: MeanMedian {
-                    mean: 4.9,
-                    median: 5.0,
-                },
+            rating: Some(MeanMedian {
+                mean: 4.54,
+                median: 5.0,
             }),
             stars: [0, 4, 51, 68, 274],
-            disagreements: 6,
-            disagreement_rate: 6.0 / 397.0,
             builtin: Some(Builtin::General),
             rubric_hash: rubric,
             model: "clef-flash-oQ4e".to_string(),
@@ -576,11 +521,11 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_line_shows_index_name_scores_stars_latency_and_eta() {
+    fn the_frame_line_shows_index_name_rating_latency_and_eta() {
         let rendered = transcript(&[answered(12)], Verbosity::Normal);
 
         assert_eq!(
-            rendered.out, "12/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 7m41s\n",
+            rendered.out, "12/400  DSC_0012.NEF  4★  812ms  eta 7m41s\n",
             "one line per frame, ended by a newline"
         );
         assert!(rendered.err.is_empty());
@@ -609,7 +554,7 @@ mod tests {
         );
         assert!(
             rendered.out.contains(
-                "12/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  eta 7m41s\n\
+                "12/400  DSC_0012.NEF  4★  812ms  eta 7m41s\n\
                  13/400  DSC_0013.NEF  timeout  eta 7m39s\n"
             ),
             "every frame gets its own line: {}",
@@ -623,17 +568,15 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_block_reports_the_counts_the_statistics_and_the_rule() {
+    fn the_summary_block_reports_the_counts_the_rating_and_the_histogram() {
         let rendered = transcript(&[finished(Ending::Completed)], Verbosity::Normal);
         let short = summary().rubric_hash.short().to_string();
 
         let expected = format!(
             "scored: 397 of 400 in 8m12s\n\
              status: ok 397 · no_preview 1 · timeout 2\n\
-             scores: overall 6.42 mean / 6.51 median · technical 7.80 / 7.90 · \
-             composition 5.30 / 5.40 · impact 4.90 / 5.00\n\
+             rating: 4.54 mean / 5.00 median\n\
              stars: 1★ 0 · 2★ 4 · 3★ 51 · 4★ 68 · 5★ 274\n\
-             disagreements: 6 of 397 (1.5%) · {DISAGREEMENT_RULE} — reported, never reconciled\n\
              resumed: 3 · deduplicated: 2\n\
              left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned\n\
@@ -765,10 +708,9 @@ mod tests {
             rendered.out
         );
         assert!(
-            rendered.out.contains(
-                "DSC_0012.NEF  ok  1568x1045  215 KB  812ms  overall 6.4237  technical 7.8125  \
-                 composition 5.3398  impact 4.9601  4★ like\n"
-            ),
+            rendered
+                .out
+                .contains("DSC_0012.NEF  ok  1568x1045  215 KB  812ms  4★  confidence 0.63\n"),
             "{}",
             rendered.out
         );
@@ -803,7 +745,7 @@ mod tests {
         assert!(
             rendered
                 .out
-                .ends_with("4★ like  duplicate of DSC_0001.NEF\n"),
+                .ends_with("4★  confidence 0.63  duplicate of DSC_0001.NEF\n"),
             "{}",
             rendered.out
         );
@@ -819,10 +761,8 @@ mod tests {
         let rendered = transcript(&[duplicate], Verbosity::Normal);
 
         assert_eq!(
-            rendered.out,
-            "13/400  DSC_0012.NEF  6.42/7.81/5.34/4.96  4★ like  812ms  \
-             duplicate of DSC_0001.NEF  eta 7m41s\n",
-            "a reused score says which frame paid for it, before the clock does"
+            rendered.out, "13/400  DSC_0012.NEF  4★  812ms  duplicate of DSC_0001.NEF  eta 7m41s\n",
+            "a reused rating says which frame paid for it, before the clock does"
         );
     }
 

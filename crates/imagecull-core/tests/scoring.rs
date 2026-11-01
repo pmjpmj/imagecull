@@ -15,7 +15,6 @@ use imagecull_core::error::{Error, ErrorKind};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
-use imagecull_core::reading::Verdict;
 use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, RetryPolicy};
 use serde_json::json;
@@ -81,15 +80,8 @@ fn every_frame_reaches_the_decider_with_its_questions_state_and_alias() {
     assert_eq!(seen[0].model, "clef-flash-oQ4e");
     assert_eq!(
         seen[0].question_ids,
-        [
-            "overall",
-            "technical",
-            "composition",
-            "impact",
-            "stars",
-            "verdict"
-        ],
-        "the rubric's questions go out in declaration order"
+        ["stars"],
+        "the rubric's question goes out in declaration order"
     );
     assert_eq!(seen[0].state.task, "photo_cull");
     assert_eq!(seen[0].state.filename, "DSC_0001.NEF");
@@ -165,7 +157,7 @@ fn a_preview_smaller_than_the_cap_is_never_upscaled_on_its_way_to_the_decider() 
 }
 
 #[test]
-fn the_run_reports_all_six_answers_to_its_caller() {
+fn the_run_reports_the_one_answer_to_its_caller() {
     let shoot = shoot(&[("DSC_0001.NEF", nef(support::jpeg(64, 32, 80)))]);
     let decider = Scripted::always_reading(1);
 
@@ -184,14 +176,9 @@ fn the_run_reports_all_six_answers_to_its_caller() {
         .outcome
         .as_ref()
         .expect("the frame reached the decider");
-    let answers = reading.answers.as_ref().expect("six readable answers");
-    assert_eq!(answers.overall, 6.4237);
-    assert_eq!(answers.technical, 7.8125);
-    assert_eq!(answers.composition, 5.3398);
-    assert_eq!(answers.impact, 4.9601);
+    let answers = reading.answers.as_ref().expect("a readable answer");
     assert_eq!(answers.stars, 4);
-    assert_eq!(answers.verdict, Verdict::Like);
-    assert_eq!(answers.confidence.verdict, 0.88);
+    assert_eq!(answers.confidence, 0.63);
     assert_eq!(reading.usage.input_tokens, Some(1327));
     assert_eq!(
         reading.usage.latency_ms(),
@@ -254,7 +241,7 @@ fn a_transport_failure_is_classified_and_does_not_stop_the_run() {
         timeout(),
         timeout(),
         timeout(),
-        Ok(document(5.0, "3")),
+        Ok(document("3")),
     ]);
 
     let run = scoring::run(
@@ -280,8 +267,8 @@ fn a_bad_response_keeps_its_document_and_the_run_continues() {
         ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
         ("DSC_0002.NEF", nef(support::jpeg(48, 24, 80))),
     ]);
-    let unreadable = json!({"answers": {"overall": {"score": 6.0}}});
-    let decider = Scripted::answering(vec![Ok(unreadable.clone()), Ok(document(5.0, "3"))]);
+    let unreadable = json!({"answers": {"stars": {"choice": "9", "confidence": 0.5}}});
+    let decider = Scripted::answering(vec![Ok(unreadable.clone()), Ok(document("3"))]);
 
     let run = scoring::run(
         shoot.path(),
