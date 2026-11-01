@@ -42,11 +42,14 @@ pub enum ErrorKind {
     /// The frame's existing sidecar has no description this tool can safely
     /// write into, so the sidecar was left alone.
     XmpUnreadable,
+    /// The frame's sidecar could not be written: a read-only mount, a full
+    /// disk, a file that is not ours to replace.
+    XmpWriteFailed,
 }
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 11] = [
+    pub const ALL: [ErrorKind; 12] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
@@ -58,6 +61,7 @@ impl ErrorKind {
         ErrorKind::Timeout,
         ErrorKind::BadResponse,
         ErrorKind::XmpUnreadable,
+        ErrorKind::XmpWriteFailed,
     ];
 
     /// The `status` string for this kind (never `"ok"`: that is the absence of
@@ -75,6 +79,7 @@ impl ErrorKind {
             ErrorKind::Timeout => "timeout",
             ErrorKind::BadResponse => "bad_response",
             ErrorKind::XmpUnreadable => "xmp_unreadable",
+            ErrorKind::XmpWriteFailed => "xmp_write_failed",
         }
     }
 
@@ -110,6 +115,9 @@ impl ErrorKind {
             }
             ErrorKind::Http413 | ErrorKind::BadResponse => Recovery::Continue,
             ErrorKind::XmpUnreadable => Recovery::Continue,
+            // Every remaining frame would fail the same way, and each attempt
+            // has already been paid for: stop, do not collect 400 failures.
+            ErrorKind::XmpWriteFailed => Recovery::AbortRun,
             ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
             ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
@@ -315,6 +323,7 @@ mod tests {
                 // document beside the frame, so its refusals are frame statuses
                 // like any other.
                 "xmp_unreadable",
+                "xmp_write_failed",
             ]
         );
         assert!(!strings.contains(&"ok"));

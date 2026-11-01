@@ -155,6 +155,10 @@ fn collect(dir: &Path, base: &Path, options: &ScanOptions, scan: &mut Scan) -> R
         }
         if is_finder_noise(&name) {
             scan.counts.ignored += 1;
+        } else if is_our_own_output(&name) {
+            // Not left out by anyone: the sidecars this tool wrote. Counting
+            // them would make a second run over one folder read differently
+            // from the first, for no reason the photographer can act on.
         } else if has_accepted_extension(&name) {
             let relative = entry
                 .path()
@@ -213,6 +217,22 @@ fn has_accepted_extension(name: &str) -> bool {
 
 /// The extensions a run accepts, lower case and without the dot.
 pub const ACCEPTED_EXTENSIONS: [&str; 3] = ["nef", "nrw", "dng"];
+
+/// The extensions this tool itself writes beside a frame: its sidecars and the
+/// backups of them.
+pub const OWN_EXTENSIONS: [&str; 2] = ["xmp", "bak"];
+
+/// Whether the file is one this tool wrote beside the frames.
+fn is_our_own_output(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            OWN_EXTENSIONS
+                .iter()
+                .any(|own| extension.eq_ignore_ascii_case(own))
+        })
+}
 
 /// The directory macOS copies resources into; nothing under it is a photo.
 const MACOSX_DIRECTORY: &str = "__MACOSX";

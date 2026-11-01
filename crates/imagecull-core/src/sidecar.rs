@@ -378,3 +378,108 @@ fn unescape(value: &str) -> String {
         // Last, so `&amp;quot;` does not become a quote.
         .replace("&amp;", "&")
 }
+
+/// Where a frame's sidecar lives: beside it, with the extension replaced.
+///
+/// `DSC_0001.NEF` → `DSC_0001.xmp`, never `DSC_0001.NEF.xmp`: the doubled name
+/// belongs to darktable, and writing it would put our rating inside another
+/// application's history file.
+pub fn path_for(frame: &std::path::Path) -> std::path::PathBuf {
+    frame.with_extension("xmp")
+}
+
+/// What a write did, which is what decides whether a `.bak` was owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    /// There was no sidecar and there is one now.
+    Created,
+    /// There was a sidecar and it now holds this run's document.
+    Replaced,
+}
+
+/// The port a run writes sidecars through: production writes files, tests write
+/// what they are told to.
+pub trait Writer {
+    /// Write `document` for `target`, given the document that is there now
+    /// (`None` when the sidecar is new). The existing text is passed in rather
+    /// than read again: the run has already read it to decide whether to write
+    /// at all, and a `.bak` has to hold exactly what was there.
+    fn write(
+        &self,
+        target: &std::path::Path,
+        document: &str,
+        existing: Option<&str>,
+    ) -> Result<Written>;
+}
+
+/// The writer a run uses: atomic, permission-preserving, and sparing with
+/// backups.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Filesystem;
+
+impl Writer for Filesystem {
+    fn write(
+        &self,
+        target: &std::path::Path,
+        document: &str,
+        existing: Option<&str>,
+    ) -> Result<Written> {
+        if let Some(previous) = existing {
+            back_up(target, previous)?;
+        }
+        let folder = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let mut temp = tempfile::Builder::new()
+            .prefix(".imagecull-")
+            .suffix(".tmp")
+            .tempfile_in(folder)
+            .map_err(|error| failed(target, error))?;
+        {
+            use std::io::Write as _;
+            temp.write_all(document.as_bytes())
+                .map_err(|error| failed(target, error))?;
+            temp.flush().map_err(|error| failed(target, error))?;
+        }
+        // The file's permissions are the photographer's, not ours: a sidecar
+        // that was readable only by its owner stays that way.
+        let replaced = target.exists();
+        if replaced
+            && let Ok(metadata) = std::fs::metadata(target)
+            && let Err(error) = temp.as_file().set_permissions(metadata.permissions())
+        {
+            return Err(failed(target, error));
+        }
+        temp.persist(target)
+            .map_err(|error| failed(target, error.error))?;
+        Ok(if replaced {
+            Written::Replaced
+        } else {
+            Written::Created
+        })
+    }
+}
+
+/// Keep the previous document beside the sidecar, once: a run that rewrites a
+/// sidecar owes the photographer the text it replaced, and a second run must not
+/// overwrite the only copy.
+fn back_up(target: &std::path::Path, previous: &str) -> Result<()> {
+    let backup = backup_for(target);
+    if backup.exists() {
+        return Ok(());
+    }
+    std::fs::write(&backup, previous).map_err(|error| failed(&backup, error))
+}
+
+/// `DSC_0001.xmp` → `DSC_0001.xmp.bak`.
+fn backup_for(target: &std::path::Path) -> std::path::PathBuf {
+    let mut name = target.as_os_str().to_os_string();
+    name.push(".bak");
+    std::path::PathBuf::from(name)
+}
+
+/// A write that could not land: a frame-scoped failure with the path in it.
+fn failed(target: &std::path::Path, error: std::io::Error) -> Error {
+    Error::new(
+        ErrorKind::XmpWriteFailed,
+        format!("cannot write {}: {error}", target.display()),
+    )
+}
