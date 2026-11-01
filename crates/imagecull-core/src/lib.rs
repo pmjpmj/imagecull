@@ -29,7 +29,10 @@
 //! clipping and the camera's focus report. Neither consults a model, and neither
 //! changes a score. The pass reports as it runs through the same kind of seam as
 //! [`progress`] ([`group::Watcher`]), so a front end can draw its frames without
-//! the core knowing what a screen is.
+//! the core knowing what a screen is. Ticket 02 of the same slice added the
+//! group's keeper ([`keeper`]); ticket 03 gave the cull its own pass ([`cull`]):
+//! `imagecull groups` asks the comparative question itself, one request per
+//! round, and marks every non-keeper red. `score` rates frames and nothing else.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -40,11 +43,13 @@
 
 pub mod config;
 pub(crate) mod csv;
+pub mod cull;
 pub mod doctor;
 pub mod dry_run;
 pub mod error;
 pub mod group;
 pub mod ingest;
+pub mod keeper;
 pub mod measure;
 pub mod omlx;
 pub mod preprocess;
@@ -59,12 +64,14 @@ pub mod time;
 pub mod version;
 
 pub use config::{ConfigFile, Effective, Env, Loaded, Resolved};
+pub use cull::{Culled, Verdict};
 pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use group::{
     Capture, Facts, Grouping, Options as GroupOptions, Plan, Planned, Settings, Signature,
     Thresholds,
 };
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
+pub use keeper::{Budget, Choice, Comparison};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
     Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter, Silent, Started,
@@ -76,4 +83,4 @@ pub use scoring::{
     Cancel, Config, Decider, Ending, Outcome, Persisted, Request, Response, RetryPolicy, Run,
     State, Usage,
 };
-pub use sidecar::{Failure, Outputs, Properties, Row, Written};
+pub use sidecar::{ExistingLabel, Failure, Mark, Outputs, Prior, Properties, Row, Written};

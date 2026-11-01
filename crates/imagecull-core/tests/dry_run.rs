@@ -254,7 +254,7 @@ fn a_previews_directory_inside_the_shoot_folder_is_refused() {
         &ScanOptions::default(),
         &Params::default(),
     )
-    .expect_err("writing previews into the shot is never allowed");
+    .expect_err("writing previews into the shoot folder is never allowed");
 
     assert!(error.is_fatal());
     assert!(

@@ -1,0 +1,25 @@
+{
+  "model": "clef-flash-oQ4e",
+  "state": {
+    "task": "photo_cull",
+    "filename": "burst-01",
+    "shoot_context": "a burst of the same subject, choose the keeper"
+  },
+  "images": [
+    "data:image/jpeg;base64,<226707 chars>",
+    "data:image/jpeg;base64,<228371 chars>",
+    "data:image/jpeg;base64,<185303 chars>"
+  ],
+  "truncate": true,
+  "questions": {
+    "keeper": {
+      "type": "choice",
+      "instructions": "Several frames of one burst are shown, in order. Decide which single frame is the one to keep: the sharpest and the one whose subject, expression and light hold together best. Answer with the key of that frame.",
+      "criteria": {
+        "1": "image at position 1",
+        "2": "image at position 2",
+        "3": "image at position 3"
+      }
+    }
+  }
+}

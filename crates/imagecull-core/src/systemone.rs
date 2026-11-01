@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::doctor;
 use crate::error::{Error, ErrorKind, Result};
+use crate::keeper::{self, Comparison};
 use crate::omlx::Client;
 use crate::scoring::{Decider, Request, Response, State};
 
@@ -60,13 +61,28 @@ impl Decider for Adapter {
     }
 
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
-        let payload = body(request);
+        self.ask(body(request), Asked::Frame)
+    }
+
+    fn compare(&self, comparison: &Comparison) -> Result<Response> {
+        self.ask(comparison_body(comparison), Asked::Group)
+    }
+}
+
+impl Adapter {
+    /// Post one payload and read the answer document out of it.
+    ///
+    /// One implementation for both kinds of request, so the latency this side
+    /// measures, the way a non-2xx becomes a taxonomy kind and the rule that a
+    /// body which is not JSON is still kept cannot drift apart between a frame
+    /// and a group.
+    fn ask(&self, payload: Value, kind: Asked) -> Result<Response> {
         let started = Instant::now();
         let fetched = self.client.post_json(PATH, &payload)?;
         let client_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !(200..300).contains(&fetched.http_status) {
-            return Err(failure(fetched.http_status, &fetched.body));
+            return Err(failure(fetched.http_status, &fetched.body, kind));
         }
 
         // A body that is not JSON is still kept as the document (as a string),
@@ -111,9 +127,57 @@ fn state(state: &State) -> Value {
     Value::Object(state_json)
 }
 
+/// The JSON body of one comparative request: several previews of one moment, and
+/// the question which of them to keep.
+///
+/// The shape is the one measured against the reference server (see
+/// `.scratch/burst-grouping-v1/evidence/comparison-budget.md`): `questions` is a
+/// map keyed by question id, `criteria` is a map from option key to description,
+/// and every image is a data URI. The option keys are the frames' positions, so
+/// the answer is a position in this list and nothing else.
+pub(crate) fn comparison_body(comparison: &Comparison) -> Value {
+    let mut criteria = Map::new();
+    for position in 1..=comparison.previews.len() {
+        criteria.insert(
+            position.to_string(),
+            Value::String(format!("image at position {position}")),
+        );
+    }
+    let mut question = Map::new();
+    question.insert("type".to_string(), Value::String("choice".to_string()));
+    question.insert(
+        "instructions".to_string(),
+        Value::String(keeper::INSTRUCTIONS.to_string()),
+    );
+    question.insert("criteria".to_string(), Value::Object(criteria));
+    let mut questions = Map::new();
+    questions.insert(keeper::QUESTION.to_string(), Value::Object(question));
+
+    json!({
+        "model": comparison.model,
+        "state": state(&comparison.state),
+        "images": comparison
+            .previews
+            .iter()
+            .map(|preview| data_uri(&preview.jpeg))
+            .collect::<Vec<String>>(),
+        "truncate": true,
+        "questions": questions,
+    })
+}
+
 /// The preview as the full data URI oMLX takes (spec §6.6).
 fn data_uri(jpeg: &[u8]) -> String {
     format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg))
+}
+
+/// Which of the two requests a failure came from, for the advise a status
+/// carries: a frame that 413s is too big a picture, and a group that 413s is a
+/// budget the server does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Frame,
+    Group,
 }
 
 /// Classify a non-2xx answer: the status picks the taxonomy kind, and the
@@ -122,8 +186,9 @@ fn data_uri(jpeg: &[u8]) -> String {
 ///
 /// The row is the only thing the photographer reads after a run, so a status
 /// with a known remedy says what to change: a context that is too long asks for
-/// a smaller preview.
-fn failure(status: u16, body: &str) -> Error {
+/// a smaller preview, and a group that does not fit is a group nothing was
+/// marked for.
+fn failure(status: u16, body: &str, asked: Asked) -> Error {
     let kind = ErrorKind::from_status_code(status).unwrap_or(ErrorKind::BadResponse);
     let mut message = format!("POST {PATH} returned HTTP {status}");
     let detail = detail(body);
@@ -132,7 +197,13 @@ fn failure(status: u16, body: &str) -> Error {
         message.push_str(&detail);
     }
     if kind == ErrorKind::Http413 {
-        message.push_str(" — the preview is too big for the model's context; lower --max-edge");
+        message.push_str(match asked {
+            Asked::Frame => " — the preview is too big for the model's context; lower --max-edge",
+            Asked::Group => {
+                " — the group needs more image tokens than this model's context holds, so nothing \
+                 was marked; the request is refused rather than quietly made smaller"
+            }
+        });
     }
     Error::new(kind, message).with_http_status(status)
 }

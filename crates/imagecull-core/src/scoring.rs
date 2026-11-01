@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, ErrorKind, ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
+use crate::keeper::Comparison;
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::progress::{
@@ -28,7 +29,7 @@ use crate::progress::{
 };
 use crate::reading::{self, Answers, Reading};
 use crate::rubric::{Builtin, Rubric, RubricHash, hex};
-use crate::sidecar::{self, Failure, Outputs, Properties, Row};
+use crate::sidecar::{self, Failure, Outputs, Prior, Properties, Row};
 
 /// The task framing every request's state carries (spec §7.1).
 pub const TASK: &str = "photo_cull";
@@ -124,6 +125,14 @@ impl Usage {
 pub trait Decider {
     /// Ask the model one frame's questions and return its answer document.
     fn decide(&self, request: &Request<'_>) -> Result<Response>;
+
+    /// Ask which frame of a group to keep, showing the model all of them in one
+    /// request.
+    ///
+    /// The group's question is relative, so it cannot be asked of one preview at
+    /// a time: the answer is a choice between the frames in [`Comparison`]'s own
+    /// order. A group of one makes no call at all.
+    fn compare(&self, comparison: &Comparison) -> Result<Response>;
 
     /// Confirm, before the first frame, that this decider can answer at all.
     ///
@@ -503,7 +512,7 @@ pub fn run(
     let total = scan.files.len();
     let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
     // Dedupe's memory: one run's answers, keyed by the question that produced
-    // them. It dies with the process, which is where bursts live anyway.
+    // them. It dies with the process, which is where groups live anyway.
     let mut reused: HashMap<String, Reused> = HashMap::new();
     let mut ending = Ending::Completed;
     for (position, source) in scan.files.iter().enumerate() {
@@ -511,8 +520,7 @@ pub fn run(
             ending = Ending::Interrupted;
             break;
         }
-        let path = sidecar::path_for(&source.path);
-        let existing = match read_sidecar(&path) {
+        let existing = match sidecar::read(&source.path) {
             Ok(existing) => existing,
             Err(error) => {
                 // A sidecar nobody can read is a frame this run cannot write, and
@@ -543,7 +551,7 @@ pub fn run(
                 ErrorKind::XmpUnreadable,
                 format!(
                     "{} has no rdf:Description this tool can write into, so it was left alone",
-                    path.display()
+                    sidecar::path_for(&source.path).display()
                 ),
             );
             if let Some(reason) = account.refused(position + 1, source, error) {
@@ -560,7 +568,7 @@ pub fn run(
                 format!(
                     "{} belongs to another application, so it was left alone; pass \
                      --allow-foreign to write into it",
-                    path.display()
+                    sidecar::path_for(&source.path).display()
                 ),
             );
             if let Some(reason) = account.refused(position + 1, source, error) {
@@ -619,19 +627,6 @@ pub fn run(
     Ok(run)
 }
 
-/// The sidecar as it is before this run touches it: `None` when there is none, a
-/// classified refusal when there is one this run cannot read.
-fn read_sidecar(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::new(
-            ErrorKind::XmpUnreadable,
-            format!("cannot read {}: {error}", path.display()),
-        )),
-    }
-}
-
 /// Write this frame's rating into its sidecar, and record how that went.
 ///
 /// A frame with no answer is not touched at all: "no answer" must never reach
@@ -659,10 +654,10 @@ fn persist(
             return;
         }
     };
-    frame.persisted = match writer.write(&frame.source.path, &document, existing) {
-        Ok(_) => Persisted::Written,
-        Err(error) => Persisted::Failed(Failure::of(&error)),
-    };
+    match writer.write(&frame.source.path, &document, Prior::earlier(existing)) {
+        Ok(_) => frame.persisted = Persisted::Written,
+        Err(error) => frame.persisted = Persisted::Failed(Failure::of(&error)),
+    }
 }
 
 /// The run's account of itself while it runs: what the reporter hears, the rows
@@ -932,8 +927,8 @@ fn judge(
     };
     let outcome = decide(decider, &request, &config.retry)
         .map(|response| reading::read(&config.rubric, response));
-    // Only an answer is worth reusing: a timeout is not an answer, so a burst
-    // partner gets its own attempt.
+    // Only an answer is worth reusing: a timeout is not an answer, so the other
+    // frames of its group get their own attempt.
     if let Some(key) = dedupe_key
         && let Ok(reading) = &outcome
         && let Ok(answers) = &reading.answers
@@ -960,7 +955,7 @@ fn judge(
 }
 
 /// The SHA-256 of the bytes actually sent, as 64 lowercase hex characters: what
-/// the ledger records, and what a burst's identical previews have in common.
+/// the ledger records, and what a group's identical previews have in common.
 fn preview_sha256(preview: &Encoded) -> String {
     let mut digest = Sha256::new();
     digest.update(&preview.jpeg);
@@ -972,7 +967,7 @@ fn preview_sha256(preview: &Encoded) -> String {
 ///
 /// The filename is deliberately absent. It is part of the state the model reads,
 /// but it is the photographer's label and never something the picture shows, and
-/// two frames of one burst always have different names: a key that covered it
+/// two frames of one group always have different names: a key that covered it
 /// could never fire, which is the opposite of what a dedupe key is for.
 fn dedupe_key(
     preview_sha256: &str,
@@ -1002,14 +997,24 @@ fn dedupe_key(
 }
 
 /// Ask the model one frame's question, retrying only the transient failures
-/// (spec §10): a connection failure, a timeout and a 5xx are worth another
-/// attempt, with the policy's backoff between them. The failure that ends the
-/// attempts names how many were spent, so the row explains itself.
+/// (spec §10).
 fn decide(decider: &dyn Decider, request: &Request<'_>, retry: &RetryPolicy) -> Result<Response> {
+    retrying(|| decider.decide(request), retry)
+}
+
+/// Run one request, retrying only the transient failures (spec §10): a
+/// connection failure, a timeout and a 5xx are worth another attempt, with the
+/// policy's backoff between them. The failure that ends the attempts names how
+/// many were spent, so the row explains itself.
+///
+/// The per-frame question and the group's comparative question are both asked
+/// through here, so the two paths cannot drift about what is worth another
+/// attempt or how many attempts were paid for.
+pub(crate) fn retrying<T>(mut ask: impl FnMut() -> Result<T>, retry: &RetryPolicy) -> Result<T> {
     let mut waited = 0;
     loop {
-        match decider.decide(request) {
-            Ok(response) => return Ok(response),
+        match ask() {
+            Ok(value) => return Ok(value),
             Err(error) => {
                 if !error.recovery().is_retried() || waited == retry.backoff.len() {
                     return Err(error.with_attempts(waited + 1));

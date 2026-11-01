@@ -140,7 +140,7 @@ fn preview_path(previews: &Path, relative: &Path) -> PathBuf {
 }
 
 /// Refuse a previews directory that lies inside the shoot folder: a dry run
-/// must not write into the shot, not even sneakily.
+/// must not write into the shoot folder, not even sneakily.
 fn guard_outside_shoot(shoot: &Path, previews: &Path) -> Result<()> {
     let shoot = shoot.canonicalize().map_err(|error| {
         Error::fatal(format!(

@@ -172,7 +172,7 @@ impl Writer for Refusing {
         &self,
         target: &Path,
         _document: &str,
-        _existing: Option<&str>,
+        _prior: sidecar::Prior<'_>,
     ) -> imagecull_core::Result<Written> {
         self.asked.borrow_mut().push(target.to_path_buf());
         Err(Error::new(
@@ -482,14 +482,14 @@ fn an_identical_preview_reuses_the_answer_within_one_run_and_only_within_one() {
     )
     .expect("a run");
 
-    assert_eq!(decider.seen().len(), 1, "a burst costs one request");
+    assert_eq!(decider.seen().len(), 1, "a group costs one request");
     assert_eq!(run.duplicates, 1);
     assert_eq!(run.scored(), 2, "both frames still get a rating on disk");
     assert!(shoot.sidecar("DSC_0002.NEF").exists());
 
     // A second run under --force has no memory of the first one's answer: it
     // pays for the pair again. One request, not zero, is what that costs here,
-    // because the two frames are still a burst inside the new run.
+    // because the two frames are still a group inside the new run.
     let mut config = shoot.config();
     config.force = true;
     let second = Scripted::always_reading(2);

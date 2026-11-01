@@ -1,7 +1,8 @@
 # Spec — burst grouping and best-of-group, report only
 
-Status: ready-for-agent (issue 01) · needs-info (issue 02)
-Date: 2026-11-02
+Status: issue 01 ready-for-human (its blind review is the photographer's step) ·
+issue 02 resolved (2026-11-21)
+Date: 2026-11-02 (amended 2026-11-19 and 2026-11-21)
 Source: `SPEC.md` §17 open question 4 (bursts in the CSV) and the ticket 08
 evidence (`.scratch/nef-scoring-v1/evidence/evidence.md`)
 
@@ -158,13 +159,25 @@ only one that needs the preview.
 |---|---|---|---|
 | 1 | capture time | `metadata().capture_time()`, subsecond precision | `Δt ≤ group_gap` (2.0 s) from the previous frame in the group |
 | 2 | same body | `metadata().serial_number()` | equal; a file with no serial only groups with another file with no serial |
-| 3 | same settings | `metadata().exposure()` | equal ISO, exposure time, f-number, focal length; equal orientation |
+| 3 | same settings | `metadata().exposure()`, `metadata().orientation()` | equal orientation and focal length, and ISO, exposure time and f-number together within a brightness drift of `group_exposure_stops` (2.0 stops) |
 | 4 | same scene | preview signature | cosine similarity ≥ `group_similarity` (0.90) against the group's first frame |
 
 Signal 4 is the one that makes the feature safe. Without it, "a second apart"
 merges a subject who moved behind a tree, a hat that came off, a pan. With it, a
 pan splits into the compositions it actually produced — which is the correct
 answer even though it is not what a naive burst detector would say.
+
+> **Amended 2026-11-26 by
+> [ADR 0009](../../docs/adr/0009-the-settings-gate-tolerates-exposure-drift.md).**
+> Signal 3 asked for equal ISO, exposure time, f-number, focal length and
+> orientation, so a burst whose auto ISO walked a third of a stop split into
+> groups of one and never reached a comparison. It now asks for the **picture**
+> exactly (orientation, focal length) and tolerates the **exposure** within
+> `exposure_stops`, over the brightness `log2(t · ISO/100 / N²)` the three fields
+> produce together. A frame that does not record all three is not shown to
+> differ, so the exposure half of the gate passes — the serial number's rule.
+> `ALGORITHM` becomes `grouping/2` and `exposure_stops` joins `gap` and
+> `similarity` in `grouping_hash`.
 
 **Signature.** Decode the largest embedded preview (already the code path in
 `preview`), apply orientation, convert to greyscale, Lanczos3-resize to 32×32
@@ -179,7 +192,7 @@ is 16 s over 400 frames and two orders of magnitude below the model time it is
 there to inform. Issue 01 must state the measured cost, not assume it.
 
 **Determinism.** Grouping is a pure function of the files' metadata, their
-preview bytes and the two thresholds. `grouping_hash` = SHA-256 over an
+preview bytes and the thresholds. `grouping_hash` = SHA-256 over an
 algorithm version string, the signature parameters and the thresholds — never
 over a filename, never over run options that do not change the answer. It is
 recorded in the ledger header beside `rubric_hash`, and a mismatch on `--resume`
@@ -238,6 +251,16 @@ and `group_note` naming the deciding clause (`rating`, `only_survivor`,
 `excluded:focus`, `excluded:sharpness`, `excluded:roll`) — the same spirit as
 `duplicate_of`: a column that explains itself.
 
+> **Amended 2026-11-19 by [ADR 0007](../../docs/adr/0007-the-red-label-marks-the-non-keepers.md).**
+> The columns above have no container left: the CSV and the ledger are deleted, and
+> a group rank in a sidecar is unreadable without the folder. The winner is now
+> chosen by one **comparative request** over the group's previews, the keeper
+> gets no label, and every other frame of the group gets `xmp:Label="Red"`;
+> the verdict and its provenance are recorded in the `imagecull:` namespace.
+> The ordered criteria below survive as the **shortlist** that decides who enters
+> the comparison when the request's context budget binds — they no longer choose
+> a winner, and they never change a rating.
+
 The summary prints the group count and the mean and largest group size. (The
 rule-disagreement rate this section used to specify compared the group winner to
 the frame with the highest `overall`; [ADR 0005](../../docs/adr/0005-one-rating-replaces-six-questions.md)
@@ -272,8 +295,10 @@ sharpness ranking, and it is why this feature is testable at all.
 **What is pinned:**
 
 - Grouping: time gap, body, settings and similarity gates each split a
-  synthetic burst on the boundary; a pan splits a burst into the compositions it
-  produced; a missing capture time yields a singleton; group ids follow capture
+  synthetic burst on the boundary; exposure drift inside `exposure_stops` groups
+  and past it splits, while a zoom or a turn splits at any tolerance; a pan
+  splits a burst into the compositions it produced; a missing capture time yields
+  a singleton; group ids follow capture
   order; grouping is identical across two runs and independent of filename
   (`DSC_9` vs `DSC_10` ordering, and a folder whose names are shuffled).
 - Measures: `roll_deg` recovers a known rotation within 0.2°; a no-lines frame
@@ -307,10 +332,14 @@ loudly.
   validated against a photographer's eye; a wrong metric must not be able to
   remove scores from a report.
 - **Multi-image requests.** Sending a group in one `/v1/systemone` call with a
-  `choice` question ("which of these is sharpest?") is a plausible later win —
-  one request per burst instead of N — but it breaks the one-frame-per-decision
-  attributability of SPEC §7.1 and needs a context-budget experiment (~512 px per
-  frame for eight frames). Not this slice, and not assumed by it.
+  `choice` question ("which of these is sharpest?") was out of scope for ticket
+  01's report-only slice; it is ticket 02's and 03's whole mechanism, and
+  [ADR 0008](../../docs/adr/0008-the-group-command-culls.md) makes `groups` the
+  command that spends it.
+- **A `score`-only cull.** Ticket 02 put the mark in `score`; ticket 03 moves it
+  to `groups`, so a folder needs `score` for ratings and `groups` for reds.
+  Report-only, the rule this list used to open with, is no longer true of
+  `groups`: it writes sidecars now.
 - **Straightening, cropping, retouching, or any write to an image.** Report-only.
 - **Collapsing a burst to one CSV row.** Answering SPEC §17 open question 4: no.
   One row per frame, group columns added; a filename never disappears.
@@ -325,12 +354,16 @@ loudly.
 
 ## Further Notes
 
-**Two issues, in order.**
+**Three issues, in order.**
 
 | issue | scope | done when |
 |---|---|---|
 | 01 | `group` + `measure` in core, and `imagecull groups <DIR>` — grouping and measures, model-free, no report wiring | the synthetic answer key ranks as expected, and a real shoot's groups have been eyeballed against the photographer's own picks |
-| 02 | `score` records grouping and measures; ranking rule; CSV columns; `grouping_hash` in the ledger; summary stats | a burst-heavy shoot lands with a best-of-group column that the photographer agrees with more often than not |
+| 02 | `score` groups and measures; one comparative request per group; the keeper unmarked and every other frame `xmp:Label="Red"`; verdict in the `imagecull:` namespace; summary warnings for unmarked and stale reds | a burst-heavy shoot culls by filtering Red, and the photographer disagrees with the keeper more often than not only on frames they would have kept anyway |
+| 03 | the mark moves out of `score` and into `groups`; the comparison ignores `xmp:Rating`; groups over one request's worth are compared in rounds; our own red is retired on a promotion | `imagecull groups <DIR>` alone culls a rated folder, and `score` writes no label |
+
+Issue 03 supersedes 02's command split and its rating shortlist; see
+[ADR 0008](../../docs/adr/0008-the-group-command-culls.md).
 
 Issue 02 is `needs-info` until 01's evidence lands, because two of its inputs are
 numbers the evidence has to supply: which acutance formulation wins (`p95` local

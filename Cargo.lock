@@ -831,6 +831,7 @@ dependencies = [
  "ctrlc",
  "imagecull-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
