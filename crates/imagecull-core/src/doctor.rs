@@ -57,6 +57,38 @@ impl Report {
         }
     }
 
+    /// Whether a run may start against this endpoint and alias.
+    ///
+    /// Looser than [`Report::is_ready`] on purpose, because the two answer
+    /// different questions. `doctor` reports only what it can *confirm*, and the
+    /// front end needs that strictness to explain an install. A run, though,
+    /// only refuses what it can *prove* unfit: nothing answering, something that
+    /// is not oMLX, a server demanding an API key, a checkpoint still loading, an
+    /// alias the server does not serve, or a server that reports model types and
+    /// says the alias is not a decision model (or that it predates decision
+    /// models altogether). A server that simply never says what its models are
+    /// has not been shown to be unfit — its `/v1/systemone` may answer
+    /// perfectly — so preflight lets it through (spec §51: "if the server
+    /// exposes per-model status, confirm the model is a decision model").
+    pub fn can_score(&self) -> bool {
+        match &self.verdict {
+            Verdict::Ready { .. } | Verdict::TypesUnavailable { .. } => true,
+            // An absent type report is not a negative one: an install without
+            // `/v1/models/status` has simply never been asked, and it serves the
+            // alias this run wants.
+            Verdict::NoModelTypes { .. } | Verdict::TooOld { found: None } => true,
+            // A version below the floor is the one report that says the endpoint
+            // this run depends on does not exist there.
+            Verdict::TooOld { found: Some(_) }
+            | Verdict::Unreachable { .. }
+            | Verdict::NotReady { .. }
+            | Verdict::Unauthorized { .. }
+            | Verdict::NotOmlx { .. }
+            | Verdict::AliasMissing { .. }
+            | Verdict::PlainModel { .. } => false,
+        }
+    }
+
     /// One sentence: what is wrong (or right) and what to do about it.
     pub fn message(&self) -> String {
         let endpoint = &self.endpoint;

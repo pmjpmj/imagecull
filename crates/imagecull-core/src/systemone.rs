@@ -44,9 +44,15 @@ impl Decider for Adapter {
     /// and is the alias served as a decision model? Both failures arrive here
     /// as one actionable sentence, so a broken server costs seconds instead of
     /// 400 frames of the same 400 (spec §10).
+    ///
+    /// The run is the lenient reader of that diagnosis: it refuses only what the
+    /// server has said is unfit, never what the server did not say at all
+    /// ([`crate::doctor::Report::can_score`] has the list). `imagecull doctor`
+    /// stays strict, so the strictness is available where it is useful —
+    /// explaining a server — and does not stop a working one from scoring.
     fn preflight(&self) -> Result<()> {
         let report = doctor::diagnose(&self.client, &self.model);
-        if report.is_ready() {
+        if report.can_score() {
             Ok(())
         } else {
             Err(Error::fatal(report.message()))
