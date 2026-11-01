@@ -11,7 +11,7 @@
 //! ([`preprocess`]), and the `--dry-run` export that puts them together
 //! ([`dry_run`]) from M1; and the rubric ([`rubric`]), the `/v1/systemone`
 //! client ([`systemone`]) and the one-frame scoring entry point ([`scoring`])
-//! from M2.
+//! from M2, with the CSV deliverable ([`report`]) on top of them.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -28,6 +28,7 @@ pub mod omlx;
 pub mod preprocess;
 pub mod preview;
 pub mod reading;
+pub mod report;
 pub mod rubric;
 pub mod scoring;
 pub mod systemone;
@@ -37,5 +38,6 @@ pub use error::{Error, ErrorKind, ExitCode, Recovery, Result};
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use reading::{Answers, Confidences, Reading, Verdict};
+pub use report::Outputs;
 pub use rubric::{Question, QuestionKind, Rubric, RubricHash};
 pub use scoring::{Config, Decider, Request, Response, Run, State, Usage};

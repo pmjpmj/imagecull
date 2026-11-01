@@ -18,6 +18,7 @@ use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::reading::{self, Reading};
+use crate::report::{self, Outputs, Row};
 use crate::rubric::{Rubric, RubricHash};
 
 /// The task framing every request's state carries (spec §7.1).
@@ -114,7 +115,7 @@ pub trait Decider {
 }
 
 /// An effective scoring run: which rubric, which alias, how to look at the
-/// folder, and how to prepare each frame.
+/// folder, how to prepare each frame, and where the report goes.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The questions.
@@ -127,6 +128,8 @@ pub struct Config {
     pub scan: ScanOptions,
     /// The photographer's framing of the shoot, when they gave one.
     pub shoot_context: Option<String>,
+    /// Where the CSV and the raw answers are written.
+    pub outputs: Outputs,
 }
 
 impl Config {
@@ -141,6 +144,7 @@ impl Config {
         params: Params,
         scan: ScanOptions,
         shoot_context: Option<String>,
+        outputs: Outputs,
     ) -> Config {
         let model = model.unwrap_or_else(|| rubric.model().to_string());
         Config {
@@ -149,6 +153,7 @@ impl Config {
             params,
             scan,
             shoot_context,
+            outputs,
         }
     }
 
@@ -197,20 +202,28 @@ pub struct Frame {
     pub outcome: Result<Reading>,
 }
 
-/// Score a shoot folder: scan it, then take every accepted frame through the
-/// model, one request at a time, in ingest order.
+/// Score a shoot folder: scan it, take every accepted frame through the model,
+/// one request at a time, in ingest order, and write the report those frames
+/// add up to.
 ///
 /// A file that cannot be read or that carries no preview becomes a classified
 /// failure and the run continues: one odd file must not cost the photographer
-/// the other 399.
+/// the other 399. Each frame becomes its report row as it is produced, from the
+/// frame in hand rather than from the finished run, so the rows can be flushed
+/// as they arrive.
 pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider) -> Result<Run> {
     let scan = ingest::scan(shoot, &config.scan)?;
+    let rubric_hash = config.rubric_hash();
     let mut frames = Vec::with_capacity(scan.files.len());
+    let mut rows = Vec::with_capacity(scan.files.len());
     for source in &scan.files {
-        frames.push(judge(source, config, decider));
+        let frame = judge(source, config, decider);
+        rows.push(Row::of(&frame, &rubric_hash, &config.model));
+        frames.push(frame);
     }
+    report::write(&rows, &config.outputs)?;
     Ok(Run {
-        rubric_hash: config.rubric_hash(),
+        rubric_hash,
         model: config.model.clone(),
         counts: scan.counts,
         frames,

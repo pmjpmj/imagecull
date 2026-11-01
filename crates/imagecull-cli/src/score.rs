@@ -33,6 +33,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
         args.params(),
         args.scan_options(),
         args.shoot_context.clone(),
+        args.outputs(),
     );
     let client = match args.server.client() {
         Ok(client) => client,

@@ -448,6 +448,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
         Params::default(),
         ingest::ScanOptions::default(),
         Some("street at dusk".into()),
+        support::unwatched(),
     );
     let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");
 
@@ -494,6 +495,7 @@ fn a_run_over_http_reports_the_answers_it_read() {
         Params::default(),
         ingest::ScanOptions::default(),
         None,
+        support::unwatched(),
     );
 
     let run = scoring::run(shoot.path(), &config, &adapter(&stub)).expect("a run");

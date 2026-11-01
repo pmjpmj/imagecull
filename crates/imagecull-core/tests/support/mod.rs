@@ -6,14 +6,29 @@
 //! JPEG previews the camera would have embedded. That is enough to drive the
 //! whole extraction, orientation, downscale and encode path without a camera.
 //!
-//! [`stub`] is the other shared fixture: a loopback HTTP server that answers
-//! canned bytes, for the tests that drive the real client.
+//! [`stub`] and [`decider`] are the other shared fixtures: a loopback HTTP
+//! server that answers canned bytes, for the tests that drive the real client,
+//! and a scripted [`Decider`](imagecull_core::scoring::Decider) that records
+//! what the pipeline would have sent.
 
 #![allow(dead_code)]
 
+pub mod decider;
 pub mod stub;
 
 use image::{ImageBuffer, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
+use imagecull_core::report::Outputs;
+
+/// Where the report of a test that reads the answers from the run itself goes:
+/// the null device. A run always writes its CSV, and it must never write into
+/// the folder it is scoring.
+pub fn unwatched() -> Outputs {
+    Outputs {
+        csv: "/dev/null".into(),
+        json_scores: None,
+        absolute: false,
+    }
+}
 
 /// A JPEG of `width` by `height` with a pattern, so a resize has something to
 /// lose and the encoder has something to spend bytes on.
@@ -122,10 +137,8 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     let sub_count = previews.len().saturating_sub(1);
 
     let mut entries: Vec<(u16, u16, u32, [u8; 4])> = Vec::new();
-    let entry_count = 2
-        + usize::from(dng)
-        + usize::from(sub_count > 0)
-        + if previews.is_empty() { 0 } else { 2 };
+    let entry_count =
+        2 + usize::from(dng) + usize::from(sub_count > 0) + if previews.is_empty() { 0 } else { 2 };
     let ifd0_size = 2 + 12 * entry_count + 4;
 
     // Lay the file out: header, IFD0, out-of-line values, SubIFDs, then the
@@ -202,7 +215,11 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     out.extend(42u16.to_le_bytes());
     out.extend(8u32.to_le_bytes());
 
-    out.extend(u16::try_from(entries.len()).expect("few entries").to_le_bytes());
+    out.extend(
+        u16::try_from(entries.len())
+            .expect("few entries")
+            .to_le_bytes(),
+    );
     for (tag, kind, count, value) in &entries {
         out.extend(tag.to_le_bytes());
         out.extend(kind.to_le_bytes());
@@ -243,7 +260,11 @@ fn tiff(orientation: u16, previews: &[Vec<u8>], dng: bool) -> Vec<u8> {
     for preview in previews {
         out.extend(preview);
     }
-    assert_eq!(out.len(), cursor, "the layout must land where it was planned");
+    assert_eq!(
+        out.len(),
+        cursor,
+        "the layout must land where it was planned"
+    );
     out
 }
 

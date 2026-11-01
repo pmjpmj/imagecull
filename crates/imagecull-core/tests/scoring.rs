@@ -7,109 +7,19 @@
 
 mod support;
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
 use imagecull_core::dry_run;
-use imagecull_core::error::{Error, ErrorKind, Result};
+use imagecull_core::error::{Error, ErrorKind};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::reading::Verdict;
 use imagecull_core::rubric::Rubric;
-use imagecull_core::scoring::{self, Config, Decider, Request, Response, State};
-use serde_json::{Value, json};
+use imagecull_core::scoring::{self, Config};
+use serde_json::json;
+use support::decider::{Scripted, document};
 use tempfile::TempDir;
-
-/// One request as the fake decider saw it, copied out of the borrow.
-#[derive(Debug, Clone)]
-struct Seen {
-    model: String,
-    state: State,
-    width: u32,
-    height: u32,
-    jpeg: Vec<u8>,
-    question_ids: Vec<String>,
-}
-
-/// A decider that records what it was asked and answers from a script.
-struct Scripted {
-    answers: RefCell<VecDeque<Result<Value>>>,
-    seen: RefCell<Vec<Seen>>,
-    in_flight: Cell<usize>,
-    overlapped: Cell<bool>,
-    latency_ms: u64,
-}
-
-impl Scripted {
-    fn answering(answers: Vec<Result<Value>>) -> Scripted {
-        Scripted {
-            answers: RefCell::new(answers.into()),
-            seen: RefCell::new(Vec::new()),
-            in_flight: Cell::new(0),
-            overlapped: Cell::new(false),
-            latency_ms: 812,
-        }
-    }
-
-    /// A decider that answers every frame with the same readable document.
-    fn always_reading(frames: usize) -> Scripted {
-        Self::answering((0..frames).map(|_| Ok(document(6.4237, "4"))).collect())
-    }
-
-    fn seen(&self) -> Vec<Seen> {
-        self.seen.borrow().clone()
-    }
-}
-
-impl Decider for Scripted {
-    fn decide(&self, request: &Request<'_>) -> Result<Response> {
-        self.in_flight.set(self.in_flight.get() + 1);
-        if self.in_flight.get() > 1 {
-            self.overlapped.set(true);
-        }
-        self.seen.borrow_mut().push(Seen {
-            model: request.model.to_string(),
-            state: request.state.clone(),
-            width: request.preview.width,
-            height: request.preview.height,
-            jpeg: request.preview.jpeg.clone(),
-            question_ids: request
-                .rubric
-                .questions()
-                .iter()
-                .map(|question| question.id().to_string())
-                .collect(),
-        });
-        let answer = self
-            .answers
-            .borrow_mut()
-            .pop_front()
-            .expect("the script must have an answer for every request");
-        self.in_flight.set(self.in_flight.get() - 1);
-        answer.map(|document| Response {
-            document,
-            client_latency_ms: self.latency_ms,
-        })
-    }
-}
-
-/// A readable six-answer document with a chosen `overall` and star key.
-fn document(overall: f64, stars: &str) -> Value {
-    json!({
-        "model": "clef-flash-oQ4e",
-        "answers": {
-            "overall": {"type": "score", "score": overall, "confidence": 0.41},
-            "technical": {"type": "score", "score": 7.8125, "confidence": 0.55},
-            "composition": {"type": "score", "score": 5.3398, "confidence": 0.33},
-            "impact": {"type": "score", "score": 4.9601, "confidence": 0.62},
-            "stars": {"type": "choice", "choice": stars, "confidence": 0.63},
-            "verdict": {"type": "choice", "choice": "like", "confidence": 0.88}
-        },
-        "usage": {"input_tokens": 1327}
-    })
-}
 
 fn config(params: Params, context: Option<&str>) -> Config {
     Config::new(
@@ -118,6 +28,7 @@ fn config(params: Params, context: Option<&str>) -> Config {
         params,
         ScanOptions::default(),
         context.map(str::to_string),
+        support::unwatched(),
     )
 }
 
@@ -131,6 +42,7 @@ fn limited(limit: usize) -> Config {
             limit: Some(limit),
         },
         None,
+        support::unwatched(),
     )
 }
 
@@ -367,7 +279,7 @@ fn requests_are_strictly_sequential_in_ingest_order() {
     scoring::run(shoot.path(), &config(Params::default(), None), &decider).expect("a run");
 
     assert!(
-        !decider.overlapped.get(),
+        !decider.overlapped(),
         "a second request must never be in flight while the first is unanswered"
     );
     let names: Vec<String> = decider

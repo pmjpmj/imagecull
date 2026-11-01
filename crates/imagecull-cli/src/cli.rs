@@ -10,10 +10,14 @@ use clap::{Args, Parser, Subcommand};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::Params;
+use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
+
+/// The CSV a run writes when `--out` is not given (spec §11: `./scores.csv`).
+pub const DEFAULT_OUTPUT: &str = "scores.csv";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -164,6 +168,19 @@ pub struct ScoreArgs {
     /// Score only the first N files, as a smoke test
     #[arg(long, value_name = "N", value_parser = positive_count)]
     pub limit: Option<usize>,
+
+    /// Where to write the CSV of scores
+    #[arg(long, value_name = "FILE", default_value = DEFAULT_OUTPUT)]
+    pub out: PathBuf,
+
+    /// Also write every raw model answer to this JSON file, so a surprising
+    /// score loses nothing
+    #[arg(long, value_name = "FILE")]
+    pub json_scores: Option<PathBuf>,
+
+    /// Write absolute paths in the CSV instead of paths inside the shoot folder
+    #[arg(long)]
+    pub absolute: bool,
 }
 
 /// The `--version` line: the version, and the rubric compiled into the binary.
@@ -212,6 +229,15 @@ impl ScoreArgs {
             jpeg_quality: self.jpeg_quality,
         }
     }
+
+    /// Where the run writes its report.
+    pub fn outputs(&self) -> Outputs {
+        Outputs {
+            csv: self.out.clone(),
+            json_scores: self.json_scores.clone(),
+            absolute: self.absolute,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +273,12 @@ mod tests {
         assert!(!args.recursive);
         assert_eq!(args.limit, None);
         assert!(!args.scan_options().recursive);
+        assert_eq!(args.out, PathBuf::from(DEFAULT_OUTPUT));
+        assert_eq!(args.json_scores, None);
+        assert!(!args.absolute);
+        assert_eq!(args.outputs().csv, PathBuf::from(DEFAULT_OUTPUT));
+        assert_eq!(args.outputs().json_scores, None);
+        assert!(!args.outputs().absolute);
     }
 
     #[test]
@@ -273,6 +305,28 @@ mod tests {
         assert_eq!(args.params().max_edge, 1024);
         assert_eq!(args.params().jpeg_quality, 70);
         assert_eq!(args.previews_dir, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn score_takes_the_report_flags() {
+        let Command::Score(args) = parse(&[
+            "score",
+            "shoot",
+            "--out",
+            "scores/march.csv",
+            "--json-scores",
+            "scores/march.json",
+            "--absolute",
+        ]) else {
+            panic!("not a score command");
+        };
+        let outputs = args.outputs();
+        assert_eq!(outputs.csv, PathBuf::from("scores/march.csv"));
+        assert_eq!(
+            outputs.json_scores,
+            Some(PathBuf::from("scores/march.json"))
+        );
+        assert!(outputs.absolute);
     }
 
     #[test]
