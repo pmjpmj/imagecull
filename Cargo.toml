@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/imagecull-core", "crates/imagecull-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+# Every dependency is pinned exactly: `cargo build` must not drift a minor
+# version under a scorer whose results are supposed to be reproducible.
+[workspace.dependencies]
+imagecull-core = { path = "crates/imagecull-core", version = "=0.1.0" }
+clap = { version = "=4.6.7", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+ureq = "=3.5.0"
+# Critical-path upstream (SPEC §6.2–6.3): pinned at M0 so a broken arm64 build
+# surfaces now, not in the middle of the extraction ticket.
+raw-files = "=0.6.0"
+image = "=0.25.10"

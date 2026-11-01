@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Rust build artifacts
+# ---------------------------------------------------------------------------
+# Cargo.lock IS committed: this is a binary-producing workspace whose builds
+# must be reproducible (see SPEC / workspace dependency pinning).
+/target
+**/*.rs.bk
+*.pdb
+*.exe
+
+# ---------------------------------------------------------------------------
+# Test, coverage & profiling output
+# ---------------------------------------------------------------------------
+/lcov.info
+/coverage/
+/tarpaulin-report.html
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+/mutants.out/
+# cargo-insta: pending snapshots are reviewed locally, never committed
+*.snap.new
+*.pending-snap
+
+# ---------------------------------------------------------------------------
+# Benchmarks & fuzzing
+# ---------------------------------------------------------------------------
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/criterion
+**/__pycache__/
+
+# ---------------------------------------------------------------------------
+# Secrets & local environment
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/secrets/
+/config.local.toml
+
+# ---------------------------------------------------------------------------
+# Project outputs (generated previews/caches, not source)
+# ---------------------------------------------------------------------------
+imagecull-previews/
+/previews/
+/cache/
+
+# ---------------------------------------------------------------------------
+# AI assistant / agent state
+# ---------------------------------------------------------------------------
+# Shared skills (.agents/, .claude/skills/, skills-lock.json) ARE committed.
+# Only per-machine and per-session state is ignored.
+.pi/
+CLAUDE.local.md
+AGENTS.local.md
+.claude/settings.local.json
+.claude/projects/
+.claude/todos/
+.cursor/
+.aider*
+*.aider.chat.history.md
+.github/copilot-instructions.local.md
+.mcp.local.json
+
+# ---------------------------------------------------------------------------
+# Editors & OS cruft
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini

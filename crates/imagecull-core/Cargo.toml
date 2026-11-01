@@ -1,0 +1,14 @@
+[package]
+name = "imagecull-core"
+description = "Scoring core for imagecull: no CLI, no TTY, no process exit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+raw-files = { workspace = true }
+image = { workspace = true }

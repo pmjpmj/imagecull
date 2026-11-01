@@ -1,0 +1,15 @@
+[package]
+name = "imagecull-cli"
+description = "The imagecull command-line front end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "imagecull"
+path = "src/main.rs"
+
+[dependencies]
+imagecull-core = { workspace = true }
+clap = { workspace = true }
