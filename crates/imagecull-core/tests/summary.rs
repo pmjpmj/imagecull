@@ -13,7 +13,7 @@ use imagecull_core::error::ErrorKind;
 use imagecull_core::ingest::{ScanCounts, SourceFile};
 use imagecull_core::progress::{DISAGREEMENT_RULE, Summary, agrees, implied_stars};
 use imagecull_core::reading::{Answers, Confidences, Reading, Verdict};
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{Ending, Frame, Run, Usage};
 
 fn source(name: &str) -> SourceFile {
@@ -66,7 +66,11 @@ fn failed(name: &str, kind: ErrorKind) -> Frame {
 
 fn run(frames: Vec<Frame>) -> Run {
     Run {
-        rubric_hash: Rubric::embedded().expect("parse").hash("clef-flash-oQ4e"),
+        builtin: None,
+        rubric_hash: Builtin::General
+            .rubric()
+            .expect("parse")
+            .hash("clef-flash-oQ4e"),
         model: "clef-flash-oQ4e".to_string(),
         counts: ScanCounts::default(),
         total: frames.len(),
@@ -77,6 +81,24 @@ fn run(frames: Vec<Frame>) -> Run {
         ending: Ending::Completed,
         source: None,
     }
+}
+
+#[test]
+fn the_built_in_a_run_used_rides_through_the_summary() {
+    let mut run = run(vec![scored("a.NEF", 6.0, 3)]);
+    run.builtin = Some(Builtin::General);
+    assert_eq!(
+        run.summary().builtin,
+        Some(Builtin::General),
+        "the summary has to be able to say which built-in judged the folder"
+    );
+
+    run.builtin = None;
+    assert_eq!(
+        run.summary().builtin,
+        None,
+        "a rubric loaded from a file has no built-in to name"
+    );
 }
 
 fn statuses(summary: &Summary) -> Vec<(&str, usize)> {

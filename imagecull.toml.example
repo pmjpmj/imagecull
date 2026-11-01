@@ -54,9 +54,16 @@ endpoint = "http://127.0.0.1:8000"
 # absolute = false
 
 [run]
-# A rubric file to use instead of the one built into imagecull. Default: the
-# embedded rubric. Its hash goes into the report, so a rubric edit re-scores
-# rather than silently mixing two rubrics in one file.
+# The rubric to judge by: a built-in's name, or a path to a rubric file.
+# Default: general. Three rubrics are compiled in — `general`, which assumes no
+# genre and is what runs when nothing else is selected; `press`, a photo editor
+# culling a photojournalistic shoot; and `holiday`, which judges a frame as a
+# family-album keeper. A bare name is always a built-in, so use `./holiday` for
+# a file that happens to be called that. The rubric's hash goes into the report,
+# so a changed rubric re-scores rather than silently mixing two judgements in
+# one file; the name is provenance beside the hash.
+# rubric = "holiday"
+# A rubric of your own: a path, relative to this file's directory.
 # rubric = "mine.toml"
 # Free text about the shoot, passed to the model as state.shoot_context, so a
 # dim, high-ISO street shoot is judged as that.

@@ -30,7 +30,7 @@ use crate::progress::{
 };
 use crate::reading::{self, Answers, Reading};
 use crate::report::{self, Failure, Outputs, Row};
-use crate::rubric::{Rubric, RubricHash, hex};
+use crate::rubric::{Builtin, Rubric, RubricHash, hex};
 
 /// The task framing every request's state carries (spec §7.1).
 pub const TASK: &str = "photo_cull";
@@ -273,6 +273,8 @@ impl Config {
 /// What a run did, frame by frame.
 #[derive(Debug)]
 pub struct Run {
+    /// The built-in rubric a name selected, when one did.
+    pub builtin: Option<Builtin>,
     /// Which rubric and alias every frame was scored under.
     pub rubric_hash: RubricHash,
     /// The alias actually used.
@@ -425,6 +427,7 @@ pub fn run(
     // much work there is while the preflight is still in flight.
     reporter.event(Event::Started(Started {
         total: scan.files.len(),
+        builtin: config.rubric.builtin(),
         rubric_hash: rubric_hash.clone(),
         model: config.model.clone(),
     }));
@@ -503,6 +506,7 @@ pub fn run(
         ..
     } = account;
     let run = Run {
+        builtin: config.rubric.builtin(),
         rubric_hash,
         model: config.model.clone(),
         counts: scan.counts,

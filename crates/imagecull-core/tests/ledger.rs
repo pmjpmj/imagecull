@@ -22,7 +22,7 @@ use imagecull_core::ledger::{LedgerMode, VERSION};
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Ending, Request, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -71,11 +71,13 @@ fn ledger_in(out: &Path) -> PathBuf {
     out.join("scores.ledger.jsonl")
 }
 
-/// The config of a run whose report lands in `out`: the embedded rubric, the
+/// The config of a run whose report lands in `out`: the default built-in, the
 /// default preview parameters, and a plain `score`'s ledger mode.
 fn config(out: &Path) -> Config {
     Config::new(
-        Rubric::embedded().expect("the embedded rubric parses"),
+        Builtin::General
+            .rubric()
+            .expect("the default built-in parses"),
         None,
         Params::default(),
         ScanOptions::default(),

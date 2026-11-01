@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use imagecull_core::config::{self, Effective, Loaded, Resolved};
 use imagecull_core::ledger::LedgerMode;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::{Builtin, RubricSource};
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
@@ -158,9 +158,10 @@ pub struct ScoreArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// A rubric file to use instead of the one built into imagecull
-    #[arg(long, value_name = "FILE")]
-    pub rubric: Option<PathBuf>,
+    /// The rubric to judge by: `general`, `press` or `holiday` for a built-in,
+    /// or a path to a rubric file (default: general)
+    #[arg(long, value_name = "NAME|FILE", value_parser = RubricSource::parse)]
+    pub rubric: Option<RubricSource>,
 
     /// Free text about the shoot, passed to the model as state.shoot_context,
     /// so a dim, high-ISO street shoot is judged as that
@@ -241,17 +242,17 @@ pub struct ScoreArgs {
     pub verbose: bool,
 }
 
-/// The `--version` line: the version, and the rubric compiled into the binary.
+/// The `--version` line: the version, and the rubric a run uses by default.
 ///
 /// The hash is what makes the line worth printing: two builds with different
 /// default rubrics are not the same tool, and a photographer comparing CSVs
 /// needs the identity of the rubric that made them (spec §8.3, §11).
 pub fn version_line() -> String {
-    match Rubric::embedded() {
+    match Builtin::DEFAULT.rubric() {
         Ok(rubric) => format!(
             "imagecull {} (rubric {}, model {})",
             env!("CARGO_PKG_VERSION"),
-            rubric.hash(rubric.model()).short(),
+            crate::progress::rubric_name(Some(Builtin::DEFAULT), &rubric.hash(rubric.model())),
             rubric.model(),
         ),
         // Unreachable in a tested build, but a version line must never be the
@@ -485,7 +486,10 @@ mod tests {
             Some("http://127.0.0.1:9000")
         );
         assert_eq!(args.common.model.as_deref(), Some("clef-27b-oQ4e"));
-        assert_eq!(args.rubric, Some(PathBuf::from("mine.toml")));
+        assert_eq!(
+            args.rubric,
+            Some(RubricSource::File(PathBuf::from("mine.toml")))
+        );
         assert_eq!(
             args.shoot_context.as_deref(),
             Some("street at dusk, high ISO expected")
@@ -495,8 +499,51 @@ mod tests {
         let effective = effective(&args);
         assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
         assert_eq!(effective.model.as_deref(), Some("clef-27b-oQ4e"));
-        assert_eq!(effective.rubric, Some(PathBuf::from("mine.toml")));
+        assert_eq!(
+            effective.rubric,
+            Some(RubricSource::File(PathBuf::from("mine.toml"))),
+            "a path stays a path through every layer"
+        );
         assert_eq!(effective.timeout, 240);
+    }
+
+    #[test]
+    fn a_bare_name_selects_a_built_in_rubric() {
+        let Command::Score(args) = parse(&["score", "shoot", "--rubric", "holiday"]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(
+            args.rubric,
+            Some(RubricSource::Builtin(Builtin::Holiday)),
+            "the flag reads a bare name as a built-in, exactly as the config file does"
+        );
+        assert_eq!(
+            effective(&args).rubric,
+            Some(RubricSource::Builtin(Builtin::Holiday)),
+            "and no layer under the flag turns it back into a path"
+        );
+
+        let Command::Score(args) = parse(&["score", "shoot", "--rubric", "General"]) else {
+            panic!("not a score command");
+        };
+        assert_eq!(
+            args.rubric,
+            Some(RubricSource::File(PathBuf::from("General"))),
+            "three lowercase words, not a fuzzy match: `General` is a path"
+        );
+    }
+
+    #[test]
+    fn a_rubric_that_names_nothing_is_refused_before_a_frame_is_read() {
+        let error = parse_result(&["score", "shoot", "--rubric", "  "])
+            .expect_err("a blank rubric must stop the command line");
+        let message = error.to_string();
+        for expected in ["general", "press", "holiday"] {
+            assert!(
+                message.contains(expected),
+                "the refusal must list the built-ins: {message}"
+            );
+        }
     }
 
     /// The three flags that decide what a run does with a ledger it finds
@@ -640,13 +687,17 @@ mod tests {
     }
 
     #[test]
-    fn the_version_line_names_the_version_and_the_embedded_rubric() {
+    fn the_version_line_names_the_version_and_the_default_built_in() {
         let line = version_line();
         assert!(line.starts_with(&format!("imagecull {}", env!("CARGO_PKG_VERSION"))));
-        assert!(line.contains("rubric "), "{line}");
+        assert!(
+            line.contains("rubric general/"),
+            "the default built-in is named, not just hashed: {line}"
+        );
         assert!(line.contains(omlx::DEFAULT_MODEL), "{line}");
 
-        let short = Rubric::embedded()
+        let short = Builtin::General
+            .rubric()
             .expect("parse")
             .hash(omlx::DEFAULT_MODEL)
             .short()

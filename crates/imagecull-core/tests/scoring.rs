@@ -16,7 +16,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
 use imagecull_core::reading::Verdict;
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, RetryPolicy};
 use serde_json::json;
 use support::decider::{Scripted, document};
@@ -24,7 +24,9 @@ use support::shoot;
 
 fn config(params: Params, context: Option<&str>) -> Config {
     let mut config = Config::new(
-        Rubric::embedded().expect("the embedded rubric parses"),
+        Builtin::General
+            .rubric()
+            .expect("the default built-in parses"),
         None,
         params,
         ScanOptions::default(),
@@ -37,7 +39,9 @@ fn config(params: Params, context: Option<&str>) -> Config {
 
 fn limited(limit: usize) -> Config {
     let mut config = Config::new(
-        Rubric::embedded().expect("the embedded rubric parses"),
+        Builtin::General
+            .rubric()
+            .expect("the default built-in parses"),
         None,
         Params::default(),
         ScanOptions {

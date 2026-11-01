@@ -1,7 +1,8 @@
 # 0001 — The rubric is authored once and rendered twice
 
 Status: accepted · 2026-11-08 · Ticket 03 (rubric and wire adapter) ·
-amended by [ADR 0002](0002-dedupe-keys-the-state-but-not-the-filename.md)
+amended by [ADR 0002](0002-dedupe-keys-the-state-but-not-the-filename.md) and
+[ADR 0004](0004-built-in-rubric-family.md)
 
 ## Context
 

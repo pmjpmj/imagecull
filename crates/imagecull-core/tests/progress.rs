@@ -15,7 +15,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::ledger::{self, LedgerMode};
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::{Event, FrameEvent, Judgement, Reporter, Silent};
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, RetryPolicy};
 use support::decider::{Scripted, document};
 use support::shoot;
@@ -57,7 +57,9 @@ fn nef(frame: Vec<u8>) -> Vec<u8> {
 
 fn config() -> Config {
     let mut config = Config::new(
-        Rubric::embedded().expect("the embedded rubric parses"),
+        Builtin::General
+            .rubric()
+            .expect("the default built-in parses"),
         None,
         Params::default(),
         ScanOptions::default(),

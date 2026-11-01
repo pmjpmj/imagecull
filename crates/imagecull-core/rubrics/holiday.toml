@@ -1,0 +1,172 @@
+# The holiday rubric: the same six questions as `press`, worded for a family
+# trip instead of a press shoot (spec §8).
+#
+# `press` asks whether a frame is a *keeper* in the editor's sense. A folder
+# from a fortnight away wants something else: is the family member in the
+# frame the one you would want to remember, and does the landscape hold the place
+# rather than merely record that somebody stood in front of it. Same schema,
+# different judgement.
+#
+# Use it by name:
+#
+#   imagecull score ~/Shoots/holiday --rubric holiday
+#
+# or in a shoot config:
+#
+#   [run]
+#   rubric = "holiday"
+#
+# The ids, their order, the 0-10 score legends and the star/verdict keys are
+# fixed by the loader: the report, the ledger and the v2 sidecar all have a
+# column for each of the six. Only the wording is free. Editing any of it — an
+# instruction, a criterion, the alias — changes the rubric hash, and two reports
+# with different hashes are not comparable. That is deliberate: resume and
+# calibration key off the hash, so a reworded rubric re-scores rather than
+# silently mixing two judgements in one file.
+
+model = "clef-flash-oQ4e"
+
+# --- the four independent scores -------------------------------------------
+#
+# Each `criteria` array is that score's own legend, "0"…"10" in order, so the
+# answer is the expected value over eleven levels. The legends are worded per
+# axis rather than shared: a technical 3 and a composition 3 are different
+# diagnoses, and the model reads the legend as the question. The four scores are
+# never combined and never rescaled to 100 — a sharp, dull frame and a warm,
+# slightly soft one must stay distinguishable.
+
+[[question]]
+id = "overall"
+type = "score"
+instructions = """
+You are culling the photographs from a family holiday, deciding which frames \
+earn a place in the album. Judge the frame as a whole: is this worth keeping? \
+Most frames have a family member as the main subject — a face, a shared meal, a \
+child in the water, someone half-turned and unguarded — and what counts is that \
+the person is recognisable and part of the moment rather than posed for the \
+camera. A landscape from the same trip counts when it holds the place and its \
+light, not merely evidence that you were there. A distinctive moment or a face \
+caught honestly beats clinical perfection.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, or the moment is gone" },
+    { key = "1", description = "failing — nothing in it anyone would keep" },
+    { key = "2", description = "poor — a serious problem, hard to rescue" },
+    { key = "3", description = "weak — a flaw a viewer would notice first" },
+    { key = "4", description = "below par — mostly there, one obvious shortcoming" },
+    { key = "5", description = "record — worth keeping only as evidence of the day" },
+    { key = "6", description = "competent — fine, and nobody will look twice" },
+    { key = "7", description = "good — earns a page in the album" },
+    { key = "8", description = "strong — the frame the day is remembered by" },
+    { key = "9", description = "excellent — worth printing and hanging" },
+    { key = "10", description = "hero — the best frame of the whole holiday" },
+]
+
+[[question]]
+id = "technical"
+type = "score"
+instructions = """
+Judge technical image quality only: are the eyes and faces of the people sharp, \
+is a moving child free of motion blur, is the noise on an evening or indoor \
+frame tolerable, does the exposure hold both a face and a bright sky, is the \
+white balance plausible under mixed indoor and daylight, are highlights clipped \
+or shadows crushed, is the horizon level in a landscape. Ignore composition and \
+ignore impact — how the frame is arranged, and whether the moment was worth \
+catching, are judged by other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable: nothing in focus, or blown out" },
+    { key = "1", description = "failing — the subject is unrecognisable" },
+    { key = "2", description = "poor — soft where it had to be sharp, or ruined exposure" },
+    { key = "3", description = "weak — a technical flaw a viewer sees at once" },
+    { key = "4", description = "below par — usable, with one flaw that will show in a print" },
+    { key = "5", description = "record — fine small, not good enough to print" },
+    { key = "6", description = "competent — clean enough for the album" },
+    { key = "7", description = "good — sharp, well exposed, quiet noise" },
+    { key = "8", description = "strong — clean at full size and holds up enlarged" },
+    { key = "9", description = "excellent — technically impeccable" },
+    { key = "10", description = "immaculate — nothing left to improve" },
+]
+
+[[question]]
+id = "composition"
+type = "score"
+instructions = """
+Judge framing and graphic design only: where the family member sits in the \
+frame, the headroom, crowding at the edges, whether an arm, a head or a \
+shoulder is cut off, the line of sight into or out of the frame, a level \
+horizon, how much empty ground a landscape gives to the sky, and the crop. \
+Ignore technical quality and ignore impact — focus, exposure and the pull of \
+the moment are other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — unusable, nothing is where it should be" },
+    { key = "1", description = "failing — the subject is lost in the frame" },
+    { key = "2", description = "poor — a distracting element dominates the frame" },
+    { key = "3", description = "weak — mis-framed in a way a viewer notices" },
+    { key = "4", description = "below par — a decent frame with one obvious flaw" },
+    { key = "5", description = "record — it documents the scene and no more" },
+    { key = "6", description = "competent — conventional and clean" },
+    { key = "7", description = "good — deliberate framing that reads at a glance" },
+    { key = "8", description = "strong — the arrangement carries the frame" },
+    { key = "9", description = "excellent — composition is the reason to keep it" },
+    { key = "10", description = "masterful — every element in its place" },
+]
+
+[[question]]
+id = "impact"
+type = "score"
+instructions = """
+Judge emotional and scenic impact only: does the frame hold a distinctive \
+moment — a laugh, a gesture, an expression, someone caught unguarded with the \
+people around them — or, if it is a landscape, a quality of light or a sense of \
+place that makes someone stop and look? Ignore technical quality and ignore \
+composition — those are judged by other questions.
+"""
+criteria = [
+    { key = "0", description = "delete — no moment and no place in it" },
+    { key = "1", description = "failing — a posed blank" },
+    { key = "2", description = "poor — the moment has already passed" },
+    { key = "3", description = "weak — a flicker of something, not enough" },
+    { key = "4", description = "below par — mild interest only" },
+    { key = "5", description = "record — it says where we were and nothing more" },
+    { key = "6", description = "competent — pleasant and unmemorable" },
+    { key = "7", description = "good — a real moment, caught" },
+    { key = "8", description = "strong — the frame people ask for a copy of" },
+    { key = "9", description = "excellent — warmth or beauty that makes a viewer stop" },
+    { key = "10", description = "unforgettable — the frame that holds the trip" },
+]
+
+# --- the two choice questions ----------------------------------------------
+#
+# `stars` is the portable channel into Lightroom (v2 writes it as xmp:Rating),
+# and `verdict` is the model's own keep/drop opinion. Both are recorded as the
+# model answered them: the star rating never comes from thresholds over the
+# four scores, and a `stars`/`overall` disagreement is reported, never
+# reconciled. Keys are fixed by the loader; the wording of each option is not.
+
+[[question]]
+id = "stars"
+type = "choice"
+instructions = """
+Applying a typical star rating to this holiday frame, how many stars?
+"""
+criteria = [
+    { key = "1", description = "reject — unusable, or a near-duplicate of a better frame" },
+    { key = "2", description = "poor — fine technically, nothing worth an album page" },
+    { key = "3", description = "ok — keep as a record of the day" },
+    { key = "4", description = "strong — one to print or send round" },
+    { key = "5", description = "excellent — the hero frame of the holiday" },
+]
+
+[[question]]
+id = "verdict"
+type = "choice"
+instructions = """
+Would you keep this photograph in the family album?
+"""
+criteria = [
+    { key = "dislike", description = "I would not keep it" },
+    { key = "neutral", description = "I could keep it or not" },
+    { key = "like", description = "I would keep it and show it" },
+]

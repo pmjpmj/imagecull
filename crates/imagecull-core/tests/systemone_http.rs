@@ -21,7 +21,7 @@ use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
 use imagecull_core::progress::Silent;
 use imagecull_core::reading::{self, Verdict};
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::systemone::Adapter;
 use serde_json::{Value, json};
@@ -92,7 +92,7 @@ fn adapter(stub: &Stub, model: &str) -> Adapter {
 
 /// One request for one frame, as the pipeline would build it.
 fn decide(stub: &Stub, state: State, preview: &Encoded, model: &str) -> Result<Response> {
-    let rubric = Rubric::embedded().expect("parse");
+    let rubric = Builtin::General.rubric().expect("parse");
     adapter(stub, model).decide(&request(&rubric, preview, state, model))
 }
 
@@ -109,7 +109,7 @@ fn a_canned_answer_comes_back_as_a_reading_with_all_six_answers() {
     )
     .expect("a 200 is an answer");
 
-    let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+    let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
     let answers = reading.answers.expect("six readable answers");
     assert_eq!(answers.overall, 6.4237);
     assert_eq!(answers.stars, 4);
@@ -229,7 +229,7 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
     .expect("a 200 is an answer");
 
     let questions = stub.requests()[0].body["questions"].clone();
-    let rubric = Rubric::embedded().expect("parse");
+    let rubric = Builtin::General.rubric().expect("parse");
 
     let overall = &questions["overall"];
     assert_eq!(overall["type"], "score");
@@ -239,8 +239,21 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
     );
     let legend = overall["criteria"].as_array().expect("an ordered legend");
     assert_eq!(legend.len(), 11, "keys 0-10, one description each");
-    assert_eq!(legend[0], "delete — unusable, the frame does not work");
-    assert_eq!(legend[10], "portfolio-grade — the best the shoot can offer");
+    let described: Vec<&str> = rubric
+        .question("overall")
+        .expect("overall")
+        .criteria()
+        .iter()
+        .map(|criterion| criterion.description())
+        .collect();
+    assert_eq!(
+        legend
+            .iter()
+            .map(|level| level.as_str().expect("a description"))
+            .collect::<Vec<_>>(),
+        described,
+        "the legend on the wire is the rubric's own, in key order"
+    );
 
     let stars = &questions["stars"];
     assert_eq!(stars["type"], "choice");
@@ -250,9 +263,11 @@ fn a_score_question_sends_its_legend_and_a_choice_question_its_options() {
         ["1", "2", "3", "4", "5"],
         "option order survives, because it is part of the legend"
     );
+    let stars_offered = rubric.question("stars").expect("stars");
     assert_eq!(
         options["1"],
-        "reject — unusable, out of focus, or a duplicate"
+        stars_offered.criteria()[0].description(),
+        "each option carries the wording the rubric gives it"
     );
 
     let verdict = &questions["verdict"];
@@ -302,7 +317,7 @@ fn an_adversarial_document_becomes_a_bad_response_not_a_guess() {
             "clef-flash-oQ4e",
         )
         .unwrap_or_else(|error| panic!("{case}: HTTP itself succeeded: {error}"));
-        let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+        let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
         let error = reading.answers.expect_err(&format!("{case} must not read"));
         assert_eq!(error.kind(), Some(ErrorKind::BadResponse), "{case}");
     }
@@ -322,7 +337,7 @@ fn a_body_that_is_not_json_is_kept_as_the_document_it_was() {
     .expect("the status was a 200");
 
     assert_eq!(response.document, json!("not json at all"));
-    let reading = reading::read(&Rubric::embedded().expect("parse"), response);
+    let reading = reading::read(&Builtin::General.rubric().expect("parse"), response);
     let error = reading.answers.expect_err("nothing to read");
     assert_eq!(error.kind(), Some(ErrorKind::BadResponse));
 }
@@ -426,7 +441,7 @@ fn nothing_listening_is_server_unreachable() {
         ),
         "clef-flash-oQ4e",
     );
-    let rubric = Rubric::embedded().expect("parse");
+    let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
     let error = adapter
         .decide(&request(
@@ -453,7 +468,7 @@ fn a_server_that_never_answers_times_out() {
         ),
         "clef-flash-oQ4e",
     );
-    let rubric = Rubric::embedded().expect("parse");
+    let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
 
     let error = adapter
@@ -487,7 +502,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
     let stub = Stub::serving(script, &["clef-flash-oQ4e"]).taking(Duration::from_millis(30));
 
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         None,
         Params::default(),
         ingest::ScanOptions::default(),
@@ -541,7 +556,7 @@ fn a_run_over_http_reports_the_answers_it_read() {
     let shoot = shoot(1);
     let stub = Stub::serving(vec![(200, answer_document())], &["clef-27b-oQ4e"]);
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         Some("clef-27b-oQ4e".into()),
         Params::default(),
         ingest::ScanOptions::default(),
@@ -611,7 +626,7 @@ fn a_server_that_does_not_report_model_types_can_still_be_scored() {
     let shoot = shoot(1);
     let stub = Stub::untyped(vec![(200, answer_document())], &["clef-flash-oQ4e"]);
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         None,
         Params::default(),
         ingest::ScanOptions::default(),
@@ -704,7 +719,7 @@ fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() 
     let shoot = shoot(2);
     let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);
     let config = Config::new(
-        Rubric::embedded().expect("parse"),
+        Builtin::General.rubric().expect("parse"),
         Some("clef-flash-oQ4e".into()),
         Params::default(),
         ingest::ScanOptions::default(),

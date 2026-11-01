@@ -36,14 +36,26 @@ The questions a frame is judged by, with the scoring legend each answer is
 chosen from.
 _Avoid_: prompt, template, config file
 
+**Built-in rubric**:
+One of the rubrics compiled into the binary — `general`, `press`, `holiday` —
+selected by name instead of by a path.
+_Avoid_: embedded rubric, default rubric, preset, built-in prompt
+
+**General rubric**:
+The built-in a run uses when nothing selects another. It assumes no genre and
+judges a frame on the terms the frame appears to set for itself.
+_Avoid_: default rubric, generic rubric, the default
+
 **Rubric hash**:
 The identity of a rubric, alias included. Two runs with different hashes did not
-judge the same way, and their scores are not comparable.
+judge the same way, and their scores are not comparable. Which built-in a run
+asked for is not part of it: the same words are the same judgement.
 _Avoid_: checksum, fingerprint, version
 
 **Effective config**:
-The values a run actually uses — rubric, alias, preview parameters, scan
-breadth, output paths — after every source has been resolved.
+The values a run actually uses — rubric (a built-in's name or a file's path),
+alias, preview parameters, scan breadth, output paths — after every source has
+been resolved.
 _Avoid_: settings, options, arguments, parameters
 
 **Config file**:

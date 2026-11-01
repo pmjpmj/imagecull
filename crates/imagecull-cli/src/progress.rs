@@ -19,6 +19,7 @@ use imagecull_core::ingest::ScanCounts;
 use imagecull_core::progress::{
     DISAGREEMENT_RULE, Event, FrameEvent, Judgement, Reporter, Started, Summary, Warning,
 };
+use imagecull_core::rubric::{Builtin, RubricHash};
 use imagecull_core::scoring::Ending;
 
 /// How much of a run the photographer wants to see.
@@ -141,7 +142,7 @@ fn started_line(started: &Started, verbosity: Verbosity) -> Option<String> {
             "scoring {} {} · rubric {} · model {}\n",
             started.total,
             plural(started.total, "frame", "frames"),
-            started.rubric_hash.short(),
+            rubric_name(started.builtin, &started.rubric_hash),
             started.model,
         )),
     }
@@ -229,6 +230,17 @@ fn warning_line(warning: &Warning) -> String {
     format!("warning: {}\n", warning.message)
 }
 
+/// `general/69139540` for a rubric selected by name, `69139540` for one loaded
+/// from a file. The name says how the rubric was asked for and the hash says
+/// what was judged, so a file — which has no name to give — prints the hash
+/// alone rather than inventing one.
+pub(crate) fn rubric_name(builtin: Option<Builtin>, hash: &RubricHash) -> String {
+    match builtin {
+        Some(builtin) => format!("{builtin}/{}", hash.short()),
+        None => hash.short().to_string(),
+    }
+}
+
 /// The whole summary block: what the run did, how it ended, and whether to
 /// trust the rubric that produced it.
 fn summary_block(summary: &Summary) -> String {
@@ -274,7 +286,7 @@ fn summary_block(summary: &Summary) -> String {
     }
     out.push_str(&format!(
         "rubric {} · model {}",
-        summary.rubric_hash.short(),
+        rubric_name(summary.builtin, &summary.rubric_hash),
         summary.model
     ));
     // Which config file produced these numbers, when one did: the same kind of
@@ -309,7 +321,10 @@ fn outcome_line(summary: &Summary) -> String {
     if !left_out.is_empty() {
         parts.push(format!("left out: {}", left_out.join(" · ")));
     }
-    parts.push(format!("rubric {}", summary.rubric_hash.short()));
+    parts.push(format!(
+        "rubric {}",
+        rubric_name(summary.builtin, &summary.rubric_hash)
+    ));
     parts.push(format!("model {}", summary.model));
     parts.join(" · ")
 }
@@ -413,7 +428,7 @@ mod tests {
     use imagecull_core::progress::{MeanMedian, PreviewShape, Scores, StatusCount, Warning};
     use imagecull_core::reading::{Answers, Confidences, Verdict};
     use imagecull_core::report::Failure;
-    use imagecull_core::rubric::Rubric;
+    use imagecull_core::rubric::Builtin;
     use imagecull_core::scoring::Ending;
 
     use super::*;
@@ -440,7 +455,11 @@ mod tests {
     fn started(total: usize) -> Event {
         Event::Started(Started {
             total,
-            rubric_hash: Rubric::embedded().expect("parse").hash("clef-flash-oQ4e"),
+            builtin: Some(Builtin::General),
+            rubric_hash: Builtin::General
+                .rubric()
+                .expect("parse")
+                .hash("clef-flash-oQ4e"),
             model: "clef-flash-oQ4e".to_string(),
         })
     }
@@ -480,7 +499,10 @@ mod tests {
 
     /// The summary of a 400-frame run that scored 397 of them.
     fn summary() -> Summary {
-        let rubric = Rubric::embedded().expect("parse").hash("clef-flash-oQ4e");
+        let rubric = Builtin::General
+            .rubric()
+            .expect("parse")
+            .hash("clef-flash-oQ4e");
         Summary {
             total: 400,
             judged: 400,
@@ -523,6 +545,7 @@ mod tests {
             stars: [0, 4, 51, 68, 274],
             disagreements: 6,
             disagreement_rate: 6.0 / 397.0,
+            builtin: Some(Builtin::General),
             rubric_hash: rubric,
             model: "clef-flash-oQ4e".to_string(),
             config: None,
@@ -614,7 +637,7 @@ mod tests {
              resumed: 3 · deduplicated: 2\n\
              left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
              1 hidden directory not scanned\n\
-             rubric {short} · model clef-flash-oQ4e\n"
+             rubric general/{short} · model clef-flash-oQ4e\n"
         );
         assert_eq!(rendered.out, expected);
         assert!(rendered.err.is_empty());
@@ -635,9 +658,32 @@ mod tests {
 
         assert!(
             rendered.out.contains(&format!(
-                "rubric {short} · model clef-flash-oQ4e · config /Volumes/Shoot A/imagecull.toml\n"
+                "rubric general/{short} · model clef-flash-oQ4e · config /Volumes/Shoot A/imagecull.toml\n"
             )),
             "the numbers have to be attributable to the file that made them: {}",
+            rendered.out
+        );
+    }
+
+    #[test]
+    fn a_file_selected_rubric_prints_its_hash_without_a_name() {
+        let mut summary = summary();
+        summary.builtin = None;
+        let short = summary.rubric_hash.short().to_string();
+
+        let rendered = transcript(
+            &[Event::Finished(imagecull_core::progress::Finished {
+                summary,
+            })],
+            Verbosity::Normal,
+        );
+
+        assert!(
+            rendered
+                .out
+                .ends_with(&format!("rubric {short} · model clef-flash-oQ4e\n")),
+            "a rubric that was not selected by name has no name to print, and the hash \
+             already identifies it: {}",
             rendered.out
         );
     }
@@ -671,7 +717,7 @@ mod tests {
             rendered.out,
             "scored 397 of 400 in 8m12s · ok 397 · no_preview 1 · timeout 2 · 3 resumed · \
              2 deduplicated · left out: 3 skipped (not RAW) · 2 ignored (Finder noise) · \
-             1 hidden directory not scanned · rubric 3f2a1b0c · model clef-flash-oQ4e\n"
+             1 hidden directory not scanned · rubric general/3f2a1b0c · model clef-flash-oQ4e\n"
                 .replace("3f2a1b0c", summary().rubric_hash.short()),
             "a script reads this line and the exit code"
         );
@@ -733,12 +779,13 @@ mod tests {
             "a retried failure says how many attempts it cost: {}",
             rendered.out
         );
+        let short = summary().rubric_hash.short().to_string();
         assert!(
             rendered
                 .out
-                .ends_with("rubric 69139540 · model clef-flash-oQ4e\n")
+                .ends_with(&format!("rubric general/{short} · model clef-flash-oQ4e\n"))
                 && rendered.out.contains("scored: 397 of 400 in 8m12s"),
-            "the summary follows: {}",
+            "the summary follows and names the built-in beside its hash: {}",
             rendered.out
         );
     }

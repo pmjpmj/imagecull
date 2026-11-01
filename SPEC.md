@@ -95,7 +95,7 @@ imagecull/
       src/progress.rs           # indicatif + tracing
     imagecull-xmp/              # (v2) sidecar merge/write
     imagecull-gui/              # (v3) Tauri app, depends on core only
-  rubric.default.toml
+  crates/imagecull-core/rubrics/  # general.toml, press.toml, holiday.toml
   tests/fixtures/               # see §13.1
 ```
 
@@ -215,7 +215,24 @@ Parsing rules (defensive — this contract is new surface):
 
 ## 8. The rubric
 
-Six questions, one forward pass. Encoded as TOML so wording can be tuned without a rebuild; an embedded default ships via `include_str!`, and `--rubric` overrides it. The effective rubric is hashed (§8.3).
+Six questions, one forward pass. Encoded as TOML so wording can be tuned without a rebuild; three rubrics ship via `include_str!`, `general` is the one a run uses when nothing selects another, and `--rubric` takes a name or a path. The effective rubric is hashed (§8.3) and the name it was selected by is provenance only.
+
+The wording is the judging, so three rubrics are compiled into the binary and
+selected by name: `general` (the default — no genre assumed, the frame judged on
+the terms it appears to set for itself), `press` (a photo editor culling a
+photojournalistic shoot) and `holiday` (a family album from a trip, where a family
+member recognised and unguarded is the subject and a landscape must hold the
+place and its light). `--rubric` takes one of those three names or a path to any
+other file that keeps the six ids, the 0-10 legends and the star/verdict keys;
+`[run] rubric` in a config file takes the same value. Each rubric's file stays in
+the tree under `crates/imagecull-core/rubrics/` as the copy to read and to start
+a draft from; ADR 0004 records the family.
+
+Three rubrics differ only in words, and the hash keeps their reports from ever
+being compared. A name is provenance, not identity: `--rubric holiday` and a path
+to a byte-identical copy of that file are the same judgement under the same hash,
+because the hash covers the question schema and the alias, never how the rubric
+was named.
 
 ### 8.1 The four scores
 
@@ -354,7 +371,8 @@ imagecull score <DIR> [OPTIONS]
     -o, --out <FILE>            default: ./scores.csv
         --endpoint <URL>        default: http://127.0.0.1:8000
     -m, --model <ALIAS>         default: from rubric.toml
-        --rubric <FILE>         default: embedded
+        --rubric <NAME|FILE>    one of general/press/holiday, or a path
+                                default: general
         --shoot-context <STR>   free text passed into state.shoot_context
         --max-edge <PX>         default 1568
         --jpeg-quality <1-100>  default 88
@@ -386,7 +404,7 @@ terminal received, and `--quiet` is the switch for a script that wants none of
 it. `--verbose` adds the preview's size, the answers at full precision and each
 failure's message.
 
-`--version` prints version + rubric hash.
+`--version` prints the version, the default built-in's name and its rubric hash.
 
 ### 11.1 Config files
 
@@ -395,8 +413,9 @@ retyped as flags. Keys are grouped into five sections that map one-for-one onto
 the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
 `[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
 (`csv`, `json_scores`, `absolute`), `[run]` (`rubric`, `shoot_context`,
-`dedupe`). `imagecull.toml.example` is the commented
-reference; ADR 0003 records why this shape.
+`dedupe`). `[run] rubric` holds exactly what `--rubric` holds: a built-in's name
+or a path. `imagecull.toml.example` is the commented reference; ADR 0003 records
+why this shape, ADR 0004 the three built-ins.
 
 **Discovery.** Exactly one file is read. The first of these that exists wins
 whole: `--config <FILE>`, `./imagecull.toml`,
@@ -417,11 +436,16 @@ is fatal, and a malformed file is fatal with the parser's line and column. Exit
 code 2 (`§10`), never a warning-and-continue.
 
 **Paths.** Relative paths in the file resolve against the file's own directory.
+A built-in's name is not a path and is not anchored: `rubric = "holiday"` means
+the built-in wherever the file sits, and `rubric = "./holiday"` means a file.
 
 **Provenance.** The file is read by `score`, `doctor` and `models`, so a
 preflight certifies the pipeline the run will actually use. When a file was
 loaded, the run summary's provenance line prints it beside the rubric hash and
-the model alias: `rubric 69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`.
+the model alias:
+`rubric general/69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`
+— the name before the slash only when a built-in was selected by name, since a
+file has no name to give and the hash already identifies it.
 The file's content hash is **not** in the ledger header; see ADR 0003's
 consequences for what that leaves open.
 

@@ -18,7 +18,7 @@ use crate::error::ErrorKind;
 use crate::ingest::ScanCounts;
 use crate::reading::Answers;
 use crate::report::{self, Failure};
-use crate::rubric::RubricHash;
+use crate::rubric::{Builtin, RubricHash};
 use crate::scoring::{Ending, Run};
 
 /// Where a run's progress goes.
@@ -157,6 +157,10 @@ pub struct Summary {
     /// [`Summary::disagreements`] over the scored frames, `0.0` when there are
     /// none. Reported, never reconciled (spec §29).
     pub disagreement_rate: f64,
+    /// The built-in rubric a name selected, when one did: provenance the hash
+    /// cannot carry, because the same words are the same judgement however a
+    /// run reached them.
+    pub builtin: Option<Builtin>,
     /// The rubric every frame was scored under: the number's provenance.
     pub rubric_hash: RubricHash,
     /// The alias every frame was scored with.
@@ -244,6 +248,7 @@ impl Summary {
             stars,
             disagreements,
             disagreement_rate,
+            builtin: run.builtin,
             rubric_hash: run.rubric_hash.clone(),
             model: run.model.clone(),
             config: run.source.clone(),
@@ -274,6 +279,9 @@ fn mean_median(mut values: Vec<f64>) -> MeanMedian {
 pub struct Started {
     /// How many files the scan accepted. The denominator of every index.
     pub total: usize,
+    /// The built-in rubric a name selected, when one did: the name is how the
+    /// rubric was chosen and is printed beside the hash that identifies it.
+    pub builtin: Option<Builtin>,
     /// The rubric's identity, so the front end can show what is being applied.
     pub rubric_hash: RubricHash,
     /// The alias actually in use.

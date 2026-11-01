@@ -21,6 +21,7 @@ use crate::ingest::ScanOptions;
 use crate::omlx;
 use crate::preprocess::Params;
 use crate::report::Outputs;
+use crate::rubric::RubricSource;
 
 /// The config file that travels with a shoot folder.
 pub const SHOOT_CONFIG: &str = "imagecull.toml";
@@ -200,7 +201,7 @@ impl ConfigFile {
             csv: anchor(&self.outputs.csv, base),
             json_scores: anchor(&self.outputs.json_scores, base),
             absolute: self.outputs.absolute,
-            rubric: anchor(&self.run.rubric, base),
+            rubric: self.run.rubric.clone().map(|source| source.anchored(base)),
             shoot_context: self.run.shoot_context.clone(),
             dedupe: self.run.dedupe,
         }
@@ -281,9 +282,24 @@ struct OutputsSection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RunSection {
-    rubric: Option<PathBuf>,
+    /// A built-in rubric's name or a path to a rubric file: the same value
+    /// `--rubric` takes, so the two can never disagree about what a name is.
+    #[serde(deserialize_with = "rubric_source")]
+    rubric: Option<RubricSource>,
     shoot_context: Option<String>,
     dedupe: Option<bool>,
+}
+
+/// `[run] rubric` as the text a photographer wrote, read the way `--rubric`
+/// reads it.
+fn rubric_source<'de, D>(deserializer: D) -> std::result::Result<Option<RubricSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = String::deserialize(deserializer)?;
+    RubricSource::parse(&text)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// The values one source actually set — a config file's, or the flags'.
@@ -302,7 +318,8 @@ pub struct Resolved {
     pub csv: Option<PathBuf>,
     pub json_scores: Option<PathBuf>,
     pub absolute: Option<bool>,
-    pub rubric: Option<PathBuf>,
+    /// Which rubric to judge by: a built-in's name, or a path to a file.
+    pub rubric: Option<RubricSource>,
     pub shoot_context: Option<String>,
     pub dedupe: Option<bool>,
 }
@@ -379,8 +396,9 @@ pub struct Effective {
     pub recursive: bool,
     /// Where the CSV and the raw answers go.
     pub outputs: Outputs,
-    /// The rubric file to use instead of the embedded one.
-    pub rubric: Option<PathBuf>,
+    /// Which rubric to judge by: a built-in's name, or a path to a file. `None`
+    /// is the default built-in.
+    pub rubric: Option<RubricSource>,
     /// The photographer's framing of the shoot.
     pub shoot_context: Option<String>,
     /// Whether an identical preview may reuse an earlier frame's outcome.

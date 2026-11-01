@@ -6,12 +6,14 @@
 
 use imagecull_core::error::ErrorKind;
 use imagecull_core::reading::{self, Verdict};
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::Response;
 use serde_json::{Value, json};
 
 fn rubric() -> Rubric {
-    Rubric::embedded().expect("the embedded rubric parses")
+    Builtin::General
+        .rubric()
+        .expect("the default built-in parses")
 }
 
 /// A canned answer document, with all six answers as the reference server

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use imagecull_core::config::{self, ConfigFile, Env, Resolved};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
+use imagecull_core::rubric::{Builtin, RubricSource};
 
 use tempfile::TempDir;
 
@@ -89,7 +90,10 @@ fn every_key_reaches_the_resolved_values() {
     assert_eq!(resolved.csv, Some(PathBuf::from("cull.csv")));
     assert_eq!(resolved.json_scores, Some(PathBuf::from("answers.json")));
     assert_eq!(resolved.absolute, Some(true));
-    assert_eq!(resolved.rubric, Some(PathBuf::from("mine.toml")));
+    assert_eq!(
+        resolved.rubric,
+        Some(RubricSource::File(PathBuf::from("mine.toml")))
+    );
     assert_eq!(
         resolved.shoot_context.as_deref(),
         Some("night street, pushed two stops")
@@ -166,7 +170,10 @@ fn a_relative_path_is_anchored_to_the_files_own_directory() {
     let base = Path::new("/Volumes/Shoot A");
     let file = ConfigFile::from_toml(EVERY_KEY).expect("a valid config");
     let resolved = file.resolve(Some(base));
-    assert_eq!(resolved.rubric, Some(base.join("mine.toml")));
+    assert_eq!(
+        resolved.rubric,
+        Some(RubricSource::File(base.join("mine.toml")))
+    );
     assert_eq!(resolved.csv, Some(base.join("cull.csv")));
     assert_eq!(resolved.json_scores, Some(base.join("answers.json")));
 }
@@ -181,7 +188,7 @@ fn an_absolute_path_is_left_alone() {
     let resolved = file.resolve(Some(base));
     assert_eq!(
         resolved.rubric,
-        Some(PathBuf::from("/etc/rubrics/mine.toml"))
+        Some(RubricSource::File(PathBuf::from("/etc/rubrics/mine.toml")))
     );
     assert_eq!(resolved.csv, Some(PathBuf::from("/tmp/cull.csv")));
 }
@@ -252,6 +259,45 @@ fn the_source_is_kept_for_provenance() {
     let source = PathBuf::from("/Volumes/Shoot A/imagecull.toml");
     let effective = Resolved::default().settle(Some(source.clone()));
     assert_eq!(effective.source, Some(source));
+}
+
+#[test]
+fn a_rubric_name_selects_a_built_in_and_a_path_names_a_file() {
+    assert_eq!(
+        resolved("[run]\nrubric = \"holiday\"\n").rubric,
+        Some(RubricSource::Builtin(Builtin::Holiday)),
+        "a bare name is a built-in, exactly as on the command line"
+    );
+    assert_eq!(
+        resolved("[run]\nrubric = \"rubrics/mine.toml\"\n").rubric,
+        Some(RubricSource::File(PathBuf::from("rubrics/mine.toml")))
+    );
+}
+
+#[test]
+fn a_name_is_not_anchored_to_the_config_files_directory() {
+    let base = Path::new("/Volumes/Shoot A");
+    let file = ConfigFile::from_toml("[run]\nrubric = \"holiday\"\n").expect("a valid config");
+    assert_eq!(
+        file.resolve(Some(base)).rubric,
+        Some(RubricSource::Builtin(Builtin::Holiday)),
+        "there is no path to anchor: a name is a name wherever the file sits"
+    );
+}
+
+#[test]
+fn a_blank_rubric_is_fatal_and_lists_the_built_ins() {
+    let message = error("[run]\nrubric = \"  \"\n");
+    assert!(
+        message.contains("rubric"),
+        "the message must name the key: {message}"
+    );
+    for builtin in Builtin::ALL {
+        assert!(
+            message.contains(builtin.name()),
+            "and say what could have been selected: {message}"
+        );
+    }
 }
 
 #[test]

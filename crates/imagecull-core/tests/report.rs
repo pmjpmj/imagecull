@@ -17,7 +17,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config};
 use serde_json::json;
 use support::decider::{Scripted, document};
@@ -56,11 +56,13 @@ impl Shoot {
         self.out.path().join("scores.csv")
     }
 
-    /// The config of a run over this folder: the embedded rubric, the default
+    /// The config of a run over this folder: the default built-in, the default
     /// preview parameters, and the report in `out`.
     fn config(&self, scan: ScanOptions) -> Config {
         Config::new(
-            Rubric::embedded().expect("the embedded rubric parses"),
+            Builtin::General
+                .rubric()
+                .expect("the default built-in parses"),
             None,
             Params::default(),
             scan,
@@ -105,8 +107,9 @@ fn nef(frame: Vec<u8>) -> Vec<u8> {
 /// The short rubric hash every row of a default run carries, so the golden text
 /// below pins the columns rather than the hash itself.
 fn short_hash() -> String {
-    Rubric::embedded()
-        .expect("the embedded rubric parses")
+    Builtin::General
+        .rubric()
+        .expect("the default built-in parses")
         .hash("clef-flash-oQ4e")
         .short()
         .to_string()

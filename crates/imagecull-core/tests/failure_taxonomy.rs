@@ -21,7 +21,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
-use imagecull_core::rubric::Rubric;
+use imagecull_core::rubric::Builtin;
 use imagecull_core::scoring::{self, Cancel, Config, Ending, RetryPolicy};
 use serde_json::json;
 use support::decider::{Scripted, document};
@@ -30,7 +30,9 @@ use support::decider::{Scripted, document};
 /// nothing: the attempt count is what these tests assert, not the waiting.
 fn config(csv: PathBuf) -> Config {
     let mut config = Config::new(
-        Rubric::embedded().expect("the embedded rubric parses"),
+        Builtin::General
+            .rubric()
+            .expect("the default built-in parses"),
         None,
         Params::default(),
         ScanOptions::default(),

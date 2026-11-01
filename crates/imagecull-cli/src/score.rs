@@ -35,7 +35,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
         return dry_run_command(args, &effective);
     }
 
-    let rubric = match Rubric::load(effective.rubric.as_deref()) {
+    let rubric = match Rubric::select(effective.rubric.as_ref()) {
         Ok(rubric) => rubric,
         Err(error) => {
             eprintln!("error: {error}");
