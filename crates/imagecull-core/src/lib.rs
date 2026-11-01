@@ -29,7 +29,10 @@
 //! clipping and the camera's focus report. Neither consults a model, and neither
 //! changes a score. The pass reports as it runs through the same kind of seam as
 //! [`progress`] ([`group::Watcher`]), so a front end can draw its frames without
-//! the core knowing what a screen is.
+//! the core knowing what a screen is. Ticket 02 of the same slice adds the
+//! group's keeper ([`keeper`]): one comparative request per group of two or more,
+//! asked through the same [`Decider`] seam, whose answer names the frame to keep
+//! and marks every other frame of the group red.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -45,6 +48,7 @@ pub mod dry_run;
 pub mod error;
 pub mod group;
 pub mod ingest;
+pub mod keeper;
 pub mod measure;
 pub mod omlx;
 pub mod preprocess;
@@ -65,6 +69,7 @@ pub use group::{
     Thresholds,
 };
 pub use ingest::{Scan, ScanCounts, ScanOptions, SourceFile};
+pub use keeper::{Candidate, Choice, Comparison};
 pub use omlx::{Client, Endpoint, ModelKind, Timeouts};
 pub use progress::{
     Event, Finished, FrameEvent, Judgement, MeanMedian, PreviewShape, Reporter, Silent, Started,
@@ -73,7 +78,7 @@ pub use progress::{
 pub use reading::{Answers, Reading};
 pub use rubric::{Builtin, Question, Rubric, RubricHash, RubricSource};
 pub use scoring::{
-    Cancel, Config, Decider, Ending, Outcome, Persisted, Request, Response, RetryPolicy, Run,
-    State, Usage,
+    Cancel, Config, Decider, Ending, Groups, Outcome, Persisted, Request, Response, RetryPolicy,
+    Run, State, Usage,
 };
-pub use sidecar::{Failure, Outputs, Properties, Row, Written};
+pub use sidecar::{ExistingLabel, Failure, Mark, Outputs, Prior, Properties, Row, Written};

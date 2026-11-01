@@ -65,6 +65,7 @@ fn run(frames: Vec<Frame>) -> Run {
         total: frames.len(),
         frames,
         duplicates: 0,
+        groups: imagecull_core::Groups::default(),
         elapsed: Duration::from_millis(1),
         ending: Ending::Completed,
         source: None,

@@ -11,6 +11,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use imagecull_core::error::{Error, Result};
+use imagecull_core::keeper::Comparison;
+use imagecull_core::preprocess::Encoded;
 use imagecull_core::scoring::{Cancel, Decider, Request, Response, State};
 use serde_json::{Value, json};
 
@@ -25,10 +27,28 @@ pub struct Seen {
     pub question_ids: Vec<String>,
 }
 
+/// One comparative request as the scripted decider saw it: the frames it was
+/// shown, in the order the criteria named them.
+#[derive(Debug, Clone)]
+pub struct SeenComparison {
+    pub model: String,
+    pub state: State,
+    pub previews: Vec<Encoded>,
+}
+
+impl SeenComparison {
+    /// The frames' names, taken from the state the group was judged in.
+    pub fn group(&self) -> &str {
+        &self.state.filename
+    }
+}
+
 /// A decider that records what it was asked and answers from a script.
 pub struct Scripted {
     answers: RefCell<VecDeque<Result<Value>>>,
+    comparisons: RefCell<VecDeque<Result<Value>>>,
     seen: RefCell<Vec<Seen>>,
+    seen_comparisons: RefCell<Vec<SeenComparison>>,
     in_flight: Cell<usize>,
     overlapped: Cell<bool>,
     /// What the preflight answers, when a test gives it something to say.
@@ -45,7 +65,9 @@ impl Scripted {
     pub fn answering(answers: Vec<Result<Value>>) -> Scripted {
         Scripted {
             answers: RefCell::new(answers.into()),
+            comparisons: RefCell::new(VecDeque::new()),
             seen: RefCell::new(Vec::new()),
+            seen_comparisons: RefCell::new(Vec::new()),
             in_flight: Cell::new(0),
             overlapped: Cell::new(false),
             preflight: RefCell::new(None),
@@ -85,9 +107,23 @@ impl Scripted {
         }
     }
 
+    /// Answer the comparative requests, in order, from `answers`: the script a
+    /// group of frames is judged against, with no server involved.
+    pub fn comparing(self, answers: Vec<Result<Value>>) -> Scripted {
+        Scripted {
+            comparisons: RefCell::new(answers.into()),
+            ..self
+        }
+    }
+
     /// Every request the pipeline made, in order.
     pub fn seen(&self) -> Vec<Seen> {
         self.seen.borrow().clone()
+    }
+
+    /// Every comparative request the pipeline made, in order.
+    pub fn compared(&self) -> Vec<SeenComparison> {
+        self.seen_comparisons.borrow().clone()
     }
 
     /// Whether a second request was ever in flight while the first was
@@ -139,6 +175,23 @@ impl Decider for Scripted {
             client_latency_ms: self.latency_ms,
         })
     }
+
+    fn compare(&self, comparison: &Comparison) -> Result<Response> {
+        self.seen_comparisons.borrow_mut().push(SeenComparison {
+            model: comparison.model.clone(),
+            state: comparison.state.clone(),
+            previews: comparison.previews.clone(),
+        });
+        let answer = self
+            .comparisons
+            .borrow_mut()
+            .pop_front()
+            .expect("the script must have an answer for every comparative request");
+        answer.map(|document| Response {
+            document,
+            client_latency_ms: self.latency_ms,
+        })
+    }
 }
 
 /// A readable answer document with a chosen star key.
@@ -149,5 +202,17 @@ pub fn document(stars: &str) -> Value {
             "stars": {"type": "choice", "choice": stars, "confidence": 0.63}
         },
         "usage": {"input_tokens": 1327}
+    })
+}
+
+/// A readable comparative answer naming the frame at `position`, counting from
+/// 1 in the order the request showed them.
+pub fn keeper(position: &str, confidence: f64) -> Value {
+    json!({
+        "model": "clef-flash-oQ4e",
+        "answers": {
+            "keeper": {"type": "choice", "choice": position, "confidence": confidence}
+        },
+        "usage": {"input_tokens": 557}
     })
 }
