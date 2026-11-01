@@ -283,6 +283,10 @@ pub struct GroupsArgs {
     /// (default: one per core)
     #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
     pub jobs: Option<usize>,
+
+    /// Print only the summary, not the per-frame progress or the group lines
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 impl GroupsArgs {
@@ -844,6 +848,18 @@ mod tests {
                 "{arguments:?} should be refused"
             );
         }
+    }
+
+    #[test]
+    fn groups_can_be_asked_for_the_summary_alone() {
+        let Command::Groups(args) = parse(&["groups", "shoot", "--quiet"]) else {
+            panic!("not a groups command");
+        };
+        assert!(args.quiet);
+        assert!(
+            !args.options().scan.recursive,
+            "--quiet silences, it does not scan"
+        );
     }
 
     #[test]

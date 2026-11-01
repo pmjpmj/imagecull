@@ -25,6 +25,7 @@ Artifacts:
 ```
 imagecull groups <DIR> [--out FILE] [--recursive] [--limit N]
                        [--group-gap SECS] [--group-similarity COSINE]
+                       [--jobs N] [--quiet]
 ```
 
 Scans the folder, reads each file's largest embedded preview and its metadata
@@ -146,6 +147,44 @@ and 8 jobs give the same CSV, the same hash and the same groups over a folder
 with a pan, a gap and one unreadable file in it. `assign` also stopped scanning
 the timed list once per frame (O(n²) → linear), which is invisible at 400 frames
 and not at 20,000.
+
+### What a pass says while it runs
+
+A 400-frame shoot is half a minute of a terminal showing nothing, so each frame
+gets a line as it is read — the same treatment `score` gives each frame as it is
+judged, and the same rule: newline-terminated, no terminal detection, so a
+redirected log is the log a terminal received.
+
+```
+reading 40 frames · 8 at a time
+ 1/40  DSC_0001.NEF  ok
+ 2/40  DSC_0002.NEF  ok
+...
+40/40  DSC_0040.NEF  ok
+
+groups: 12 groups in 40 frames (mean 3.3, largest 12) · 4s measured, 104 ms/frame ·
+  8 frames at a time · grouping hash 74a69240 · wrote groups.csv
+```
+
+- **In the pass's order, not the workers'.** A worker claims an index and sends
+  its reading back; the pass's own thread buffers whatever arrived early and
+  says each frame exactly once, in index order. So the lines are the same at any
+  degree: 1, 2, 3 and 6 jobs produce the same event stream, and only the
+  announced degree differs.
+- **The pass's order, not the plan's.** Groups come from capture times, which
+  are not known until every frame has been read; a line that waited for them
+  would arrive after the run. The line therefore carries the position in the
+  folder, the name and the status — the plan's group order is in the CSV and the
+  report, which come after.
+- **It costs nothing measurable.** 40 frames at 3000×2000, release: 0.29 s with
+  the 41 progress lines and 0.29 s under `--quiet`, which prints only the
+  summary.
+- **`--quiet` is the script's escape hatch**, as it is for `score`: the summary
+  and nothing else. A test at 8 jobs and a terminal at 1 both take it.
+- **A closed pipe is not a failed run.** The report went through `print!`, which
+  panics on EPIPE; piping into `head` killed the process mid-shoot. Both the
+  lines and the report now go through `progress::write`, which ignores the
+  error the way the sidecar printing writer already did.
 
 Two runs over the same folder produced byte-identical CSVs (`diff` empty), which
 is the determinism claim: every column is a function of the files and the two

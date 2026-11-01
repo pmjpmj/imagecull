@@ -571,3 +571,134 @@ fn reading_frames_at_a_time_changes_the_cost_and_nothing_else() {
         "the unreadable frame is the only failure"
     );
 }
+
+/// Everything a pass said, in the order it said it.
+#[derive(Default)]
+struct Told {
+    events: std::cell::RefCell<Vec<group::Event>>,
+}
+
+impl group::Watcher for Told {
+    fn event(&self, event: group::Event) {
+        self.events.borrow_mut().push(event);
+    }
+}
+
+#[test]
+fn the_pass_says_each_frame_as_it_reads_it_in_the_passes_own_order() {
+    // Five frames and one that cannot be read, read eight at a time: the lines
+    // have to arrive in the scan's order, once each, with the status the CSV
+    // will carry.
+    let image = scene();
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "20"),
+        moment("DSC_0003.NEF", &image, 3, "00"),
+        moment("DSC_0004.NEF", &image, 3, "20"),
+        moment("DSC_0005.NEF", &image, 9, "00"),
+    ]);
+    std::fs::write(dir.path().join("DSC_0006.NEF"), b"not a raw file")
+        .expect("write a broken file");
+
+    let told = Told::default();
+    group::run_with(
+        dir.path(),
+        &group::Options {
+            jobs: Some(8),
+            ..group::Options::default()
+        },
+        &told,
+    )
+    .expect("a folder that scans");
+
+    let events = told.events.borrow();
+    let group::Event::Started(started) = &events[0] else {
+        panic!("a pass opens by saying how much work there is");
+    };
+    assert_eq!(started.total, 6);
+    assert_eq!(started.jobs, 6, "never more workers than there are frames");
+
+    let frames: Vec<&group::FrameEvent> = events[1..]
+        .iter()
+        .map(|event| match event {
+            group::Event::Frame(frame) => frame,
+            group::Event::Started(_) => panic!("a pass starts once"),
+        })
+        .collect();
+    assert_eq!(frames.len(), 6, "one line per frame, and no more");
+    assert_eq!(
+        frames.iter().map(|frame| frame.index).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6],
+        "the lines arrive in the pass's order, not the workers'"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame.filename.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "DSC_0001.NEF",
+            "DSC_0002.NEF",
+            "DSC_0003.NEF",
+            "DSC_0004.NEF",
+            "DSC_0005.NEF",
+            "DSC_0006.NEF",
+        ]
+    );
+    assert_eq!(frames[3].status, "ok");
+    assert!(
+        frames[5].failure.is_some(),
+        "the frame nothing could be read from says why"
+    );
+    assert_ne!(frames[5].status, "ok");
+    assert!(
+        frames.iter().all(|frame| frame.total == 6),
+        "every line knows the denominator"
+    );
+}
+
+#[test]
+fn the_lines_are_the_same_at_any_degree_of_parallelism() {
+    let image = scene();
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "20"),
+        moment("DSC_0003.NEF", &image, 3, "00"),
+        moment("DSC_0004.NEF", &image, 3, "20"),
+        moment("DSC_0005.NEF", &image, 9, "00"),
+    ]);
+    std::fs::write(dir.path().join("DSC_0006.NEF"), b"not a raw file")
+        .expect("write a broken file");
+
+    let told = |jobs: usize| {
+        let told = Told::default();
+        group::run_with(
+            dir.path(),
+            &group::Options {
+                jobs: Some(jobs),
+                ..group::Options::default()
+            },
+            &told,
+        )
+        .expect("a folder that scans");
+        let events = told.events.borrow().clone();
+        // The degree is the one thing a pass may say differently; everything it
+        // says about the frames has to be the same text.
+        let (started, frames) = events.split_first().expect("a pass starts");
+        assert_eq!(
+            started,
+            &group::Event::Started(group::Started { total: 6, jobs }),
+            "{jobs} jobs announced the wrong work"
+        );
+        frames.to_vec()
+    };
+
+    let serial = told(1);
+    for jobs in [2, 3, 6] {
+        assert_eq!(
+            told(jobs),
+            serial,
+            "{jobs} jobs said something about the frames a serial pass did not"
+        );
+    }
+}
