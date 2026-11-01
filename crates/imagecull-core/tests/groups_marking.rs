@@ -174,7 +174,7 @@ fn cull_with(
         model: "clef-flash-oQ4e",
         shoot_context: None,
         budget,
-        params: Params::default(),
+        jpeg_quality: Params::default().jpeg_quality,
         grouping_hash: &plan.hash,
         allow_foreign,
         retry: RetryPolicy::without_waiting(),
@@ -423,15 +423,14 @@ fn a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame() {
         frame("DSC_0004.NEF", 0.6, 0, "25"),
         frame("DSC_0005.NEF", 0.8, 0, "30"),
     ]);
-    // Two frames per request: three first-round batches (2, 2, 1), two second
-    // round batches (the three winners, 2 then 1), then the final.
+    // Two frames per request over five frames: batches of two, two and one. The
+    // one-frame remainder is carried, not asked about, so the pass spends four
+    // requests: two in the first round, one in the second, one in the final.
     let decider = Scripted::answering(Vec::new()).comparing(vec![
         Ok(keeper("1", 0.90)),
         Ok(keeper("1", 0.80)),
         Ok(keeper("1", 0.70)),
-        Ok(keeper("1", 0.60)),
-        Ok(keeper("1", 0.50)),
-        Ok(keeper("2", 0.40)),
+        Ok(keeper("2", 0.60)),
     ]);
     let recorded = quiet();
     let budget = keeper::Budget {
@@ -442,43 +441,31 @@ fn a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame() {
     let culled = cull_through(shoot.path(), &decider, &recorded, budget);
 
     let compared = decider.compared();
-    assert_eq!(compared.len(), 6, "every round is a request: {compared:?}");
-    assert_eq!(
-        compared[0].previews.len(),
-        2,
-        "the first batch carries the request's worth and no more"
-    );
-    let mut first_round: Vec<String> = Vec::new();
-    for request in &compared[..3] {
-        assert_eq!(request.previews.len().min(2), request.previews.len());
-        first_round.push(request.group().to_string());
-    }
-    assert_eq!(
-        first_round
+    assert_eq!(compared.len(), 4, "four requests: {compared:?}");
+    assert!(
+        compared.iter().all(|request| request.previews.len() == 2),
+        "no request carries a single frame, because a question with one answer is not a \
+         comparison: {:?}",
+        compared
             .iter()
-            .filter(|name| *name == "DSC_0001.NEF")
-            .count(),
-        3,
-        "each first-round batch is named by the frame it opens with, and the group is the same"
+            .map(|request| request.previews.len())
+            .collect::<Vec<_>>()
     );
-    let culled_verdict = recorded.verdicts().remove(0);
+    let verdict = recorded.verdicts().remove(0);
+    assert_eq!(verdict.rounds, 4, "four requests stood behind the verdict");
     assert_eq!(
-        culled_verdict.rounds, 6,
-        "six requests stood behind the verdict"
-    );
-    assert_eq!(
-        culled_verdict.confidence, 0.40,
+        verdict.confidence, 0.60,
         "the shakiest call on the winner's path, not the final call's certainty"
     );
     assert_eq!(
-        culled_verdict.keeper.as_deref(),
+        verdict.keeper.as_deref(),
         Some("DSC_0005.NEF"),
         "the survivor of the final round"
     );
+    assert_eq!(culled.rounds, 4);
     assert_eq!(culled.red, 4, "every frame that is not the keeper is red");
-    assert_eq!(culled.unwritten, 0);
 
-    // Every frame of the group carries the verdict, including the ones a
+    // Every frame of the group carries the verdict, including the frames a
     // shortlist would have dropped before clef saw them.
     for name in [
         "DSC_0001.NEF",
@@ -489,10 +476,52 @@ fn a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame() {
     ] {
         let text = sidecar_of(shoot.path(), name);
         assert!(
-            text.contains("imagecull:pickRounds=\"6\""),
+            text.contains("imagecull:pickRounds=\"4\""),
             "{name}: {text}"
         );
     }
+}
+
+#[test]
+fn a_losing_batchs_coin_flip_does_not_shadow_the_winners_path() {
+    let shoot = shoot_of(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "15"),
+        frame("DSC_0003.NEF", 0.4, 0, "20"),
+        frame("DSC_0004.NEF", 0.6, 0, "25"),
+        frame("DSC_0005.NEF", 0.8, 0, "30"),
+    ]);
+    // Three frames per request: batches of three and two. The first batch is a
+    // coin flip whose winner then loses; the second is sure, and so is the
+    // final. The verdict depended on 0.90 and 0.95, not on 0.40.
+    let decider = Scripted::answering(Vec::new()).comparing(vec![
+        Ok(keeper("3", 0.40)),
+        Ok(keeper("1", 0.90)),
+        Ok(keeper("2", 0.95)),
+    ]);
+    let recorded = quiet();
+    let budget = keeper::Budget {
+        max: 3,
+        ..keeper::Budget::default()
+    };
+
+    let culled = cull_through(shoot.path(), &decider, &recorded, budget);
+
+    let verdict = recorded.verdicts().remove(0);
+    assert_eq!(
+        verdict.confidence, 0.90,
+        "the shakiest call on the winner's own path: a batch it did not survive is not evidence \
+         about it"
+    );
+    assert_eq!(
+        culled.low_confidence, 0,
+        "and the group is not called unsure"
+    );
+    assert_eq!(
+        verdict.keeper.as_deref(),
+        Some("DSC_0004.NEF"),
+        "the second batch's winner took the final"
+    );
 }
 
 #[test]
@@ -785,7 +814,7 @@ fn a_server_that_fails_the_preflight_marks_nothing() {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: keeper::Budget::default(),
-            params: Params::default(),
+            jpeg_quality: Params::default().jpeg_quality,
             grouping_hash: "hash",
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),

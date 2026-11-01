@@ -18,7 +18,6 @@ use imagecull_core::cull::{self, Culled};
 use imagecull_core::group::{self, Plan};
 use imagecull_core::keeper;
 use imagecull_core::omlx;
-use imagecull_core::preprocess::Params;
 use imagecull_core::scoring::RetryPolicy;
 use imagecull_core::sidecar;
 use imagecull_core::systemone::Adapter;
@@ -93,12 +92,9 @@ fn cull_for(
         model: &alias,
         shoot_context: effective.shoot_context.clone(),
         budget,
-        params: Params {
-            // The comparison renders its own previews at the budget's edge; this
-            // is the run's JPEG quality, which is also the comparison's.
-            max_edge: budget.edge,
-            jpeg_quality: effective.params.jpeg_quality,
-        },
+        // The comparison renders its own previews at the budget's edge, and
+        // encodes them at the quality this run would send.
+        jpeg_quality: effective.params.jpeg_quality,
         grouping_hash: &plan.hash,
         allow_foreign: args.allow_foreign,
         retry: RetryPolicy::default(),

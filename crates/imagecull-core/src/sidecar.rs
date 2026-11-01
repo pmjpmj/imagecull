@@ -604,6 +604,22 @@ pub fn path_for(frame: &std::path::Path) -> std::path::PathBuf {
     frame.with_extension("xmp")
 }
 
+/// The text of the sidecar beside `frame`, or `None` when there is none.
+///
+/// A sidecar that exists and cannot be read is a classified refusal rather than
+/// an absence: guessing would replace a document this tool never saw.
+pub fn read(frame: &std::path::Path) -> Result<Option<String>> {
+    let path = path_for(frame);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::new(
+            ErrorKind::XmpUnreadable,
+            format!("cannot read {}: {error}", path.display()),
+        )),
+    }
+}
+
 /// What a write did, which is what decides whether a `.bak` was owed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Written {
@@ -884,6 +900,15 @@ pub struct ExistingLabel {
     pub value: String,
     /// Whether `imagecull:labeledBy` says this tool put it there.
     pub ours: bool,
+}
+
+impl ExistingLabel {
+    /// Whether this is the `Red` mark this tool wrote: the one label a cull may
+    /// rewrite, and the only one it may ever remove. A red without our proof is
+    /// the photographer's.
+    pub fn is_ours_red(&self) -> bool {
+        self.ours && self.value == RED
+    }
 }
 
 /// The label a document already carries, when it carries one.

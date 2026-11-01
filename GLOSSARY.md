@@ -161,6 +161,7 @@ _Avoid_: cache hit, skip
 The one-line record a run prints as each frame is judged: where the frame sits
 in the run, its answer, what the request cost, and when the run will finish.
 One per frame and ended by a newline, so a redirected log reads the same as a
-terminal. A `groups` run prints one as each frame is measured, and one per group
-as each group is compared: `group 3 · 12 frames · keeper DSC_0104.NEF · 11 red`.
+terminal. A `groups` run prints one as each frame is measured, and `--verbose`
+adds one per group as each group is compared: `group 3 · 12 frames · keeper
+DSC_0104.NEF · 11 red`.
 _Avoid_: progress line, status line, log line, spinner

@@ -66,10 +66,13 @@ it.
       frame — `groups_marking::the_cull_reads_no_rating_and_writes_none`
 - [x] A group of 21+ frames is compared in rounds of at most 20, every frame is
       carried by exactly one first-round request, and the winner is the survivor of
-      the final round — `keeper::a_group_over_one_request_is_split_in_capture_order_and_drops_no_frame`, `groups_marking::a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame`
+      the final round — `keeper::a_group_over_one_request_is_split_into_even_batches_in_capture_order`, `keeper::a_remainder_that_would_be_one_frame_is_spread_across_the_batches`, `groups_marking::a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame`
 - [x] `pickConf` for a tournament group is the lowest confidence on the winner's
       path, and `pickRounds` says how many requests stood between the group and its
-      verdict — `keeper::the_lowest_confidence_on_a_winner_path_is_the_one_recorded`, `groups_marking::a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame`, `sidecar_document::a_verdict_names_how_many_rounds_it_took`
+      verdict — `keeper::the_lowest_confidence_on_a_winner_path_is_the_one_recorded`, `groups_marking::a_losing_batchs_coin_flip_does_not_shadow_the_winners_path`, `groups_marking::a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame`, `sidecar_document::a_verdict_names_how_many_rounds_it_took`
+- [x] A group that fails after a round still reports the batches it paid for, and
+      an undecided group's rounds reach the summary —
+      `groups_marking::a_group_that_fails_after_a_round_still_reports_what_it_spent`
 - [x] A comparison that fails, times out or answers nothing marks nothing and is
       reported undecided — `groups_marking::a_comparison_that_fails_marks_nothing_and_reports_the_group_as_undecided`, `groups_marking::a_comparison_that_answers_nothing_is_undecided_rather_than_a_guess`, `systemone_http::a_group_that_413s_is_undecided_and_marks_nothing`
 - [x] A photographer's Yellow on a non-keeper is left alone, the verdict is still
@@ -129,7 +132,10 @@ it.
   `score` the only writer of a rating — one owner per fact.
 - **Exit codes.** A group that is undecided or a mark that could not be written is a
   failed row for `groups` (`exit 1`), as a failed measure already is; a run that
-  cannot reach the server is fatal (`exit 2`) before any mark is written.
+  cannot reach the server is fatal (`exit 2`) before any mark is written. The
+  write-failure case amends `SPEC.md` §10's "abort run" for `groups` only — the
+  reasoning is in ADR 0008, because a `score` run that aborts is protecting
+  requests it has already paid for and a cull is not.
 - **First-pass artefact, retired.** ADR 0007 accepted that a cheap re-run writes no
   labels; this ticket makes the opposite true on purpose. What survives is the
   reason the old rule existed — never touch a label whose provenance is not ours —
@@ -141,6 +147,33 @@ it.
   deferred.
 
 ## Comments
+
+### Review fixes (2026-11-23)
+
+The two-axis review found two blocking defects and four smaller ones; all are
+fixed on the branch.
+
+- **`pickConf` followed every batch, not the winner's path.** A losing batch's
+  coin flip could drag a certain winner's confidence down and make the summary
+  call the group unsure. The contenders now carry their own shakiest call, and a
+  batch's losers take theirs out of the field;
+  `groups_marking::a_losing_batchs_coin_flip_does_not_shadow_the_winners_path`.
+- **A 21-frame group asked clef which of one frame to keep.** `keeper::chunk` now
+  splits evenly instead of by the cap, so a remainder joins a batch rather than
+  standing alone; the one-frame batch that a cap of 2 can still force is carried
+  to the next round without a request —
+  `keeper::a_remainder_that_would_be_one_frame_is_spread_across_the_batches`,
+  `groups_marking::a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame`.
+- **An undecided group reported zero requests spent.** The count is added whether
+  or not the group was decided —
+  `groups_marking::a_group_that_fails_after_a_round_still_reports_what_it_spent`.
+- **The write-failure exit contradicted SPEC §10 without saying so.** The
+  difference is now decided in ADR 0008 and named in SPEC §10's taxonomy row.
+- `sidecar::read`, `ExistingLabel::is_ours_red` and `Culled::unwritten` each
+  replace repeated code, and `cull::Config` carries a JPEG quality rather than a
+  `Params` whose edge it ignored.
+- `groups_marking::the_cull_reads_no_rating_and_writes_none` now rates both frames
+  rather than one, so "a rated keeper keeps its rating" is proven.
 
 ### What landed, and where it differs from the ticket as written (2026-11-23)
 

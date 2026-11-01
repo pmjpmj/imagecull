@@ -520,8 +520,7 @@ pub fn run(
             ending = Ending::Interrupted;
             break;
         }
-        let path = sidecar::path_for(&source.path);
-        let existing = match read_sidecar(&path) {
+        let existing = match sidecar::read(&source.path) {
             Ok(existing) => existing,
             Err(error) => {
                 // A sidecar nobody can read is a frame this run cannot write, and
@@ -552,7 +551,7 @@ pub fn run(
                 ErrorKind::XmpUnreadable,
                 format!(
                     "{} has no rdf:Description this tool can write into, so it was left alone",
-                    path.display()
+                    sidecar::path_for(&source.path).display()
                 ),
             );
             if let Some(reason) = account.refused(position + 1, source, error) {
@@ -569,7 +568,7 @@ pub fn run(
                 format!(
                     "{} belongs to another application, so it was left alone; pass \
                      --allow-foreign to write into it",
-                    path.display()
+                    sidecar::path_for(&source.path).display()
                 ),
             );
             if let Some(reason) = account.refused(position + 1, source, error) {
@@ -626,19 +625,6 @@ pub fn run(
         summary: run.summary(),
     }));
     Ok(run)
-}
-
-/// The sidecar as it is before this run touches it: `None` when there is none, a
-/// classified refusal when there is one this run cannot read.
-fn read_sidecar(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::new(
-            ErrorKind::XmpUnreadable,
-            format!("cannot read {}: {error}", path.display()),
-        )),
-    }
 }
 
 /// Write this frame's rating into its sidecar, and record how that went.

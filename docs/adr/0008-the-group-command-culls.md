@@ -57,21 +57,24 @@ judgement; neither is evidence for the other.
 
 **Every frame of a group is shown to clef.** The 20-frame cap is the measured
 shape of one request, not a limit on who may be compared: a group larger than it
-is compared in **rounds** — chunks of at most 20 frames in capture order, each
-chunk answered by one request, then one final request among the chunk winners,
-repeated until one frame is left. Nothing narrows on a measure or a rating, and
-`groupNote="not_compared"` therefore ceases to exist. The cost is one request per
-round: a 60-frame burst is four requests (three chunks and a final), where ADR
-0007's narrowing made it one.
+is compared in **rounds** — batches of at most 20 frames in capture order, split
+as evenly as the count allows so that a remainder never stands alone as a request
+about one frame, each batch answered by one request, then one final request among
+the batch winners, repeated until one frame is left. Nothing narrows on a measure
+or a rating, and `groupNote="not_compared"` therefore ceases to exist. The cost
+is one request per batch: a 60-frame burst is four requests (three batches and a
+final), where ADR 0007's narrowing made it one.
 
 **The verdict records the shakiest call it depended on.** `pickConf` is the
-lowest top-option probability any round of that group returned along the winner's
-path, not the final round's — a tournament's last call can be a near-certainty
-about two frames whose membership in the final was itself a coin flip. A group
-below `pick_conf_floor` is marked anyway (ADR 0007 measured near-ties at 0.55
-against 0.43, so a gate would silence the feature exactly where it is needed) and
-counted on one summary line. `pickRounds` records how many requests stood between
-the group and its verdict.
+lowest top-option probability on the winner's own path — not the final round's,
+and not a losing batch's, because a call the winner did not survive is not
+evidence about it. A tournament's last call can be a near-certainty about two
+frames whose membership in the final was itself a coin flip, and a losing batch's
+near-tie must not drag a certain winner's confidence down. A group below
+`pick_conf_floor` is marked anyway (ADR 0007 measured near-ties at 0.55 against
+0.43, so a gate would silence the feature exactly where it is needed) and counted
+on one summary line. `pickRounds` records how many requests stood between the
+group and its verdict.
 
 **The label rules of ADR 0007 survive, except one.** Red still says "not the
 keeper of this group", never "bad"; the keeper still gets no label, its rating
@@ -177,6 +180,11 @@ where a verdict lives.
   re-applied. The alternative — never removing — leaves a red on the keeper, which
   is worse and silent. `--print-sidecars` is the review step that shows the
   removal before it happens.
+- **A mark that cannot be written is a failed row, not the end of the run.**
+  `score` aborts on `xmp_write_failed` because every remaining frame would fail
+  identically and each was already paid for; a cull's remaining verdicts are not
+  paid for yet, and writing them beats leaving the delete set half-applied with no
+  way to see which half. The run says so per frame, counts them, and exits `1`.
 - **`imagecull:groupNote` and `not_compared` retire.** A build that no longer
   writes them retires them from sidecars it touches, the same rule every other
   retired property follows.

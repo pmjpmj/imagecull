@@ -421,7 +421,7 @@ against is a wrong legend quietly labelling an entire library.
 | `bad_response` | answer missing/typed wrong | keep the raw JSON for `--json-scores`, continue |
 | `xmp_unreadable` | the existing sidecar has no `rdf:Description` to write into, or cannot be read | leave it alone, continue |
 | `xmp_foreign` | the sidecar belongs to another application (a `darktable:` namespace) | leave it alone, continue; `--allow-foreign` overrides |
-| `xmp_write_failed` | the sidecar could not be written (read-only mount, full disk) | **abort run**: every remaining frame would fail identically, and each was already paid for |
+| `xmp_write_failed` | the sidecar could not be written (read-only mount, full disk) | **abort run** in `score`: every remaining frame would fail identically, and each was already paid for. In `groups` it is a failed row (exit 1): a cull's remaining verdicts were not paid for, and writing them is better than leaving the delete set half-applied and silent |
 
 Retries: 3 attempts with 0.5/1/2 s backoff, only for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx (a wrong rubric will fail identically 400 times).
 

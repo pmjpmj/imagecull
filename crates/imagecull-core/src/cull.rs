@@ -33,9 +33,6 @@
 //! [`Decider::compare`](crate::scoring::Decider::compare), so a whole cull runs
 //! in a test with no server.
 
-use std::fs;
-use std::path::Path;
-
 use crate::error::{Error, ErrorKind, Result};
 use crate::group::{GroupRow, Plan, Planned};
 use crate::keeper::{self, Budget, Comparison};
@@ -72,7 +69,8 @@ pub struct Culled {
     pub undecided: usize,
     /// How many frames a verdict could not be written to.
     pub unwritten: usize,
-    /// How many comparative requests the pass spent.
+    /// How many batches the pass tried to compare: the requests a decided group
+    /// spent, and the ones an undecided group spent before it failed.
     pub rounds: usize,
     /// One entry per group judged, in capture order: what the report prints and
     /// what a reader checks the totals against.
@@ -97,7 +95,7 @@ pub struct Verdict {
     pub unmarked: usize,
     /// The shakiest call the verdict depended on.
     pub confidence: f64,
-    /// How many requests the verdict cost.
+    /// How many comparative requests stood between the group and this verdict.
     pub rounds: usize,
     /// Why the group has no keeper, when it has none.
     pub failure: Option<Failure>,
@@ -113,9 +111,10 @@ pub struct Config<'a> {
     pub shoot_context: Option<String>,
     /// The measured request shape: edge, cap and confidence floor.
     pub budget: Budget,
-    /// How the previews are encoded. The edge comes from the budget, not from
-    /// here.
-    pub params: Params,
+    /// The JPEG quality a comparison preview is encoded at. Its edge is the
+    /// budget's, because that is the measured number and a caller cannot choose
+    /// how much picture the model sees.
+    pub jpeg_quality: u8,
     /// The grouping hash the groups were computed under, written with every
     /// verdict.
     pub grouping_hash: &'a str,
@@ -158,6 +157,19 @@ pub struct Silent;
 
 impl Watcher for Silent {
     fn event(&self, _event: &Event) {}
+}
+
+impl Culled {
+    /// Record a verdict that did not reach its sidecar, and name the frame and
+    /// the reason: silence about a missing mark would make the delete set look
+    /// complete.
+    fn unwritten(&mut self, frame: &Planned, message: impl Into<String>, watcher: &dyn Watcher) {
+        self.unwritten += 1;
+        watcher.event(&Event::Unwritten {
+            filename: name(frame),
+            message: message.into(),
+        });
+    }
 }
 
 /// Judge every group in `plan` and write what it decided.
@@ -214,7 +226,12 @@ fn judge(
         failure: None,
     };
     culled.groups += 1;
-    let keeper = match choose(row, config, decider, &mut verdict) {
+    let chosen = choose(row, config, decider, &mut verdict);
+    // The requests are spent whether or not they decided anything: a group that
+    // failed on its second batch still cost one, and the summary counts what the
+    // pass paid for.
+    culled.rounds += verdict.rounds;
+    let keeper = match chosen {
         Ok(keeper) => keeper,
         Err(failure) => {
             culled.undecided += 1;
@@ -224,7 +241,6 @@ fn judge(
             return;
         }
     };
-    culled.rounds += verdict.rounds;
     if verdict.confidence < config.budget.floor {
         culled.low_confidence += 1;
     }
@@ -258,21 +274,32 @@ fn choose(
              fewer",
         )));
     }
-    let mut contenders: Vec<usize> = (0..row.frames.len()).collect();
-    let mut confidences: Vec<f64> = Vec::new();
+    // Each contender carries the shakiest call it has survived so far. A batch's
+    // losers take their confidence out of the field with them: what the verdict
+    // depended on is the winners' path and nothing else.
+    let mut contenders: Vec<(usize, f64)> =
+        (0..row.frames.len()).map(|place| (place, 1.0)).collect();
     loop {
         let batches = keeper::chunk(&contenders, config.budget.max);
         let whole = batches.len() == 1;
         let mut winners = Vec::with_capacity(batches.len());
         for batch in &batches {
-            let choice = compare_batch(row, batch, config, decider)?;
+            // A batch of one has nothing to compare. It only exists when the cap
+            // cannot split the field evenly, and it carries its own confidence
+            // forward rather than spending a request on a question with one answer.
+            if batch.len() == 1 {
+                winners.push(batch[0]);
+                continue;
+            }
+            let places: Vec<usize> = batch.iter().map(|(place, _)| *place).collect();
             verdict.rounds += 1;
-            confidences.push(choice.confidence);
-            winners.push(batch[choice.index()]);
+            let choice = compare_batch(row, &places, config, decider)?;
+            let (place, carried) = batch[choice.index()];
+            winners.push((place, carried.min(choice.confidence)));
         }
         if whole {
-            verdict.confidence = keeper::shakiest(confidences);
-            return Ok(winners[0]);
+            verdict.confidence = winners[0].1;
+            return Ok(winners[0].0);
         }
         contenders = winners;
     }
@@ -288,7 +315,7 @@ fn compare_batch(
 ) -> std::result::Result<keeper::Choice, Failure> {
     let params = Params {
         max_edge: config.budget.edge,
-        jpeg_quality: config.params.jpeg_quality,
+        jpeg_quality: config.jpeg_quality,
     };
     let mut previews = Vec::with_capacity(batch.len());
     for &place in batch {
@@ -320,14 +347,10 @@ fn mark_group(
 ) {
     let picked_at = crate::time::now_rfc3339();
     for (place, frame) in row.frames.iter().enumerate() {
-        let existing = match read_sidecar(&frame.source.path) {
+        let existing = match sidecar::read(&frame.source.path) {
             Ok(existing) => existing,
             Err(error) => {
-                culled.unwritten += 1;
-                watcher.event(&Event::Unwritten {
-                    filename: name(frame),
-                    message: error.to_string(),
-                });
+                culled.unwritten(frame, error.to_string(), watcher);
                 continue;
             }
         };
@@ -335,24 +358,18 @@ fn mark_group(
             .as_deref()
             .is_some_and(|document| !sidecar::can_extend(document))
         {
-            culled.unwritten += 1;
-            watcher.event(&Event::Unwritten {
-                filename: name(frame),
-                message: format!(
+            culled.unwritten(
+                frame,
+                format!(
                     "{} has no rdf:Description this tool can write into",
                     sidecar::path_for(&frame.source.path).display()
                 ),
-            });
+                watcher,
+            );
             continue;
         }
         if existing.as_deref().is_some_and(sidecar::is_foreign) && !config.allow_foreign {
-            culled.unwritten += 1;
-            watcher.event(&Event::Unwritten {
-                filename: name(frame),
-                message: "the sidecar belongs to another application; pass --allow-foreign to \
-                          write into it"
-                    .to_string(),
-            });
+            culled.unwritten(frame, FOREIGN, watcher);
             continue;
         }
         let keeper_here = place == keeper;
@@ -374,21 +391,13 @@ fn mark_group(
         let document = match sidecar::mark_document(existing.as_deref(), &mark) {
             Ok(document) => document,
             Err(error) => {
-                culled.unwritten += 1;
-                watcher.event(&Event::Unwritten {
-                    filename: name(frame),
-                    message: error.to_string(),
-                });
+                culled.unwritten(frame, error.to_string(), watcher);
                 continue;
             }
         };
         let prior = Prior::earlier(existing.as_deref());
         if let Err(error) = writer.write(&frame.source.path, &document, prior) {
-            culled.unwritten += 1;
-            watcher.event(&Event::Unwritten {
-                filename: name(frame),
-                message: error.to_string(),
-            });
+            culled.unwritten(frame, error.to_string(), watcher);
             continue;
         }
         match marking {
@@ -421,32 +430,21 @@ fn retire_singleton(
     watcher: &dyn Watcher,
     culled: &mut Culled,
 ) {
-    let Ok(Some(existing)) = read_sidecar(&frame.source.path) else {
+    let Ok(Some(existing)) = sidecar::read(&frame.source.path) else {
         return;
     };
-    let ours_red = sidecar::existing_label(&existing)
-        .is_some_and(|label| label.ours && label.value == sidecar::RED);
+    let ours_red = sidecar::existing_label(&existing).is_some_and(|label| label.is_ours_red());
     if !ours_red && !sidecar::has_verdict(&existing) {
         return;
     }
     if sidecar::is_foreign(&existing) && !config.allow_foreign {
-        culled.unwritten += 1;
-        watcher.event(&Event::Unwritten {
-            filename: name(frame),
-            message: "the sidecar belongs to another application; pass --allow-foreign to write \
-                      into it"
-                .to_string(),
-        });
+        culled.unwritten(frame, FOREIGN, watcher);
         return;
     }
     let document = match sidecar::retire_label(&existing) {
         Ok(document) => document,
         Err(error) => {
-            culled.unwritten += 1;
-            watcher.event(&Event::Unwritten {
-                filename: name(frame),
-                message: error.to_string(),
-            });
+            culled.unwritten(frame, error.to_string(), watcher);
             return;
         }
     };
@@ -457,28 +455,14 @@ fn retire_singleton(
     ) {
         Ok(_) if ours_red => culled.retired += 1,
         Ok(_) => {}
-        Err(error) => {
-            culled.unwritten += 1;
-            watcher.event(&Event::Unwritten {
-                filename: name(frame),
-                message: error.to_string(),
-            });
-        }
+        Err(error) => culled.unwritten(frame, error.to_string(), watcher),
     }
 }
 
-/// The sidecar as it is before this pass touches it: `None` when there is none,
-/// a classified refusal when there is one this pass cannot read.
-fn read_sidecar(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(sidecar::path_for(path)) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::new(
-            ErrorKind::XmpUnreadable,
-            format!("cannot read {}: {error}", sidecar::path_for(path).display()),
-        )),
-    }
-}
+/// The one sentence a cull says when it will not write into another
+/// application's sidecar: the same words wherever the refusal happens.
+const FOREIGN: &str =
+    "the sidecar belongs to another application; pass --allow-foreign to write into it";
 
 /// What writing a frame's verdict does to its colour label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,7 +614,7 @@ mod tests {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: Budget::default(),
-            params: Params::default(),
+            jpeg_quality: Params::default().jpeg_quality,
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -660,7 +644,7 @@ mod tests {
                 max: 1,
                 ..Budget::default()
             },
-            params: Params::default(),
+            jpeg_quality: Params::default().jpeg_quality,
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -699,7 +683,7 @@ mod tests {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: Budget::default(),
-            params: Params::default(),
+            jpeg_quality: Params::default().jpeg_quality,
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),

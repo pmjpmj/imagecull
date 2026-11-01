@@ -20,8 +20,9 @@
 //!
 //! Nothing narrows a group before the model has seen it. A group the budget holds
 //! is compared whole; a larger one is split by [`chunk`] into consecutive batches
-//! of at most [`MAX`] frames, each batch answered by one request, and the batch
-//! winners compared again, until one survives. Every frame of the group enters a
+//! of at most [`MAX`] frames, split evenly so no batch is left with one frame to
+//! "compare", each batch answered by one request, and the batch winners compared
+//! again, until one survives. Every frame of the group enters a
 //! request, which is the point: the per-frame rating cannot see the alternatives,
 //! so it is not allowed to decide who is compared — and neither is a measure.
 //!
@@ -111,19 +112,37 @@ impl Default for Budget {
 }
 
 /// How a group larger than one request is compared: consecutive batches of at
-/// most `max` places, in capture order.
+/// most `max` places, in capture order, split as evenly as the count allows.
 ///
-/// The batches of one round hold every place exactly once, and the last batch
-/// carries the remainder rather than dropping it. The caller compares each batch
-/// and passes the winners back through the same function, so a group of any size
-/// is reduced to one frame without a frame ever leaving the comparison.
+/// The batches of one round hold every place exactly once, and no batch is a
+/// single frame unless the whole input is one: a remainder that would stand
+/// alone is spread across the batches instead, because asking the model which of
+/// one frame to keep is not a comparison and its answer is not evidence. The
+/// caller compares each batch and passes the winners back through the same
+/// function, so a group of any size is reduced to one frame without a frame ever
+/// leaving the comparison.
 ///
-/// `max` is `0` only through a caller's bug; one place per request is the floor,
-/// because a batch nothing can be sent with would lose the group rather than
-/// compare it.
-pub fn chunk(places: &[usize], max: usize) -> Vec<Vec<usize>> {
-    let width = max.max(1);
-    places.chunks(width).map(<[usize]>::to_vec).collect()
+/// `max` is a request's capacity, and a comparative request carries two frames
+/// or it is not one: a cap below two is read as two here, and [`crate::cull`]
+/// refuses a group outright rather than send it.
+pub fn chunk<T: Clone>(places: &[T], max: usize) -> Vec<Vec<T>> {
+    let width = max.max(2);
+    if places.is_empty() {
+        return Vec::new();
+    }
+    if places.len() <= width {
+        return vec![places.to_vec()];
+    }
+    let batches = places.len().div_ceil(width);
+    let (base, extra) = (places.len() / batches, places.len() % batches);
+    let mut out = Vec::with_capacity(batches);
+    let mut start = 0;
+    for index in 0..batches {
+        let size = base + usize::from(index < extra);
+        out.push(places[start..start + size].to_vec());
+        start += size;
+    }
+    out
 }
 
 /// The shakiest call a verdict depended on: the lowest top-option probability on

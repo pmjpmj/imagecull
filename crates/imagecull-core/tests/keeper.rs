@@ -59,7 +59,7 @@ fn a_group_inside_one_request_is_one_chunk_in_capture_order() {
 }
 
 #[test]
-fn a_group_over_one_request_is_split_in_capture_order_and_drops_no_frame() {
+fn a_group_over_one_request_is_split_into_even_batches_in_capture_order() {
     let places: Vec<usize> = (0..45).collect();
 
     let chunks = keeper::chunk(&places, keeper::MAX);
@@ -67,12 +67,12 @@ fn a_group_over_one_request_is_split_in_capture_order_and_drops_no_frame() {
     assert_eq!(
         chunks,
         [
-            (0..20).collect::<Vec<_>>(),
-            (20..40).collect::<Vec<_>>(),
-            (40..45).collect::<Vec<_>>()
+            (0..15).collect::<Vec<_>>(),
+            (15..30).collect::<Vec<_>>(),
+            (30..45).collect::<Vec<_>>()
         ],
-        "consecutive frames of the moment, at most one request's worth each, and the remainder \
-         carried rather than dropped"
+        "consecutive frames of the moment, at most one request's worth each, split evenly so the \
+         remainder is spread rather than left as a request of its own"
     );
     assert_eq!(
         chunks.iter().flatten().count(),
@@ -83,13 +83,42 @@ fn a_group_over_one_request_is_split_in_capture_order_and_drops_no_frame() {
 }
 
 #[test]
-fn chunks_never_exceed_the_request_and_a_small_group_is_never_padded() {
-    for (frames, max) in [(1usize, 20usize), (20, 20), (21, 20), (0, 20), (5, 1)] {
+fn a_remainder_that_would_be_one_frame_is_spread_across_the_batches() {
+    let places: Vec<usize> = (0..21).collect();
+
+    let chunks = keeper::chunk(&places, keeper::MAX);
+
+    assert_eq!(
+        chunks,
+        [(0..11).collect::<Vec<_>>(), (11..21).collect::<Vec<_>>()],
+        "twenty and one would ask clef which of one frame to keep, which is not a comparison at \
+         all: the odd frame joins a batch instead"
+    );
+}
+
+#[test]
+fn chunks_never_exceed_the_request_and_never_leave_a_lone_frame() {
+    for (frames, max) in [
+        (1usize, 20usize),
+        (2, 20),
+        (20, 20),
+        (21, 20),
+        (40, 20),
+        (41, 20),
+        (0, 20),
+    ] {
         let places: Vec<usize> = (0..frames).collect();
         let chunks = keeper::chunk(&places, max);
         assert!(
-            chunks.iter().all(|chunk| chunk.len() <= max.max(1)),
+            chunks
+                .iter()
+                .all(|chunk| !chunk.is_empty() && chunk.len() <= max),
             "{frames} frames at {max} per request: {chunks:?}"
+        );
+        assert!(
+            chunks.iter().all(|chunk| chunk.len() > 1) || frames < 2,
+            "no request carries a single frame, which has nothing to compare: {frames} at \
+             {max}: {chunks:?}"
         );
         assert_eq!(
             chunks.iter().flatten().copied().collect::<Vec<_>>(),
