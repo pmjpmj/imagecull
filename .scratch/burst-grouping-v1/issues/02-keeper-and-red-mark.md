@@ -23,9 +23,10 @@ Yellow), and the verdict still exists.
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent — the two open inputs are answered (see
-**Measured** below), and the confidence decision is taken: a low-confidence
-comparison still marks the losers and is warned about.
+**Status:** resolved (2026-11-21) — four commits on `feat/best-of-group`
+(`8250350`, `b651034`, plus the measurement and the ADR), the whole acceptance
+list pinned by test, and both code-review findings fixed. Every box below names
+the test that proves it.
 
 ## Measured — the needs-info, answered
 
@@ -66,21 +67,21 @@ gate: the near-tie case is the common case, and refusing to mark a burst would
 
 ## Acceptance
 
-- [ ] A group of two or more gets exactly one comparative request; a group of one gets none
-- [ ] The comparative request never exceeds the measured budget: `comparison_edge` (default 512) and `comparison_max` (default 20), enforced before the request is built, never by reading a 413
-- [ ] A group of 21+ frames is narrowed to 20 by rating, ties broken by acutance, and every frame left out is red with `groupNote="not_compared"`
-- [ ] `pickConf` is recorded on every member of a marked group; a group below `pick_conf_floor` (0.60) is still marked and counted on a summary line (`low confidence: 2 groups`)
-- [ ] A 413 is a failed frame with its own status, never a panic and never a silently smaller request
-- [ ] The keeper carries no `xmp:Label` write; every other frame of the group carries `Red`
-- [ ] A frame whose label is the photographer's is left alone, its verdict still recorded, and counted on a summary line (`unmarked: 3` — label not ours)
-- [ ] A frame whose label was written by a previous run is rewritten only if that run recorded `imagecull:labeledBy="imagecull"`
-- [ ] No label is ever removed: a frame promoted to keeper by a later grouping keeps its red, and the summary warns that the folder disagrees with the current grouping
-- [ ] A comparative call that fails, times out or answers nothing marks nothing and reports the group as undecided
-- [ ] `xmp:Rating` is identical before and after the group pass for every frame
-- [ ] A frame's rating survives a group pass that excludes it; excluded frames are red and still rated
-- [ ] `--print-sidecars` shows the label line per frame — `xmp:Label  Red  (was: none)` — and writes nothing
-- [ ] `imagecull groups` remains read-only and makes no request; its test suite still contains no HTTP
-- [ ] Marks are written after the frame's rating, so the terminal never reports a mark whose rating is not on disk
+- [x] A group of two or more gets exactly one comparative request; a group of one gets none — `marking::a_group_of_two_or_more_gets_one_comparative_request_and_a_lone_frame_gets_none`
+- [x] The comparative request never exceeds the measured budget: `comparison_edge` (default 512) and `comparison_max` (default 20), enforced before the request is built, never by reading a 413 — `keeper::the_budget_is_the_measured_configuration_and_not_a_guess`, `marking::a_group_larger_than_the_request_can_carry_is_narrowed_…`
+- [x] A group of 21+ frames is narrowed to 20 by rating, ties broken by acutance, and every frame left out is red with `groupNote="not_compared"` — `keeper::an_equal_rating_is_broken_by_acutance_…`, `marking::a_later_groups_left_out_frame_is_the_one_that_says_so` (the review's blocking finding: two groups, the second starting above frame 0)
+- [x] `pickConf` is recorded on every member of a marked group; a group below `pick_conf_floor` (0.60) is still marked and counted on a summary line (`low confidence: 2 groups`) — `marking::the_keeper_wears_no_label_and_every_other_frame_of_its_group_wears_red`, `marking::a_group_the_model_was_unsure_about_is_marked_anyway_and_counted`
+- [x] A 413 is a failed frame with its own status, never a panic and never a silently smaller request — `systemone_http::a_group_that_413s_names_its_status_in_the_warning_a_photographer_reads`, `marking::a_group_the_model_cannot_hold_is_reported_with_its_own_status_and_marks_nothing`
+- [x] The keeper carries no `xmp:Label` write; every other frame of the group carries `Red` — `sidecar_document::a_keepers_verdict_leaves_the_red_a_previous_run_wrote_exactly_where_it_was`
+- [x] A frame whose label is the photographer's is left alone, its verdict still recorded, and counted on a summary line (`unmarked: 3` — label not ours) — `marking::a_label_the_photographer_wrote_is_left_alone_and_the_verdict_is_still_recorded`
+- [x] A frame whose label was written by a previous run is rewritten only if that run recorded `imagecull:labeledBy="imagecull"` — `sidecar_document::a_label_that_is_not_ours_to_write_is_never_overwritten`
+- [x] No label is ever removed: a frame promoted to keeper by a later grouping keeps its red, and the summary warns that the folder disagrees with the current grouping — `marking::a_frame_promoted_to_keeper_keeps_its_red_and_the_run_warns_the_folder_disagrees`
+- [x] A comparative call that fails, times out or answers nothing marks nothing and reports the group as undecided — `marking::a_comparison_that_fails_marks_nothing_and_reports_the_group_as_undecided`, `marking::a_comparison_that_answers_nothing_is_undecided_rather_than_a_guess`
+- [x] `xmp:Rating` is identical before and after the group pass for every frame — `marking::no_comparative_answer_changes_a_rating`
+- [x] A frame's rating survives a group pass that excludes it; excluded frames are red and still rated — `marking::a_group_larger_than_the_request_can_carry_…`
+- [x] `--print-sidecars` shows the label line per frame — `xmp:Label  Red  (was: none)` — and writes nothing — `printer::a_marked_frame_shows_the_label_line_with_the_colour_that_was_there_before`, `marking::a_forced_preview_shows_the_verdict_beside_the_rating_this_run_gave`
+- [x] `imagecull groups` remains read-only and makes no request; its test suite still contains no HTTP — untouched: `cargo test --test groups` 18/18, and no socket in `cli/src/groups.rs`
+- [x] Marks are written after the frame's rating, so the terminal never reports a mark whose rating is not on disk — `marking::every_frame_is_rated_on_disk_before_any_group_is_judged`
 
 ## Notes
 
@@ -126,3 +127,28 @@ and pinned in `crates/imagecull-core/tests/marking.rs`).
   forgotten by the summary. Typed counters, or a `Counted` wrapper that the
   printer reads, would make "every count appears on the line" a property of the
   type rather than of a reviewer's attention.
+
+### Resolved (2026-11-21)
+
+Landed on `feat/best-of-group`: `keeper` (the measured budget, the shortlist, the
+comparison, the strict reading of an answer), the `GroupPass` in `scoring`, the
+`imagecull:` verdict properties and the label write in `sidecar`, and the
+group/label/low-confidence/marked clauses in the terminal.
+
+What the run does at the end of a scored folder: one comparative request per
+group of two or more (512 px, at most 20, built to fit — never a 413 discovered),
+the keeper unmarked, every other frame `Red` where the label is ours to write,
+`pickConf` on every member, and one line each for the non-keepers, the labels
+left to the photographer, the groups the model was unsure about, and the frames
+the skip rule kept out of every group.
+
+Two-axis code review found one blocking defect, fixed in `b651034`: the group
+note compared a frame's place in its group against its index in the run, which
+agrees only for the folder's first group. Both reviewers found it independently
+and no test did, because every test had one group starting at frame 0. The fix
+routes both the note and the summary's count through one question, and the test
+that would have caught it (`a_later_groups_left_out_frame_is_the_one_that_says_so`)
+now builds two groups with the second starting above frame 0.
+
+Evidence: `.scratch/burst-grouping-v1/evidence/comparison-budget.md` (the
+measurement, including the near-tie the marking rule accepts).

@@ -1,7 +1,8 @@
 # Spec — burst grouping and best-of-group, report only
 
-Status: ready-for-agent (issue 01) · needs-info (issue 02)
-Date: 2026-11-02
+Status: issue 01 ready-for-human (its blind review is the photographer's step) ·
+issue 02 resolved (2026-11-21)
+Date: 2026-11-02 (amended 2026-11-19 and 2026-11-21)
 Source: `SPEC.md` §17 open question 4 (bursts in the CSV) and the ticket 08
 evidence (`.scratch/nef-scoring-v1/evidence/evidence.md`)
 
