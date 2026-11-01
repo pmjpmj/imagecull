@@ -324,25 +324,71 @@ fn cancelling_mid_run_then_resuming_produces_one_uninterrupted_runs_csv() {
     );
 }
 
+/// The CSV with one column's cells emptied: what two runs still have to agree
+/// on once the column that measures the run rather than the model is taken out
+/// of the comparison.
+///
+/// Plain splitting is enough because the fixtures here have no commas, quotes
+/// or line breaks in their names; escaping is `tests/report.rs`'s job.
+fn without_column(csv: &str, name: &str) -> String {
+    let mut rows: Vec<Vec<String>> = csv
+        .lines()
+        .map(|line| line.split(',').map(str::to_string).collect())
+        .collect();
+    let index = rows[0]
+        .iter()
+        .position(|column| column == name)
+        .unwrap_or_else(|| panic!("the CSV has a {name} column"));
+    for row in &mut rows[1..] {
+        row[index].clear();
+    }
+    rows.iter()
+        .map(|row| row.join(","))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
-fn two_full_runs_over_the_same_folder_produce_a_byte_identical_csv() {
+fn two_full_runs_over_the_same_folder_agree_apart_from_the_latency_they_measured() {
+    // The answers are a deterministic function of the bytes, the questions and
+    // the weights, so two runs must agree on every cell that reports one. The
+    // exception is `latency_ms`: it measures the run, not the model, and no two
+    // runs take the same time. The deciders below differ on purpose, so this
+    // only passes if `latency_ms` is the one cell that moved.
     let dir = shoot(3);
     let out = out();
 
     run(
         dir.path(),
         &config(out.path()),
-        &Scripted::always_reading(3),
+        &Scripted::always_reading(3).taking(812),
     );
     let first = csv_text(out.path());
+    let first_latency = column(out.path(), "latency_ms");
     run(
         dir.path(),
         &config(out.path()),
-        &Scripted::always_reading(3),
+        &Scripted::always_reading(3).taking(437),
     );
     let second = csv_text(out.path());
 
-    assert_eq!(first, second, "the CSV is reproducible, byte for byte");
+    assert_eq!(first_latency, ["812", "812", "812"], "the first run's pace");
+    assert_eq!(
+        column(out.path(), "latency_ms"),
+        ["437", "437", "437"],
+        "the column keeps reporting the measurement it always did"
+    );
+    let compared = without_column(&first, "latency_ms");
+    assert_eq!(compared.lines().count(), 4, "the header and three rows");
+    assert!(
+        compared.contains("DSC_0002.NEF,6.4237,7.8125,5.3398,4.9601,4,like"),
+        "the cells being compared are still the run's own numbers: {compared}"
+    );
+    assert_eq!(
+        compared,
+        without_column(&second, "latency_ms"),
+        "every cell that reports a decision is byte-identical across runs"
+    );
     assert_eq!(
         ledger(out.path()).records.len(),
         3,

@@ -157,6 +157,10 @@ fn cells(row: &Row, absolute: bool) -> Vec<String> {
         answers(|answers| number(answers.confidence.overall)),
         answers(|answers| number(answers.confidence.stars)),
         answers(|answers| number(answers.confidence.verdict)),
+        // The one cell that measures the run instead of reporting the model:
+        // two runs of the same folder agree on every other column (spec
+        // §Determinism), and this is the reason they cannot agree on all of
+        // them.
         usage.map_or_else(String::new, |usage| usage.latency_ms().to_string()),
         usage
             .and_then(|usage| usage.input_tokens)

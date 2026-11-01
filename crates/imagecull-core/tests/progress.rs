@@ -363,6 +363,80 @@ fn a_ledger_cut_short_by_a_killed_run_is_reported_as_a_warning() {
 }
 
 #[test]
+fn a_plain_score_that_discards_a_ledger_says_so() {
+    // A second plain `score` is a new run, not a silent continuation: it starts
+    // the ledger over. Starting over is allowed, but it must be visible — the
+    // work being thrown away is an hour of a shoot — and it must not be fatal,
+    // because a photographer who meant it should not have to pass a flag.
+    let shoot = shoot(&[
+        ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),
+        ("DSC_0002.NEF", nef(support::jpeg(48, 32, 80))),
+    ]);
+    let report = tempfile::tempdir().expect("a temp dir");
+    let csv = report.path().join("scores.csv");
+    let mut config = config();
+    config.outputs.csv = csv.clone();
+    scoring::run(
+        shoot.path(),
+        &config,
+        &Scripted::always_reading(2),
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a first run");
+
+    let reporter = Collected::default();
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &Scripted::always_reading(2),
+        &reporter,
+        &Cancel::new(),
+    )
+    .expect("a plain score over an existing ledger is a new run, not an error");
+
+    assert_eq!(run.frames.len(), 2, "the new run scored both frames");
+    let warnings: Vec<String> = reporter
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Warning(warning) => Some(warning.message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "one warning, not a stream: {warnings:?}");
+    let warning = &warnings[0];
+    assert!(
+        warning.contains(&ledger::path_for(&csv).display().to_string()),
+        "it names the file it started over: {warning}"
+    );
+    assert!(
+        warning.contains("2 recorded frames"),
+        "and how much work that is: {warning}"
+    );
+    assert!(
+        warning.contains("--resume"),
+        "and how to keep them instead: {warning}"
+    );
+}
+
+#[test]
+fn a_first_run_has_nothing_to_warn_about() {
+    let shoot = shoot(&[("DSC_0001.NEF", nef(support::jpeg(64, 32, 80)))]);
+
+    let (reporter, _run) = driven(&shoot, &Scripted::always_reading(1));
+
+    assert!(
+        !reporter
+            .events()
+            .iter()
+            .any(|event| matches!(event, Event::Warning(_))),
+        "a run with no ledger behind it warns about nothing: {:?}",
+        reporter.events()
+    );
+}
+
+#[test]
 fn the_run_finishes_with_the_summary_its_frames_add_up_to() {
     let shoot = shoot(&[
         ("DSC_0001.NEF", nef(support::jpeg(64, 32, 80))),

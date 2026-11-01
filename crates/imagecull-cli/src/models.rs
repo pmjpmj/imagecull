@@ -9,6 +9,7 @@ use imagecull_core::ExitCode;
 use imagecull_core::omlx::{Catalog, MIN_DECISION_VERSION};
 
 use crate::cli::ServerArgs;
+use crate::progress::plural;
 
 /// Run the command and return the process exit code.
 pub fn run(args: &ServerArgs) -> u8 {
@@ -110,15 +111,11 @@ pub fn render(
     } else if !catalog.types_reported() {
         out.push_str(&format!(
             "\n! this server does not report model types (GET /v1/models/status is missing), \
-             so none of the above could be marked — upgrade oMLX to {MIN_DECISION_VERSION} or \
-             later to score photos\n"
+             so none of the above could be marked — a run may still score against it; upgrade \
+             to oMLX {MIN_DECISION_VERSION} or later to have decision models marked\n"
         ));
     }
     out
-}
-
-fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { one } else { many }
 }
 
 #[cfg(test)]

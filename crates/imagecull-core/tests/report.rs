@@ -189,6 +189,54 @@ fn a_failed_row_carries_its_status_and_message_and_leaves_the_value_cells_empty(
 }
 
 #[test]
+fn a_dng_gets_an_unreadable_row_that_says_why_and_what_to_do() {
+    // `raw-files 0.6.0` has no DNG reader, so a Z body set to DNG cannot be
+    // scored in v1. The extension stays accepted (spec §"Ingest"), so the frame
+    // is counted and explained rather than silently skipped — and because the
+    // row is the only thing a photographer reads afterwards, its `error` cell
+    // has to name the cause and the way out, not the TIFF reader's own words.
+    let shoot = Shoot::new(&[
+        (
+            "DSC_0001.DNG",
+            support::dng(1, &[support::jpeg(64, 48, 80)]),
+        ),
+        ("DSC_0002.NEF", nef(support::jpeg(64, 32, 80))),
+    ]);
+    let decider = Scripted::answering(vec![Ok(document(6.4237, "4"))]);
+
+    let run = scoring::run(
+        shoot.path(),
+        &shoot.config(ScanOptions::default()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("an unreadable format is a row, not a stopped run");
+
+    assert_eq!(run.frames.len(), 2, "the DNG is accepted and gets its row");
+    assert_eq!(decider.seen().len(), 1, "only the NEF reaches the model");
+    let dng = shoot
+        .csv()
+        .lines()
+        .nth(1)
+        .expect("a row for the DNG")
+        .to_string();
+    assert!(dng.starts_with("DSC_0001.DNG,"), "in ingest order: {dng}");
+    assert!(
+        dng.contains(",unreadable,"),
+        "the row is classified, and its value cells stay empty: {dng}"
+    );
+    assert!(
+        dng.contains("cannot read DNG's embedded preview"),
+        "the message names the cause: {dng}"
+    );
+    assert!(
+        dng.contains("export a NEF or TIFF") && dng.contains("score the JPEG"),
+        "and the way out: {dng}"
+    );
+}
+
+#[test]
 fn a_filename_with_a_comma_a_quote_a_line_break_or_non_ascii_survives_the_round_trip() {
     let shoot = Shoot::new(&[
         ("Café, \"le pick\".NEF", nef(support::jpeg(64, 32, 80))),

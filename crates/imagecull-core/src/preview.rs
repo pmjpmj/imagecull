@@ -5,6 +5,7 @@
 //! chooses among the several a file may hold, and reports the EXIF orientation
 //! the display must apply.
 
+use std::fmt;
 use std::path::Path;
 
 use raw_files::{Preview, RawFile};
@@ -38,8 +39,7 @@ impl Embedded {
 /// pixels are what the model sees.
 pub fn extract(path: &Path) -> Result<Embedded> {
     let name = file_name(path);
-    let mut raw = RawFile::open(path)
-        .map_err(|error| Error::new(ErrorKind::Unreadable, format!("{name}: {error}")))?;
+    let mut raw = RawFile::open(path).map_err(|error| unreadable(path, &name, &error))?;
 
     let preview = largest_by_area(raw.previews()).ok_or_else(|| {
         Error::new(
@@ -59,6 +59,35 @@ pub fn extract(path: &Path) -> Result<Embedded> {
         height: size.height,
         orientation: preview.orientation().to_exif(),
     })
+}
+
+/// The `unreadable` error for a file the extractor cannot open.
+///
+/// A `.dng` is the one case that needs more than the reader's own words: the
+/// ingest rule accepts the extension (spec §"Ingest") so a Z body set to DNG is
+/// counted rather than skipped, but `raw-files` has no DNG reader at all, so the
+/// frame can never be scored and the library's message for it ("a TIFF file, but
+/// not of a format this version recognises") names neither the cause nor the
+/// way out. The row's `error` cell is all a photographer reads afterwards, so a
+/// DNG says what v1 cannot do and what to do instead.
+fn unreadable(path: &Path, name: &str, cause: &dyn fmt::Display) -> Error {
+    if is_dng(path) {
+        return Error::new(
+            ErrorKind::Unreadable,
+            format!(
+                "{name}: this build cannot read DNG's embedded preview (raw-files has no DNG \
+                 reader) — export a NEF or TIFF, or score the JPEG"
+            ),
+        );
+    }
+    Error::new(ErrorKind::Unreadable, format!("{name}: {cause}"))
+}
+
+/// Whether `path` carries the `.dng` extension, in any case the camera wrote.
+fn is_dng(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dng"))
 }
 
 /// The preview with the most pixels.

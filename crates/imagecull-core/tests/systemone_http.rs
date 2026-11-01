@@ -603,6 +603,103 @@ fn a_server_that_keys_its_type_report_still_passes_preflight() {
 }
 
 #[test]
+fn a_server_that_does_not_report_model_types_can_still_be_scored() {
+    // Spec §51: preflight confirms the alias exists "and if the server exposes
+    // per-model status, confirm the model is a decision model". A server without
+    // that endpoint has not said it is unfit — refusing every run against it
+    // would refuse a working server on the strength of a missing nicety.
+    let shoot = shoot(1);
+    let stub = Stub::untyped(vec![(200, answer_document())], &["clef-flash-oQ4e"]);
+    let config = Config::new(
+        Rubric::embedded().expect("parse"),
+        None,
+        Params::default(),
+        ingest::ScanOptions::default(),
+        None,
+        support::unwatched(),
+    );
+    let adapter = adapter(&stub, &config.model);
+    let preflight = adapter.preflight();
+    assert!(
+        preflight.is_ok(),
+        "a server that cannot confirm types may still score: {:?}",
+        preflight.map_err(|error| error.to_string())
+    );
+    let run = scoring::run(shoot.path(), &config, &adapter, &Silent, &Cancel::new())
+        .expect("a run over a server with no type report");
+
+    assert_eq!(run.scored(), 1, "the frame was scored, not refused");
+    assert_eq!(posts(&stub).len(), 1, "one frame, one request");
+}
+
+#[test]
+fn a_server_that_says_the_alias_is_not_a_decision_model_fails_preflight() {
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "ok", "version": "0.7.1.dev1"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models/status",
+            200,
+            json!({"models": [{"id": "clef-flash-oQ4e", "model_type": "vlm"}]}).to_string(),
+        ),
+    ]);
+
+    let error = adapter(&stub, "clef-flash-oQ4e")
+        .preflight()
+        .expect_err("a chat model cannot answer /v1/systemone");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("not a decision model") && error.message().contains("vlm"),
+        "the message says what the alias is and what it needs to be: {}",
+        error.message()
+    );
+    assert!(
+        posts(&stub).is_empty(),
+        "nothing is sent to a server that was told it cannot answer"
+    );
+}
+
+#[test]
+fn a_server_that_predates_decision_models_fails_preflight() {
+    // The relaxed rule still refuses the one server that has said, in so many
+    // words, that it cannot serve the endpoint: 0.7.0 predates decision models.
+    let stub = Stub::routed(vec![
+        support::stub::Route::new(
+            "/health",
+            200,
+            json!({"status": "ok", "version": "0.7.0"}).to_string(),
+        ),
+        support::stub::Route::new(
+            "/v1/models",
+            200,
+            json!({"data": [{"id": "clef-flash-oQ4e"}]}).to_string(),
+        ),
+        // No /v1/models/status at all: the stub 404s, as 0.7.0 does.
+    ]);
+
+    let error = adapter(&stub, "clef-flash-oQ4e")
+        .preflight()
+        .expect_err("a server older than decision models cannot score");
+
+    assert!(error.is_fatal());
+    assert!(
+        error.message().contains("predates decision models")
+            && error.message().contains("0.7.1.dev1"),
+        "the message names the release that is needed: {}",
+        error.message()
+    );
+}
+
+#[test]
 fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() {
     let shoot = shoot(2);
     let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);

@@ -86,7 +86,7 @@ The scoring pipeline lives in a library crate with no stdout, TTY, or process-ex
 
 43. As a photographer, I want v1 to write nothing into the photo folder except the CSV I asked for, so that trying the tool cannot damage a library.
 44. As a photographer, I want my NEFs opened read-only and never modified, so that XMP-in-RAW stays a non-feature.
-45. As a photographer, I want re-running the same folder with the same rubric and model to produce a byte-identical CSV, so that I can trust the output as a cache and as a record.
+45. As a photographer, I want re-running the same folder with the same rubric and model to reproduce the same CSV apart from the timings it measured, so that I can trust the output as a cache and as a record.
 46. As a photographer, I want `doctor` to tell me when oMLX is missing, too old, unreachable, or is serving a Clef checkpoint as a plain VLM, so that I don't discover it as 400 identical failures.
 47. As a photographer, I want `doctor <FILE>` to self-test preview extraction on one of my own files, so that I know the pipeline works on my camera's output before a long run.
 48. As a photographer, I want `models` to list available aliases and flag which are decision models, so that I know exactly what to pass to `--model`.
@@ -134,6 +134,7 @@ One seam, at the top of the core:
 ### Ingest
 
 - Accepted extensions, case-insensitive: `.nef`, `.nrw`, `.dng`. Anything else increments a `skipped_extension` count — never an error.
+- `.dng` is accepted but **not decodable in v1**: the pinned `raw-files` has no DNG reader, so a DNG gets an `unreadable` row whose `error` cell names that cause and the way out (export a NEF or TIFF, or score the JPEG). The extension stays accepted so a DNG-only shoot is counted and explained rather than silently skipped; a DNG/TIFF reader is later work and needs a fixture to prove it against.
 - Non-recursive by default; `--recursive` walks subdirectories, never descending into hidden directories.
 - Ignore `._*`, `.DS_Store`, and anything under `__MACOSX`, and report how many were ignored.
 - Sort by natural, NFC-normalised filename so row order is stable.
@@ -209,7 +210,7 @@ RFC 4180, UTF-8, header row, `\n` line endings, one row per input file, in inges
 | `timeout` | exceeded read timeout | retry, then record |
 | `bad_response` | answer missing or wrong type | record raw document, continue |
 
-Retries: three attempts with 0.5/1/2 s backoff, **only** for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx.
+Retries: three retries (four attempts in all) with 0.5/1/2 s backoff, **only** for `server_unreachable`, `timeout`, and 5xx. Never retry 4xx.
 
 `http_5xx` exists because the retry rule above already names 5xx as a transient
 class, so the taxonomy has to be able to name one: a run retries it and, if it
@@ -232,7 +233,9 @@ Exit codes: `0` all ok · `1` completed with failed rows · `2` fatal (bad argum
 
 ### Determinism
 
-A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce a byte-identical CSV. This is an acceptance criterion, not an aspiration, and the reuse key — sent bytes, request state, rubric hash and model (ADR 0002) — encodes it.
+A decision model has no sampling temperature: the answer is a deterministic function of weights, image bytes and question schema. Re-running the same folder with the same rubric and model **must** produce the same CSV in every cell that reports a decision — the six answers, their confidences, `input_tokens`, `status`, `error`, `duplicate_of`, `rubric_hash` and `model`. This is an acceptance criterion, not an aspiration, and the reuse key — sent bytes, request state, rubric hash and model (ADR 0002) — encodes it.
+
+The one exception is `latency_ms`, and it is not a weakening of the criterion but a statement of what the column is: it measures the run (`usage.latency_ms` — the server's own number when it reports one, otherwise this side's wall clock), not an answer from the model. No two runs can produce the same measurement. So the acceptance test compares two full runs cell by cell after blanking that one column, and asserts that every remaining cell — including the ones a future change is most likely to disturb, like `input_tokens` and `duplicate_of` — is byte-identical.
 
 ### Defaults locked in this session
 
@@ -276,7 +279,7 @@ A decision model has no sampling temperature: the answer is a deterministic func
 - CSV snapshots for the fixture set against a scripted `Decider`, so column order, formatting and full-precision numbers are pinned.
 - Acceptance 1: a long run (fixtures repeated into a synthetic 400-file directory) completes with a status on every row.
 - Acceptance 2: cancelling mid-run then resuming produces the same CSV as one uninterrupted run, with no duplicate rows.
-- Acceptance 3: two full runs produce byte-identical CSV.
+- Acceptance 3: two full runs agree byte for byte apart from `latency_ms`, which measures the run rather than the model.
 - Acceptance 4: `--dry-run` previews are upright for portrait fixtures.
 - Acceptance 5: with no XMP requested, an mtime scan of the input directory shows zero writes.
 

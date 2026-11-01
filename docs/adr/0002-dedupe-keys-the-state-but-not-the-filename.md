@@ -27,12 +27,18 @@ reason.
 
 The **dedupe key** is SHA-256 over, in order and length-prefixed:
 
-1. the hash of the bytes that would actually be sent (the oriented, downscaled,
+1. the format tag `imagecull-dedupe-v1`;
+2. the hash of the bytes that would actually be sent (the oriented, downscaled,
    re-encoded JPEG — not the NEF);
-2. the task framing (`photo_cull`);
-3. the shoot context, or an explicit marker for "none";
-4. the full rubric hash (schema plus model alias);
-5. the model alias.
+3. the task framing (`photo_cull`);
+4. the shoot context, or an explicit marker for "none";
+5. the full rubric hash (schema plus model alias);
+6. the model alias.
+
+The tag is the sixth field the code hashes, and the reason this list has six
+entries: it is not a secret, a nonce or a salt — it only makes a future change
+to the key's shape produce a different key rather than silently matching
+records written by an older one.
 
 The **filename is deliberately not in it.** It is the photographer's label for
 the frame, not something the picture shows: a model looking at two identical

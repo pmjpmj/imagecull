@@ -156,14 +156,22 @@ impl Rubric {
         field("imagecull-rubric-v1");
         field(model);
         field(&self.questions_json().to_string());
-        let bytes = digest.finalize();
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        RubricHash(hex)
+        RubricHash(hex(digest.finalize()))
     }
+}
+
+/// A digest as this crate spells it: 64 lowercase hex characters.
+///
+/// The rubric hash, the SHA-256 of the bytes that were sent and the dedupe key
+/// are all SHA-256 digests that end up in a CSV cell or a ledger line, so they
+/// are spelled here, once.
+pub(crate) fn hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    use fmt::Write as _;
+    let mut out = String::new();
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// A rubric's identity, as 64 lowercase hex characters.

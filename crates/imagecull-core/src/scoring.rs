@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
-use crate::ledger::{self, FileIdentity, Header, Ledger, LedgerMode, Record, ResumeKey};
+use crate::ledger::{
+    self, FileIdentity, Header, Ledger, LedgerMode, Provenance, Record, ResumeKey,
+};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
 use crate::progress::{
@@ -28,7 +30,7 @@ use crate::progress::{
 };
 use crate::reading::{self, Answers, Reading};
 use crate::report::{self, Failure, Outputs, Row};
-use crate::rubric::{Rubric, RubricHash};
+use crate::rubric::{Rubric, RubricHash, hex};
 
 /// The task framing every request's state carries (spec §7.1).
 pub const TASK: &str = "photo_cull";
@@ -441,39 +443,40 @@ pub fn run(
             ),
         }));
     }
-    let mut frames = Vec::with_capacity(scan.files.len());
-    let mut rows: Vec<Row> = Vec::with_capacity(scan.files.len());
-    let mut ending = Ending::Completed;
-    let mut resumed = 0;
-    let mut duplicates = 0;
+    if ledger.discarded_frames() > 0 {
+        reporter.event(Event::Warning(Warning {
+            message: format!(
+                "{} held {}, and a plain score starts the ledger over: they are scored \
+                 again — pass --resume to keep them",
+                ledger::path_for(&config.outputs.csv).display(),
+                recorded_frames(ledger.discarded_frames()),
+            ),
+        }));
+    }
     let total = scan.files.len();
+    // The run's account of itself as it goes: the events a reporter hears, the
+    // rows the CSV is written from, and the frames the summary adds up.
+    let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
+    let mut ending = Ending::Completed;
     for (position, source) in scan.files.iter().enumerate() {
         if cancel.is_cancelled() {
             ending = Ending::Interrupted;
             break;
         }
         let identity = FileIdentity::of(&source.path).ok();
-        if let Some(identity) = identity
-            && let Some(record) = ledger.recorded(&ResumeKey::new(display_name(source), identity))
-        {
-            let frame = record.frame(source.clone());
+        let recorded = identity
+            .map(|identity| ResumeKey::new(display_name(source), identity))
+            .and_then(|key| ledger.recorded(&key));
+        if let Some(record) = recorded {
             // Resumed frames are reported like any other: the progress line
             // counts them and the summary counts them, so an interrupted run
             // picks up where it stopped and says so.
-            reporter.event(Event::Frame(frame_event(
-                position + 1,
-                total,
-                &frame,
-                None,
-                record.duplicate_of.as_deref(),
-                began.elapsed(),
-            )));
-            frames.push(frame);
-            rows.push(record.row(source.clone(), &rubric_hash, &config.model));
-            resumed += 1;
+            account.resumed(position + 1, source, record);
             continue;
         }
         let judged = judge(source, config, decider, &rubric_hash, identity, &ledger);
+        // The frame's row is written first either way, so a run that stops says
+        // which frame stopped it and why.
         let stops_run = judged
             .frame
             .outcome
@@ -481,33 +484,24 @@ pub fn run(
             .err()
             .filter(|error| error.recovery().aborts_run())
             .map(ToString::to_string);
-        if judged.record.duplicate_of.is_some() {
-            duplicates += 1;
-        }
-        reporter.event(Event::Frame(frame_event(
-            position + 1,
-            total,
-            &judged.frame,
-            judged.preview,
-            judged.record.duplicate_of.as_deref(),
-            began.elapsed(),
-        )));
-        rows.push(
-            judged
-                .record
-                .row(source.clone(), &rubric_hash, &config.model),
-        );
-        frames.push(judged.frame);
-        ledger.append(judged.record)?;
-        if config.csv_rewrite_every > 0 && rows.len().is_multiple_of(config.csv_rewrite_every) {
-            report::write(&rows, &config.outputs)?;
+        account.judged(position + 1, judged, &mut ledger)?;
+        if config.csv_rewrite_every > 0
+            && account.rows.len().is_multiple_of(config.csv_rewrite_every)
+        {
+            report::write(&account.rows, &config.outputs)?;
         }
         if let Some(reason) = stops_run {
             ending = Ending::Aborted { reason };
             break;
         }
     }
-    report::write(&rows, &config.outputs)?;
+    report::write(&account.rows, &config.outputs)?;
+    let Account {
+        frames,
+        resumed,
+        duplicates,
+        ..
+    } = account;
     let run = Run {
         rubric_hash,
         model: config.model.clone(),
@@ -525,6 +519,95 @@ pub fn run(
         summary: run.summary(),
     }));
     Ok(run)
+}
+
+/// `count` recorded frames, for a warning that has to read like a sentence.
+fn recorded_frames(count: usize) -> String {
+    if count == 1 {
+        "1 recorded frame".to_string()
+    } else {
+        format!("{count} recorded frames")
+    }
+}
+
+/// The run's account of itself while it runs: what the reporter hears, the rows
+/// the CSV is written from, and the frames the summary adds up.
+///
+/// A resumed frame and a freshly judged one reach it through two doors and are
+/// recorded identically from there, so a resumed row and a fresh one cannot
+/// drift apart — which is what makes an interrupted-and-resumed run write the
+/// same CSV as an uninterrupted one.
+struct Account<'a> {
+    reporter: &'a dyn Reporter,
+    rubric_hash: &'a RubricHash,
+    model: &'a str,
+    total: usize,
+    began: Instant,
+    frames: Vec<Frame>,
+    rows: Vec<Row>,
+    resumed: usize,
+    duplicates: usize,
+}
+
+impl<'a> Account<'a> {
+    fn new(
+        reporter: &'a dyn Reporter,
+        rubric_hash: &'a RubricHash,
+        model: &'a str,
+        total: usize,
+        began: Instant,
+    ) -> Account<'a> {
+        Account {
+            reporter,
+            rubric_hash,
+            model,
+            total,
+            began,
+            frames: Vec::with_capacity(total),
+            rows: Vec::with_capacity(total),
+            resumed: 0,
+            duplicates: 0,
+        }
+    }
+
+    /// A frame the ledger already held: reported and counted like any other, but
+    /// never asked again.
+    fn resumed(&mut self, index: usize, source: &SourceFile, record: &Record) {
+        self.record(index, record.frame(source.clone()), record, None);
+        self.resumed += 1;
+    }
+
+    /// A frame this run prepared and judged: recorded in the ledger it will be
+    /// resumed from, reported, and turned into the row it will be read as.
+    fn judged(&mut self, index: usize, judged: Judged, ledger: &mut Ledger) -> Result<()> {
+        if judged.record.duplicate_of.is_some() {
+            self.duplicates += 1;
+        }
+        self.record(index, judged.frame, &judged.record, judged.preview);
+        ledger.append(judged.record)
+    }
+
+    /// One frame's account: the progress event, its CSV row, and the frame the
+    /// summary adds up.
+    fn record(
+        &mut self,
+        index: usize,
+        frame: Frame,
+        record: &Record,
+        preview: Option<PreviewShape>,
+    ) {
+        self.reporter.event(Event::Frame(frame_event(
+            index,
+            self.total,
+            &frame,
+            preview,
+            record.duplicate_of.as_deref(),
+            self.began.elapsed(),
+        )));
+        self.rows
+            .push(record.row(frame.source.clone(), self.rubric_hash, self.model));
+        self.frames.push(frame);
+    }
 }
 
 /// One frame as the front end sees it: where it sits in the run, what came back,
@@ -601,7 +684,7 @@ fn judge(
                 source: source.clone(),
                 outcome: Err(error),
             };
-            let record = Record::of(&frame, identity, None, None, None);
+            let record = Record::of(&frame, identity, Provenance::default());
             return Judged {
                 frame,
                 record,
@@ -631,9 +714,11 @@ fn judge(
         let record = Record::of(
             &frame,
             identity,
-            Some(&preview_sha256),
-            dedupe_key.as_deref(),
-            Some(&reused.file),
+            Provenance {
+                preview_sha256: Some(&preview_sha256),
+                dedupe_key: dedupe_key.as_deref(),
+                duplicate_of: Some(&reused.file),
+            },
         );
         return Judged {
             frame,
@@ -656,9 +741,11 @@ fn judge(
     let record = Record::of(
         &frame,
         identity,
-        Some(&preview_sha256),
-        dedupe_key.as_deref(),
-        None,
+        Provenance {
+            preview_sha256: Some(&preview_sha256),
+            dedupe_key: dedupe_key.as_deref(),
+            ..Provenance::default()
+        },
     );
     Judged {
         frame,
@@ -707,16 +794,6 @@ fn dedupe_key(
     field(rubric_hash.as_str());
     field(model);
     hex(digest.finalize())
-}
-
-/// `bytes` as lowercase hex characters.
-fn hex(bytes: impl IntoIterator<Item = u8>) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// Ask the model one frame's question, retrying only the transient failures

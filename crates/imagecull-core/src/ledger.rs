@@ -188,32 +188,41 @@ pub struct Record {
     pub recorded: String,
 }
 
+/// What the ledger records about how a frame's outcome was produced.
+///
+/// The three fields travel together — a frame either reached the model or it did
+/// not — and two of them are `Option<&str>`, so they are passed as one value
+/// rather than as three positional arguments a caller could transpose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Provenance<'a> {
+    /// The SHA-256 of the bytes actually sent, when the frame got as far as a
+    /// request.
+    pub preview_sha256: Option<&'a str>,
+    /// The key an identical preview may reuse this outcome under (ADR 0002).
+    pub dedupe_key: Option<&'a str>,
+    /// The earlier frame whose outcome this one reused, if it reused one.
+    pub duplicate_of: Option<&'a str>,
+}
+
 impl Record {
     /// The record of a frame the run just judged.
     ///
-    /// `identity` is what the filesystem said about the file; `preview_sha256`
-    /// and `dedupe_key` describe the request, when one was made;
-    /// `duplicate_of` names the earlier frame whose outcome this one reused,
-    /// when it reused one.
-    pub fn of(
-        frame: &Frame,
-        identity: Option<FileIdentity>,
-        preview_sha256: Option<&str>,
-        dedupe_key: Option<&str>,
-        duplicate_of: Option<&str>,
-    ) -> Record {
+    /// `identity` is what the filesystem said about the file; `provenance` is
+    /// what the run did with it — the bytes that went out, the key an identical
+    /// preview could reuse the outcome under, and the frame it was reused from.
+    pub fn of(frame: &Frame, identity: Option<FileIdentity>, provenance: Provenance<'_>) -> Record {
         let mut record = Record {
             file: crate::scoring::display_name(&frame.source),
             size: identity.map(|identity| identity.size),
             mtime_ns: identity.map(|identity| identity.mtime_ns),
-            preview_sha256: preview_sha256.map(str::to_string),
-            dedupe_key: dedupe_key.map(str::to_string),
+            preview_sha256: provenance.preview_sha256.map(str::to_string),
+            dedupe_key: provenance.dedupe_key.map(str::to_string),
             status: report::OK.to_string(),
             error: None,
             answers: None,
             usage: None,
             document: None,
-            duplicate_of: duplicate_of.map(str::to_string),
+            duplicate_of: provenance.duplicate_of.map(str::to_string),
             recorded: now(),
         };
         match &frame.outcome {
@@ -323,6 +332,7 @@ pub struct Ledger {
     by_resume: HashMap<ResumeKey, usize>,
     by_dedupe: HashMap<String, usize>,
     truncated: usize,
+    discarded: usize,
 }
 
 impl Ledger {
@@ -339,6 +349,7 @@ impl Ledger {
         let mut keep = 0;
         let mut write_header = true;
         let mut truncated = 0;
+        let mut discarded = 0;
         if mode != LedgerMode::Discard && !existing.is_empty() {
             let loaded = parse(&path, &existing)?;
             ensure_compatible(&path, &loaded.header, &header)?;
@@ -350,6 +361,11 @@ impl Ledger {
                 // leavings, which a resumed run re-scores. Worth saying out
                 // loud, because the photographer's last run died.
                 truncated = existing.len().saturating_sub(keep);
+            } else {
+                // A restart throws these away. Nothing else knows how much work
+                // that is, and starting over silently is how an hour of a
+                // shoot disappears without a word.
+                discarded = loaded.records.len();
             }
         }
         let mut file = OpenOptions::new()
@@ -382,6 +398,7 @@ impl Ledger {
             by_resume: HashMap::new(),
             by_dedupe: HashMap::new(),
             truncated,
+            discarded,
         };
         if write_header {
             ledger.write_line(&header, &path)?;
@@ -404,6 +421,15 @@ impl Ledger {
     /// purpose, so it has nothing to report.
     pub fn truncated_bytes(&self) -> usize {
         self.truncated
+    }
+
+    /// How many recorded frames opening this ledger threw away: a plain `score`
+    /// starts the file over, and the frames it held are scored again.
+    ///
+    /// `--fresh` discards without reading, so it reports nothing: the
+    /// photographer already said what they wanted.
+    pub fn discarded_frames(&self) -> usize {
+        self.discarded
     }
 
     /// The frame already recorded under `key`, if a resume may skip it.
