@@ -108,3 +108,21 @@ gate: the near-tie case is the common case, and refusing to mark a burst would
   review is still on the critical path.
 
 ## Comments
+
+### Follow-ups — smells the review found and deliberately left (2026-11-21)
+
+Both are real, and both are larger than the review-fix pass that recorded them.
+Neither is a bug today: the index ambiguity they share caused exactly one defect
+(`groupNote="not_compared"` written from place-space into member-space, fixed
+and pinned in `crates/imagecull-core/tests/marking.rs`).
+
+- **`Moment` holds `rated` and `readings` in parallel.** A group's place becomes
+  an index into each of them (`Moment::member`), so every read of a frame is a
+  double index and the two spaces can be confused again. One per-frame struct
+  — source, stars, the document the rating wrote, the facts, the measures —
+  would carry the group's membership once and remove the conversion entirely.
+- **`Groups` is nine bare `usize` fields.** They are counted in one loop, printed
+  in one clause, and nothing stops a new count from being added to `Groups` and
+  forgotten by the summary. Typed counters, or a `Counted` wrapper that the
+  printer reads, would make "every count appears on the line" a property of the
+  type rather than of a reviewer's attention.
