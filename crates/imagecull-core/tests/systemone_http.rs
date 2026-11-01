@@ -19,6 +19,7 @@ use imagecull_core::error::{ErrorKind, Recovery, Result};
 use imagecull_core::ingest;
 use imagecull_core::omlx::{Client, Endpoint, Timeouts};
 use imagecull_core::preprocess::{Encoded, Params};
+use imagecull_core::progress::Silent;
 use imagecull_core::reading::{self, Verdict};
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
@@ -497,6 +498,7 @@ fn a_run_sends_one_request_at_a_time_in_ingest_order() {
         shoot.path(),
         &config,
         &adapter(&stub, &config.model),
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -551,6 +553,7 @@ fn a_run_over_http_reports_the_answers_it_read() {
         shoot.path(),
         &config,
         &adapter(&stub, &config.model),
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -616,6 +619,7 @@ fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() 
         shoot.path(),
         &config,
         &adapter(&stub, "clef-flash-oQ4e"),
+        &Silent,
         &Cancel::new(),
     )
     .expect_err("a missing alias is a broken server, not a broken file");

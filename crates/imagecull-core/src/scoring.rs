@@ -13,18 +13,21 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ExitCode, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
-use crate::ledger::{FileIdentity, Header, Ledger, LedgerMode, Record, ResumeKey};
+use crate::ledger::{self, FileIdentity, Header, Ledger, LedgerMode, Record, ResumeKey};
 use crate::preprocess::{self, Encoded, Params};
 use crate::preview;
-use crate::reading::{self, Reading};
-use crate::report::{self, Outputs, Row};
+use crate::progress::{
+    Event, Finished, FrameEvent, Judgement, PreviewShape, Reporter, Started, Summary, Warning,
+};
+use crate::reading::{self, Answers, Reading};
+use crate::report::{self, Failure, Outputs, Row};
 use crate::rubric::{Rubric, RubricHash};
 
 /// The task framing every request's state carries (spec §7.1).
@@ -289,6 +292,8 @@ pub struct Run {
     /// How many frames reused an identical preview's outcome instead of costing
     /// a request.
     pub duplicates: usize,
+    /// From the scan to the last write: the wall time the summary reports.
+    pub elapsed: Duration,
     /// How the run ended, which is also what it exits as.
     pub ending: Ending,
 }
@@ -298,13 +303,19 @@ impl Run {
     pub fn scored(&self) -> usize {
         self.frames
             .iter()
-            .filter(|frame| matches!(&frame.outcome, Ok(reading) if reading.answers.is_ok()))
+            .filter(|frame| frame.answers().is_some())
             .count()
     }
 
     /// How many frames did not, for any reason.
     pub fn failed(&self) -> usize {
         self.frames.len() - self.scored()
+    }
+
+    /// The run as a summary: the numbers a photographer judges it by, which is
+    /// also what the reporter receives as the run finishes.
+    pub fn summary(&self) -> Summary {
+        Summary::of(self)
     }
 
     /// What the process exits with (spec §10).
@@ -350,6 +361,34 @@ pub struct Frame {
     pub outcome: Result<Reading>,
 }
 
+impl Frame {
+    /// The six answers, or the failure the row's `status` and `error` carry.
+    ///
+    /// One of the two always applies: a document that arrived but could not be
+    /// read is a [`Failure`] too, exactly as the CSV records it. This is the
+    /// only place that decision is made, so a progress line, a summary and a
+    /// row cannot disagree about what happened to a frame.
+    pub fn answers_or_failure(&self) -> std::result::Result<&Answers, Failure> {
+        match &self.outcome {
+            Ok(reading) => reading.answers.as_ref().map_err(Failure::of),
+            Err(error) => Err(Failure::of(error)),
+        }
+    }
+
+    /// The six answers, when this frame has them.
+    pub fn answers(&self) -> Option<&Answers> {
+        self.answers_or_failure().ok()
+    }
+
+    /// What the request that produced this outcome cost, when one was recorded.
+    pub fn latency_ms(&self) -> Option<u64> {
+        self.outcome
+            .as_ref()
+            .ok()
+            .map(|reading| reading.usage.latency_ms())
+    }
+}
+
 /// Score a shoot folder: scan it, take every accepted frame through the model,
 /// one request at a time, in ingest order, and write the report those frames
 /// add up to.
@@ -366,20 +405,49 @@ pub struct Frame {
 /// be rewritten mid-run, and a frame the ledger already holds is skipped rather
 /// than asked again (spec §9.3). An identical preview reuses the earlier frame's
 /// outcome and still gets its own row.
-pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel) -> Result<Run> {
+///
+/// `reporter` hears about every one of those frames as it goes, in ingest order,
+/// and about the summary they add up to: this is the run's whole account of
+/// itself, and the reason the core needs no terminal (spec §52–53).
+pub fn run(
+    shoot: &Path,
+    config: &Config,
+    decider: &dyn Decider,
+    reporter: &dyn Reporter,
+    cancel: &Cancel,
+) -> Result<Run> {
+    let began = Instant::now();
     let scan = ingest::scan(shoot, &config.scan)?;
+    let rubric_hash = config.rubric_hash();
+    // Before the first frame and before any request: the front end can say how
+    // much work there is while the preflight is still in flight.
+    reporter.event(Event::Started(Started {
+        total: scan.files.len(),
+        rubric_hash: rubric_hash.clone(),
+        model: config.model.clone(),
+    }));
     // Before the first frame, and before any report or ledger is written: a
     // server that cannot answer must cost seconds, not a shoot.
     decider.preflight()?;
-    let rubric_hash = config.rubric_hash();
     let header = Header::new(&rubric_hash, &config.model, config.endpoint.as_deref());
     let mut ledger = Ledger::open(&config.outputs.csv, header, config.ledger)?;
+    if ledger.truncated_bytes() > 0 {
+        reporter.event(Event::Warning(Warning {
+            message: format!(
+                "{} ends mid-record, so the run it belonged to was killed: {} bytes of a \
+                 half-written record were discarded and those frames are scored again",
+                ledger::path_for(&config.outputs.csv).display(),
+                ledger.truncated_bytes(),
+            ),
+        }));
+    }
     let mut frames = Vec::with_capacity(scan.files.len());
     let mut rows: Vec<Row> = Vec::with_capacity(scan.files.len());
     let mut ending = Ending::Completed;
     let mut resumed = 0;
     let mut duplicates = 0;
-    for source in &scan.files {
+    let total = scan.files.len();
+    for (position, source) in scan.files.iter().enumerate() {
         if cancel.is_cancelled() {
             ending = Ending::Interrupted;
             break;
@@ -388,7 +456,19 @@ pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel
         if let Some(identity) = identity
             && let Some(record) = ledger.recorded(&ResumeKey::new(display_name(source), identity))
         {
-            frames.push(record.frame(source.clone()));
+            let frame = record.frame(source.clone());
+            // Resumed frames are reported like any other: the progress line
+            // counts them and the summary counts them, so an interrupted run
+            // picks up where it stopped and says so.
+            reporter.event(Event::Frame(frame_event(
+                position + 1,
+                total,
+                &frame,
+                None,
+                record.duplicate_of.as_deref(),
+                began.elapsed(),
+            )));
+            frames.push(frame);
             rows.push(record.row(source.clone(), &rubric_hash, &config.model));
             resumed += 1;
             continue;
@@ -404,6 +484,14 @@ pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel
         if judged.record.duplicate_of.is_some() {
             duplicates += 1;
         }
+        reporter.event(Event::Frame(frame_event(
+            position + 1,
+            total,
+            &judged.frame,
+            judged.preview,
+            judged.record.duplicate_of.as_deref(),
+            began.elapsed(),
+        )));
         rows.push(
             judged
                 .record
@@ -420,22 +508,76 @@ pub fn run(shoot: &Path, config: &Config, decider: &dyn Decider, cancel: &Cancel
         }
     }
     report::write(&rows, &config.outputs)?;
-    Ok(Run {
+    let run = Run {
         rubric_hash,
         model: config.model.clone(),
         counts: scan.counts,
-        total: scan.files.len(),
+        total,
         frames,
         resumed,
         duplicates,
+        elapsed: began.elapsed(),
         ending,
-    })
+    };
+    // The last thing a reporter hears: the run's own account of itself, which a
+    // front end renders as the summary and a script reads for the outcome.
+    reporter.event(Event::Finished(Finished {
+        summary: run.summary(),
+    }));
+    Ok(run)
 }
 
-/// One frame, judged: the run's frame, and the ledger's record of it.
+/// One frame as the front end sees it: where it sits in the run, what came back,
+/// and what the request cost.
+fn frame_event(
+    index: usize,
+    total: usize,
+    frame: &Frame,
+    preview: Option<PreviewShape>,
+    duplicate_of: Option<&str>,
+    elapsed: Duration,
+) -> FrameEvent {
+    FrameEvent {
+        index,
+        total,
+        filename: display_name(&frame.source),
+        judgement: judgement(frame),
+        latency_ms: frame.latency_ms(),
+        eta: estimate_remaining(index, total, elapsed),
+        preview,
+        duplicate_of: duplicate_of.map(str::to_string),
+    }
+}
+
+/// How long the rest of the run will take, at the pace it has kept so far.
+///
+/// The last frame has nothing left to estimate, and a run with no elapsed time
+/// behind it has no pace to project: both answer `None` rather than a made-up
+/// zero, so a front end can leave the estimate off the line.
+fn estimate_remaining(done: usize, total: usize, elapsed: Duration) -> Option<Duration> {
+    let remaining = total.checked_sub(done)?;
+    if remaining == 0 || done == 0 || elapsed.is_zero() {
+        return None;
+    }
+    let pace = elapsed.as_secs_f64() / done as f64;
+    Some(Duration::from_secs_f64(pace * remaining as f64))
+}
+
+/// A frame's outcome as the front end sees it: the answers, or the failure the
+/// row's `status` and `error` columns will carry.
+fn judgement(frame: &Frame) -> Judgement {
+    match frame.answers_or_failure() {
+        Ok(answers) => Judgement::Answered(answers.clone()),
+        Err(failure) => Judgement::Failed(failure),
+    }
+}
+
+/// One frame, judged: the run's frame, the ledger's record of it, and the shape
+/// of the bytes that were sent.
 struct Judged {
     frame: Frame,
     record: Record,
+    preview: Option<PreviewShape>,
 }
 
 /// One file, all the way to a record: prepare, reuse or ask, read.
@@ -460,10 +602,19 @@ fn judge(
                 outcome: Err(error),
             };
             let record = Record::of(&frame, identity, None, None, None);
-            return Judged { frame, record };
+            return Judged {
+                frame,
+                record,
+                preview: None,
+            };
         }
     };
     let preview_sha256 = preview_sha256(&encoded);
+    let preview = PreviewShape {
+        width: encoded.width,
+        height: encoded.height,
+        jpeg_bytes: encoded.jpeg.len(),
+    };
     let name = display_name(source);
     let state = State::for_frame(name.clone(), config.shoot_context.clone());
     let dedupe_key = config
@@ -484,7 +635,11 @@ fn judge(
             dedupe_key.as_deref(),
             Some(&reused.file),
         );
-        return Judged { frame, record };
+        return Judged {
+            frame,
+            record,
+            preview: Some(preview),
+        };
     }
     let request = Request {
         model: &config.model,
@@ -505,7 +660,11 @@ fn judge(
         dedupe_key.as_deref(),
         None,
     );
-    Judged { frame, record }
+    Judged {
+        frame,
+        record,
+        preview: Some(preview),
+    }
 }
 
 /// The SHA-256 of the bytes actually sent, as 64 lowercase hex characters: what

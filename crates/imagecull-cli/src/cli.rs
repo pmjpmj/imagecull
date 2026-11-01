@@ -196,6 +196,16 @@ pub struct ScoreArgs {
     /// identical preview
     #[arg(long)]
     pub no_dedupe: bool,
+
+    /// Suppress the per-frame progress line; the outcome and a one-line summary
+    /// remain, so a script can read them
+    #[arg(long, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// One line per frame with the bytes that were sent, the answers at full
+    /// precision and the status of every frame
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 /// The `--version` line: the version, and the rubric compiled into the binary.
@@ -310,6 +320,10 @@ mod tests {
         assert_eq!(args.outputs().csv, PathBuf::from(DEFAULT_OUTPUT));
         assert_eq!(args.outputs().json_scores, None);
         assert!(!args.outputs().absolute);
+        assert!(
+            !args.quiet && !args.verbose,
+            "a plain run shows the progress line and the summary"
+        );
     }
 
     #[test]
@@ -437,6 +451,24 @@ mod tests {
     #[test]
     fn resuming_and_starting_fresh_are_opposite_answers() {
         assert!(parse_result(&["score", "shoot", "--resume", "--fresh"]).is_err());
+    }
+
+    #[test]
+    fn score_takes_the_quiet_and_verbose_flags_but_not_both() {
+        let Command::Score(args) = parse(&["score", "shoot", "--quiet"]) else {
+            panic!("not a score command");
+        };
+        assert!(args.quiet && !args.verbose);
+
+        let Command::Score(args) = parse(&["score", "shoot", "--verbose"]) else {
+            panic!("not a score command");
+        };
+        assert!(args.verbose && !args.quiet);
+
+        assert!(
+            parse_result(&["score", "shoot", "--quiet", "--verbose"]).is_err(),
+            "one run cannot be both silent and voluble"
+        );
     }
 
     #[test]

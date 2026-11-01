@@ -19,6 +19,7 @@ use imagecull_core::Result;
 use imagecull_core::error::{Error, ErrorKind, ExitCode};
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
+use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel, Config, Ending, RetryPolicy};
@@ -154,8 +155,14 @@ fn a_timeout_is_retried_and_then_recorded() {
         Ok(document(5.0, "3")),
     ]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     let attempts: Vec<String> = decider
         .seen()
@@ -197,8 +204,14 @@ fn a_5xx_that_never_clears_is_recorded_after_its_retries() {
         Ok(document(6.0, "4")),
     ]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(decider.seen().len(), 5);
     assert_eq!(run.scored(), 1);
@@ -224,8 +237,14 @@ fn a_4xx_is_recorded_without_being_retried() {
         Ok(document(6.0, "4")),
     ]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(
         decider.seen().len(),
@@ -255,8 +274,14 @@ fn a_bad_response_is_recorded_and_the_run_continues() {
         Ok(document(6.0, "4")),
     ]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(
         decider.seen().len(),
@@ -276,8 +301,14 @@ fn a_rejected_rubric_stops_the_run_at_the_first_frame() {
         "POST /v1/systemone returned HTTP 400: invalid criteria for 'overall'",
     ))]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(
         decider.seen().len(),
@@ -307,8 +338,14 @@ fn a_malformed_body_stops_the_run_too() {
         "POST /v1/systemone returned HTTP 422: state must not be null",
     ))]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(decider.seen().len(), 1, "a client bug is not retried");
     assert_eq!(run.exit_code(), ExitCode::Fatal);
@@ -332,8 +369,14 @@ fn an_unreachable_server_stops_the_run_after_its_retries() {
         Err(unreachable()),
     ]);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(
         decider.seen().len(),
@@ -370,6 +413,7 @@ fn the_exit_code_is_a_function_of_the_run() {
         shoot.path(),
         &config(shoot.path().join("a.csv")),
         &decider,
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -384,6 +428,7 @@ fn the_exit_code_is_a_function_of_the_run() {
         shoot.path(),
         &config(shoot.path().join("b.csv")),
         &Scripted::always_reading(2),
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -454,6 +499,7 @@ fn every_status_an_answer_can_carry_reaches_the_csv() {
             shoot.path(),
             &config(csv.clone()),
             &Scripted::answering(answers),
+            &Silent,
             &Cancel::new(),
         )
         .expect("a run");
@@ -497,6 +543,7 @@ fn every_status_a_file_can_carry_reaches_the_csv() {
         shoot.path(),
         &config(csv.clone()),
         &Scripted::always_reading(1),
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");
@@ -538,8 +585,14 @@ fn a_preflight_failure_stops_the_run_before_the_first_frame() {
         "cannot reach http://127.0.0.1:8000: Connection refused — start oMLX (omlx serve)",
     ));
 
-    let error = scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new())
-        .expect_err("a broken server costs seconds, not 400 frames");
+    let error = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect_err("a broken server costs seconds, not 400 frames");
 
     assert!(error.is_fatal());
     assert!(
@@ -564,7 +617,14 @@ fn a_run_cancelled_between_files_keeps_the_rows_it_judged() {
     let cancel = Arc::new(Cancel::new());
     let decider = Scripted::always_reading(3).cancelling_after(2, Arc::clone(&cancel));
 
-    let run = scoring::run(shoot.path(), &config(csv.clone()), &decider, &cancel).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &cancel,
+    )
+    .expect("a run");
 
     assert_eq!(
         decider.seen().len(),
@@ -591,7 +651,14 @@ fn a_run_cancelled_before_it_starts_writes_an_empty_report() {
     cancel.cancel();
     let decider = Scripted::always_reading(0);
 
-    let run = scoring::run(shoot.path(), &config(csv.clone()), &decider, &cancel).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &cancel,
+    )
+    .expect("a run");
 
     assert!(decider.seen().is_empty());
     assert!(run.frames.is_empty());
@@ -616,8 +683,14 @@ fn a_synthetic_400_file_shoot_gets_a_status_on_every_row() {
         .collect();
     let decider = Scripted::answering(answers);
 
-    let run =
-        scoring::run(shoot.path(), &config(csv.clone()), &decider, &Cancel::new()).expect("a run");
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
 
     assert_eq!(run.frames.len(), 400);
     let csv = Csv::read(&csv);
@@ -643,6 +716,7 @@ fn a_run_writes_nothing_into_the_shoot_folder() {
         shoot.path(),
         &config(report.path().join("scores.csv")),
         &Scripted::always_reading(3),
+        &Silent,
         &Cancel::new(),
     )
     .expect("a run");

@@ -20,6 +20,7 @@ use imagecull_core::Result;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::ledger::{LedgerMode, VERSION};
 use imagecull_core::preprocess::Params;
+use imagecull_core::progress::Silent;
 use imagecull_core::report::Outputs;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{
@@ -91,7 +92,7 @@ fn config(out: &Path) -> Config {
 
 /// Run `dir` with `config` and `decider`, nobody at the stop button.
 fn run(dir: &Path, config: &Config, decider: &dyn Decider) -> scoring::Run {
-    scoring::run(dir, config, decider, &Cancel::new()).expect("a run")
+    scoring::run(dir, config, decider, &Silent, &Cancel::new()).expect("a run")
 }
 
 /// The CSV a run wrote, as text.
@@ -279,6 +280,7 @@ fn cancelling_mid_run_then_resuming_produces_one_uninterrupted_runs_csv() {
         dir.path(),
         &config(interrupted.path()),
         &Scripted::always_reading(5).cancelling_after(2, Arc::clone(&cancel)),
+        &Silent,
         &cancel,
     )
     .expect("a run");
@@ -481,6 +483,7 @@ fn a_ledger_written_under_another_rubric_or_model_is_a_fatal_error() {
             dir.path(),
             &config,
             &Scripted::answering(Vec::new()),
+            &Silent,
             &Cancel::new(),
         )
         .expect_err("a ledger from another model cannot be continued");
@@ -510,6 +513,7 @@ fn a_ledger_written_under_another_rubric_or_model_is_a_fatal_error() {
         dir.path(),
         &reworded,
         &Scripted::answering(Vec::new()),
+        &Silent,
         &Cancel::new(),
     )
     .expect_err("a reworded rubric is a different rubric");
@@ -568,6 +572,7 @@ fn a_ledger_written_by_another_version_is_refused() {
         dir.path(),
         &config,
         &Scripted::answering(Vec::new()),
+        &Silent,
         &Cancel::new(),
     )
     .expect_err("a ledger from another format cannot be read as this one");
@@ -658,6 +663,7 @@ fn dedupe_reaches_the_outcomes_a_resumed_ledger_holds() {
         &config(out.path()),
         &Scripted::answering(vec![Ok(document(6.4237, "4"))])
             .cancelling_after(1, Arc::clone(&cancel)),
+        &Silent,
         &cancel,
     )
     .expect("a run");
@@ -688,6 +694,7 @@ fn a_file_that_is_not_a_ledger_is_refused_rather_than_read() {
         dir.path(),
         &config,
         &Scripted::answering(Vec::new()),
+        &Silent,
         &Cancel::new(),
     )
     .expect_err("a file that is not a ledger cannot be resumed from");
@@ -817,8 +824,14 @@ fn a_run_that_never_started_writes_no_ledger() {
         "cannot reach http://127.0.0.1:8000 — start oMLX",
     ));
 
-    let error = scoring::run(dir.path(), &config(out.path()), &decider, &Cancel::new())
-        .expect_err("a broken server costs seconds, not a run");
+    let error = scoring::run(
+        dir.path(),
+        &config(out.path()),
+        &decider,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect_err("a broken server costs seconds, not a run");
 
     assert!(error.is_fatal());
     assert!(
