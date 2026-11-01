@@ -47,6 +47,83 @@ fn the_budget_is_the_measured_configuration_and_not_a_guess() {
 }
 
 #[test]
+fn the_instructions_are_ranked_gates_and_never_carry_the_source_indentation() {
+    let instructions = keeper::INSTRUCTIONS;
+
+    for gate in [
+        "1. Sharp and still, above all else",
+        "2. The moment",
+        "3. Facing the camera",
+        "4. Composition",
+        "5. Light kept, last of the gates",
+    ] {
+        assert!(
+            instructions.contains(gate),
+            "the gates are ranked, and {gate} is one of them: {instructions}"
+        );
+    }
+    let ranked: Vec<usize> = [
+        "1. Sharp and still",
+        "2. The moment",
+        "3. Facing the camera",
+        "4. Composition",
+        "5. Light kept",
+    ]
+    .iter()
+    .map(|gate| {
+        instructions
+            .find(gate)
+            .unwrap_or_else(|| panic!("{gate} is missing from the ranking: {instructions}"))
+    })
+    .collect();
+    assert!(
+        ranked.windows(2).all(|pair| pair[0] < pair[1]),
+        "the gates appear in rank order, sharpness first and light last: {instructions}"
+    );
+    assert!(
+        instructions.contains("rule 1 decides by itself, and rules 2 to 5 only separate frames"),
+        "crispness outranks every other gate, and says so: {instructions}"
+    );
+    assert!(
+        instructions.contains("a sharp frame beats a softer frame with the better expression"),
+        "the trade-off is named, not left to the choice head: {instructions}"
+    );
+    assert!(
+        instructions.contains("If every frame fails this rule, keep the sharpest and stillest"),
+        "a soft burst still names a frame: {instructions}"
+    );
+    assert!(
+        instructions.contains("its eyes or face, or its principal detail, crisp"),
+        "a face at 512 px cannot be asked about eye by eye: {instructions}"
+    );
+    assert!(
+        instructions.contains("looking towards the camera with its face turned to it"),
+        "the shoot's preference for direct address is stated, not implied: {instructions}"
+    );
+    assert!(
+        instructions.contains("keep the more pleasant picture")
+            && instructions.contains("the calmer background")
+            && instructions.contains("the more natural pose"),
+        "`pleasant` is operationalised rather than left to the choice head: {instructions}"
+    );
+    assert!(
+        instructions.contains("Do not prefer a frame because it is first"),
+        "position was measured deciding a pick the comparison should decide: {instructions}"
+    );
+    assert!(
+        instructions.ends_with("Answer with the key of that frame."),
+        "the answer is a key and nothing else: {instructions}"
+    );
+    for line in instructions.lines() {
+        assert_eq!(
+            line.trim_start(),
+            line,
+            "the continuation is joined without the source's indentation: {line:?}"
+        );
+    }
+}
+
+#[test]
 fn a_group_inside_one_request_is_one_chunk_in_capture_order() {
     let places = [0, 1, 2];
 

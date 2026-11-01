@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use imagecull_core::config::{self, ConfigFile, Env, Resolved};
+use imagecull_core::group::Thresholds;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
 use imagecull_core::rubric::{Builtin, RubricSource};
@@ -33,6 +34,11 @@ json_scores = "answers.json"
 rubric = "mine.toml"
 shoot_context = "night street, pushed two stops"
 dedupe = false
+
+[group]
+gap = 0.75
+similarity = 0.96
+exposure_stops = 1.5
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -95,6 +101,9 @@ fn every_key_reaches_the_resolved_values() {
         Some("night street, pushed two stops")
     );
     assert_eq!(resolved.dedupe, Some(false));
+    assert_eq!(resolved.group_gap, Some(0.75));
+    assert_eq!(resolved.group_similarity, Some(0.96));
+    assert_eq!(resolved.group_exposure_stops, Some(1.5));
 }
 
 #[test]
@@ -133,6 +142,16 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[server]\ntimeout = 0\n", "timeout"),
         ("[server]\nmodel = \"  \"\n", "model"),
         ("[server]\nendpoint = \"\"\n", "endpoint"),
+        ("[group]\ngap = 0.0\n", "group.gap"),
+        ("[group]\ngap = -1.0\n", "group.gap"),
+        ("[group]\ngap = nan\n", "group.gap"),
+        ("[group]\ngap = inf\n", "group.gap"),
+        ("[group]\nsimilarity = 1.5\n", "group.similarity"),
+        ("[group]\nsimilarity = -0.1\n", "group.similarity"),
+        ("[group]\nsimilarity = nan\n", "group.similarity"),
+        ("[group]\nexposure_stops = -1.0\n", "group.exposure_stops"),
+        ("[group]\nexposure_stops = nan\n", "group.exposure_stops"),
+        ("[group]\nexposure_stops = inf\n", "group.exposure_stops"),
     ];
     for (text, key) in cases {
         let message = error(text);
@@ -211,6 +230,46 @@ fn the_flags_win_over_the_file() {
         effective.params.jpeg_quality, 72,
         "a flag that said nothing leaves the file's value alone"
     );
+    assert_eq!(
+        effective.thresholds,
+        Thresholds {
+            gap: std::time::Duration::from_secs_f64(0.75),
+            similarity: 0.96,
+            exposure_stops: 1.5,
+        },
+        "and a key no flag touched keeps the file's number"
+    );
+}
+
+#[test]
+fn a_groups_flag_wins_over_the_file() {
+    let file = resolved(EVERY_KEY);
+    let flags = Resolved {
+        recursive: Some(false),
+        group_gap: Some(1.25),
+        ..Resolved::default()
+    };
+    let effective = file.override_with(flags).settle(None);
+    assert!(!effective.recursive, "--recursive false beat the file");
+    assert_eq!(
+        effective.thresholds.gap,
+        std::time::Duration::from_secs_f64(1.25)
+    );
+    assert_eq!(
+        effective.thresholds.similarity, 0.96,
+        "a flag that said nothing leaves the file's value alone"
+    );
+}
+
+#[test]
+fn a_whole_number_is_a_threshold_like_any_other() {
+    let resolved = resolved("[group]\ngap = 2\nexposure_stops = 1\n");
+    assert_eq!(resolved.group_gap, Some(2.0), "`gap = 2` is two seconds");
+    assert_eq!(
+        resolved.group_exposure_stops,
+        Some(1.0),
+        "and `exposure_stops = 1` is one stop"
+    );
 }
 
 #[test]
@@ -222,6 +281,14 @@ fn the_file_wins_over_the_built_in_default() {
     assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
     assert!(!effective.dedupe);
     assert!(effective.recursive);
+    assert_eq!(
+        effective.thresholds,
+        Thresholds {
+            gap: std::time::Duration::from_secs_f64(0.75),
+            similarity: 0.96,
+            exposure_stops: 1.5,
+        }
+    );
     assert_eq!(
         effective.shoot_context.as_deref(),
         Some("night street, pushed two stops")
@@ -242,6 +309,7 @@ fn an_empty_source_settles_to_the_specs_defaults() {
     assert_eq!(effective.outputs.json_scores, None, "no report path at all");
     assert_eq!(effective.rubric, None);
     assert!(effective.dedupe);
+    assert_eq!(effective.thresholds, Thresholds::default());
     assert_eq!(effective.source, None);
     assert_eq!(
         effective.scan(None),

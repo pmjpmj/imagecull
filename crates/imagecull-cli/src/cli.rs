@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use imagecull_core::config::{self, Effective, Loaded, Resolved};
-use imagecull_core::group::{self, Thresholds};
+use imagecull_core::group;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::rubric::{Builtin, RubricSource};
@@ -317,27 +317,32 @@ pub struct GroupsArgs {
 
 impl GroupsArgs {
     /// What this command's own flags said, for the config file to sit under.
+    ///
+    /// `--recursive` is included even though a run's breadth is the file's
+    /// subject and not the invocation's: the flag takes an explicit `false`, so
+    /// a shoot config that turns recursion on can still be turned off for one
+    /// run. `--limit`, `--out`, `--jobs` and the cull/console flags describe the
+    /// invocation and stay out.
     pub fn overrides(&self) -> Resolved {
-        self.common.overrides()
+        Resolved {
+            recursive: self.recursive,
+            group_gap: self.group_gap,
+            group_similarity: self.group_similarity,
+            group_exposure_stops: self.group_exposure_stops,
+            ..self.common.overrides()
+        }
     }
 
-    /// What this command actually runs with: the flags, over the defaults the
-    /// core documents.
-    pub fn options(&self) -> group::Options {
+    /// What this command actually runs with: the effective config, with the two
+    /// values that describe the invocation — the smoke-test limit and the degree
+    /// — taken from the flags.
+    pub fn options(&self, effective: &Effective) -> group::Options {
         group::Options {
             scan: ScanOptions {
-                recursive: self.recursive.unwrap_or(false),
+                recursive: effective.recursive,
                 limit: self.limit,
             },
-            thresholds: Thresholds {
-                gap: self
-                    .group_gap
-                    .map_or(group::DEFAULT_GAP, std::time::Duration::from_secs_f64),
-                similarity: self.group_similarity.unwrap_or(group::DEFAULT_SIMILARITY),
-                exposure_stops: self
-                    .group_exposure_stops
-                    .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
-            },
+            thresholds: effective.thresholds,
             jobs: self.jobs,
         }
     }
@@ -440,12 +445,22 @@ impl ScoreArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use imagecull_core::group::Thresholds;
     use imagecull_core::preprocess::Params;
 
     use super::*;
 
     fn parse(arguments: &[&str]) -> Command {
         parse_result(arguments).expect("valid arguments").command
+    }
+
+    /// The effective config of a parsed `groups` with no config file on disk,
+    /// which is what the parser alone can prove: the file itself is proven in
+    /// the core's own tests.
+    fn groups_options(args: &GroupsArgs) -> group::Options {
+        args.options(&args.overrides().settle(None))
     }
 
     fn parse_result(arguments: &[&str]) -> Result<Cli, clap::Error> {
@@ -837,7 +852,7 @@ mod tests {
         assert_eq!(args.group_exposure_stops, None);
         assert_eq!(args.jobs, None);
 
-        let options = args.options();
+        let options = groups_options(&args);
         assert_eq!(options.thresholds, Thresholds::default());
         assert_eq!(options.jobs, None, "unasked means one job per core");
         assert!(!options.scan.recursive);
@@ -866,7 +881,7 @@ mod tests {
             panic!("not a groups command");
         };
 
-        let options = args.options();
+        let options = groups_options(&args);
         assert_eq!(
             options.thresholds.gap,
             std::time::Duration::from_secs_f64(0.75)
@@ -877,6 +892,69 @@ mod tests {
         assert_eq!(options.scan.limit, Some(40));
         assert_eq!(options.jobs, Some(4), "the degree is the flag's");
         assert_eq!(args.out, PathBuf::from("march-groups.csv"));
+    }
+
+    #[test]
+    fn groups_takes_its_grouping_keys_from_the_config_file() {
+        let file = config::ConfigFile::from_toml(
+            "[server]\nmodel = \"clef-27b-oQ4e\"\n\
+             [scan]\nrecursive = true\n\
+             [group]\ngap = 0.5\nsimilarity = 0.95\nexposure_stops = 1.0\n",
+        )
+        .expect("a valid config");
+        let Command::Groups(args) = parse(&["groups", "shoot"]) else {
+            panic!("not a groups command");
+        };
+
+        let effective = file
+            .resolve(None)
+            .override_with(args.overrides())
+            .settle(None);
+        let options = args.options(&effective);
+
+        assert_eq!(options.thresholds.gap, Duration::from_secs_f64(0.5));
+        assert_eq!(options.thresholds.similarity, 0.95);
+        assert_eq!(options.thresholds.exposure_stops, 1.0);
+        assert!(options.scan.recursive, "[scan] recursive reaches the scan");
+        assert_eq!(
+            effective.model.as_deref(),
+            Some("clef-27b-oQ4e"),
+            "and the alias is the one the cull will ask"
+        );
+    }
+
+    #[test]
+    fn a_groups_flag_beats_the_file_it_overrides() {
+        let file = config::ConfigFile::from_toml(
+            "[scan]\nrecursive = true\n[group]\ngap = 5.0\nsimilarity = 0.99\n",
+        )
+        .expect("a valid config");
+        let Command::Groups(args) = parse(&[
+            "groups",
+            "shoot",
+            "--group-gap",
+            "1.5",
+            "--recursive",
+            "false",
+        ]) else {
+            panic!("not a groups command");
+        };
+
+        let effective = file
+            .resolve(None)
+            .override_with(args.overrides())
+            .settle(None);
+        let options = args.options(&effective);
+
+        assert_eq!(options.thresholds.gap, Duration::from_secs_f64(1.5));
+        assert_eq!(
+            options.thresholds.similarity, 0.99,
+            "a key the flags left alone keeps the file's value"
+        );
+        assert!(
+            !options.scan.recursive,
+            "--recursive false beats a file that turned it on"
+        );
     }
 
     #[test]
@@ -905,7 +983,7 @@ mod tests {
         };
         assert!(args.quiet);
         assert!(
-            !args.options().scan.recursive,
+            !groups_options(&args).scan.recursive,
             "--quiet silences, it does not scan"
         );
     }

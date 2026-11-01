@@ -442,7 +442,7 @@ imagecull score <DIR> [OPTIONS]
         --shoot-context <STR>   free text passed into state.shoot_context
         --max-edge <PX>         default 1568
         --jpeg-quality <1-100>  default 88
-        --recursive
+        --recursive [BOOL]      also scan subdirectories
         --json-scores <FILE>    every raw answer document, for debugging
         --no-dedupe
         --force                 rate frames again even though their sidecars hold a rating
@@ -455,13 +455,27 @@ imagecull score <DIR> [OPTIONS]
         --config <FILE>         read this config file instead of the discovered one
         --no-config             ignore any config file; built-in defaults only
 
-imagecull groups <DIR>         # group by moment, cull each group with clef, mark the reds
+imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef, mark the reds
+        --out <FILE>            the measures CSV, default ./groups.csv
+        --group-gap <SECS>      default 2.0
+        --group-similarity <COSINE>   default 0.90
+        --group-exposure-stops <STOPS>  default 2.0; 0 asks for one exposure exactly
+    -j, --jobs <N>              frames read at once, default one per core
+        --recursive [BOOL]      also scan subdirectories
+        --limit <N>             smoke test on the first N files
+        --no-cull               group and measure only: no request, no label
+        --print-sidecars        ask clef, print what each sidecar would become, write nothing
+        --allow-foreign         write into a sidecar another application owns
+        --quiet | --verbose
+        --endpoint / --model / --timeout / --config / --no-config   as `score`
+
 imagecull models               # GET /v1/models, flag decision models
 imagecull doctor [FILE.nef]    # server reachability + preview extraction self-test
 imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:Rating
 ```
 
-`--config` and `--no-config` are on every subcommand (`§11.1`).
+`--config` and `--no-config` are on every subcommand (`§11.1`), and `§11.1`
+lists, per command, which of these flags also have a config key.
 
 One line per frame — `142/400  DSC_0555.NEF  4★  812ms  eta 3m10s`, `5★ kept` for a
 frame whose sidecar already had a rating, and `duplicate of DSC_0540.NEF` when an
@@ -478,13 +492,22 @@ failure's message.
 ### 11.1 Config files
 
 Values that stay true across runs can come from a TOML file instead of being
-retyped as flags. Keys are grouped into five sections that map one-for-one onto
+retyped as flags. Keys are grouped into six sections that map one-for-one onto
 the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
 `[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
-(`json_scores`), `[run]` (`rubric`, `shoot_context`,
-`dedupe`). `[run] rubric` holds exactly what `--rubric` holds: a built-in's name
-or a path. `imagecull.toml.example` is the commented reference; ADR 0003 records
-why this shape, ADR 0004 the three built-ins.
+(`json_scores`), `[run]` (`rubric`, `shoot_context`, `dedupe`), and `[group]`
+(`gap`, `similarity`, `exposure_stops`). `[run] rubric` holds exactly what
+`--rubric` holds: a built-in's name or a path. `imagecull.toml.example` is the
+commented reference; ADR 0003 records why this shape, ADR 0004 the three
+built-ins, ADR 0010 the `[group]` section.
+
+**Which command reads which key.** `score` resolves every key. `groups` resolves
+`[server]` (the alias and endpoint a cull asks), `[preview] jpeg_quality`,
+`[scan] recursive`, `[run] shoot_context` and all of `[group]`; it renders its
+comparisons at its own measured budget edge, so `[preview] max_edge` does not
+reach a cull, and it scores nothing, so `[run] rubric`, `[run] dedupe` and
+`[outputs] json_scores` are not its business. Key names are always accepted; a
+key another command reads is simply not consulted by this one.
 
 **Discovery.** Exactly one file is read. The first of these that exists wins
 whole: `--config <FILE>`, `./imagecull.toml`,
@@ -496,8 +519,11 @@ entirely.
 **Precedence.** Flag > config file > built-in default, per key.
 
 **What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
-`--allow-foreign`, `--print-sidecars`, `--limit`, `--quiet`, `--verbose` — those describe the invocation,
-not the shoot.
+`--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`, `--quiet`,
+`--verbose` — those describe the invocation, not the shoot. `--recursive` and the
+three `--group-*` thresholds do have keys, and the `--recursive` flag takes an
+explicit `true`/`false` so a file that turned recursion on can be turned off for
+one run.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are
 validated to the same ranges the flags enforce, an unreadable `--config` target
@@ -508,8 +534,8 @@ code 2 (`§10`), never a warning-and-continue.
 A built-in's name is not a path and is not anchored: `rubric = "holiday"` means
 the built-in wherever the file sits, and `rubric = "./holiday"` means a file.
 
-**Provenance.** The file is read by `score`, `doctor` and `models`, so a
-preflight certifies the pipeline the run will actually use. When a file was
+**Provenance.** The file is read by `score`, `groups`, `doctor` and `models`,
+so a preflight certifies the pipeline the run will actually use. When a file was
 loaded, the run summary's provenance line prints it beside the rubric hash and
 the model alias:
 `rubric general/69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`

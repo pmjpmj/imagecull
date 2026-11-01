@@ -121,8 +121,8 @@ _Avoid_: checksum, fingerprint, version
 
 **Effective config**:
 The values a run actually uses — rubric (a built-in's name or a file's path),
-alias, preview parameters, scan breadth, output paths — after every source has
-been resolved.
+alias, preview parameters, scan breadth, grouping thresholds, output paths —
+after every source has been resolved.
 _Avoid_: settings, options, arguments, parameters
 
 **Config file**:
