@@ -10,9 +10,17 @@
 //! [`diagnose`] never fails: it turns transport errors and mismatches into the
 //! one sentence that tells the photographer what to do, and an exit
 //! classification for the CLI.
+//!
+//! [`check_file`] does the same for one of the photographer's own files: it runs
+//! the preview pipeline end to end on it, so a camera or lens whose output the
+//! extractor cannot handle is found before a 400-frame run, not during it.
+
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, ErrorKind, ExitCode};
 use crate::omlx::{Client, MIN_DECISION_VERSION, ModelKind};
+use crate::preprocess::{self, Params};
+use crate::preview;
 use crate::version::Version;
 
 /// What `doctor` concluded about an endpoint and an alias.
@@ -159,6 +167,90 @@ pub enum Verdict {
         /// The type the server reported, e.g. `vlm`.
         served_as: String,
     },
+}
+
+/// What `doctor <FILE>` found out about one of the photographer's files.
+#[derive(Debug)]
+pub struct FileCheck {
+    /// The file that was tested.
+    pub path: PathBuf,
+    /// What the preview pipeline made of it.
+    pub outcome: Result<FileFacts, Error>,
+}
+
+impl FileCheck {
+    /// Whether the file went through the whole pipeline.
+    pub fn is_ok(&self) -> bool {
+        self.outcome.is_ok()
+    }
+
+    /// One sentence: what the pipeline produced, or why it could not.
+    pub fn message(&self) -> String {
+        let name = self
+            .path
+            .file_name()
+            .map_or_else(
+                || self.path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        match &self.outcome {
+            Ok(facts) => format!(
+                "{name}: embedded preview {}x{} shown upright by orientation {}, sent as {}x{} {}, \
+                 no EXIF — the preview pipeline works on this file",
+                facts.stored_width,
+                facts.stored_height,
+                facts.orientation,
+                facts.width,
+                facts.height,
+                kilobytes(facts.jpeg_bytes),
+            ),
+            Err(error) => format!("{name}: {error}"),
+        }
+    }
+}
+
+/// What the preview pipeline produced from one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFacts {
+    /// The preview's stored width, before the orientation is applied.
+    pub stored_width: u32,
+    /// The preview's stored height, before the orientation is applied.
+    pub stored_height: u32,
+    /// The EXIF orientation the camera recorded, 1–8.
+    pub orientation: u16,
+    /// The width that would be sent.
+    pub width: u32,
+    /// The height that would be sent.
+    pub height: u32,
+    /// The size of the JPEG that would be sent.
+    pub jpeg_bytes: usize,
+}
+
+/// Run the preview pipeline over `path` with `params` and report what came out.
+///
+/// This never fails: a file the pipeline cannot handle is the answer, in the
+/// file's own classification (`unreadable`, `no_preview`, `preview_broken`).
+pub fn check_file(path: &Path, params: &Params) -> FileCheck {
+    let outcome = preview::extract(path).and_then(|embedded| {
+        let encoded = preprocess::render(&embedded, params)?;
+        Ok(FileFacts {
+            stored_width: embedded.width,
+            stored_height: embedded.height,
+            orientation: embedded.orientation,
+            width: encoded.width,
+            height: encoded.height,
+            jpeg_bytes: encoded.jpeg.len(),
+        })
+    });
+    FileCheck {
+        path: path.to_path_buf(),
+        outcome,
+    }
+}
+
+/// `bytes` as a rounded number of kilobytes, for a sentence a person reads.
+fn kilobytes(bytes: usize) -> String {
+    format!("{} KB", bytes.div_ceil(1024))
 }
 
 /// Check `alias` against the server behind `client`, and explain the result.

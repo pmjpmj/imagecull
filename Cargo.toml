@@ -20,3 +20,9 @@ ureq = "=3.5.0"
 # surfaces now, not in the middle of the extraction ticket.
 raw-files = "=0.6.0"
 image = "=0.25.10"
+# M1: the downscale step (spec §6.4 wants Lanczos3, single pass) and the
+# NFC normalisation that makes filename order stable across machines
+# (spec §8.3).
+fast_image_resize = { version = "=6.1.0", features = ["image"] }
+unicode-normalization = "=0.1.26"
+tempfile = "=3.27.0"

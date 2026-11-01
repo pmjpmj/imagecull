@@ -12,3 +12,9 @@ serde_json = { workspace = true }
 ureq = { workspace = true }
 raw-files = { workspace = true }
 image = { workspace = true }
+fast_image_resize = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+image = { workspace = true }

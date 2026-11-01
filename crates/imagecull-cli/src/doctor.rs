@@ -1,27 +1,44 @@
-//! `imagecull doctor`: one sentence about whether this server can score.
+//! `imagecull doctor`: one sentence about whether this server can score, and,
+//! given a file, one about whether that file survives the preview pipeline.
 //!
 //! The diagnosis itself is in `imagecull_core::doctor`; this module only picks
 //! the stream and the exit code.
 
+use imagecull_core::ExitCode;
 use imagecull_core::doctor;
+use imagecull_core::preprocess::Params;
 
-use crate::{EXIT_FATAL, ServerArgs};
+use crate::cli::DoctorArgs;
 
 /// Run the command and return the process exit code.
-pub fn run(args: &ServerArgs) -> u8 {
-    let client = match args.client() {
-        Ok(client) => client,
+pub fn run(args: &DoctorArgs) -> u8 {
+    let mut code = match args.server.client() {
+        Ok(client) => {
+            let report = doctor::diagnose(&client, &args.server.model);
+            if report.is_ready() {
+                println!("ok: {}", report.message());
+            } else {
+                eprintln!("error: {}", report.message());
+            }
+            report.exit().code()
+        }
         Err(message) => {
             eprintln!("error: {message}");
-            return EXIT_FATAL;
+            ExitCode::Fatal.code()
         }
     };
 
-    let report = doctor::diagnose(&client, &args.model);
-    if report.is_ready() {
-        println!("ok: {}", report.message());
-    } else {
-        eprintln!("error: {}", report.message());
+    // The file check is a separate proof and runs either way: a photographer
+    // whose server is down still wants to know their camera's output works.
+    if let Some(file) = &args.file {
+        let check = doctor::check_file(file, &Params::default());
+        if check.is_ok() {
+            println!("ok: {}", check.message());
+        } else {
+            eprintln!("error: {}", check.message());
+            code = ExitCode::Fatal.code();
+        }
     }
-    report.exit().code()
+
+    code
 }

@@ -8,7 +8,7 @@
 use imagecull_core::ExitCode;
 use imagecull_core::omlx::{Catalog, MIN_DECISION_VERSION};
 
-use crate::{EXIT_FATAL, ServerArgs};
+use crate::cli::ServerArgs;
 
 /// Run the command and return the process exit code.
 pub fn run(args: &ServerArgs) -> u8 {
@@ -16,7 +16,7 @@ pub fn run(args: &ServerArgs) -> u8 {
         Ok(client) => client,
         Err(message) => {
             eprintln!("error: {message}");
-            return EXIT_FATAL;
+            return ExitCode::Fatal.code();
         }
     };
 
