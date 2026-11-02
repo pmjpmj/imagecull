@@ -48,69 +48,58 @@ fn the_budget_is_the_measured_configuration_and_not_a_guess() {
 }
 
 #[test]
-fn the_instructions_are_ranked_gates_and_never_carry_the_source_indentation() {
+fn the_instructions_judge_the_frame_whole_and_never_carry_the_source_indentation() {
     let instructions = keeper::INSTRUCTIONS;
 
-    for gate in [
-        "1. Sharp and still, above all else",
-        "2. The moment",
-        "3. Facing the camera",
-        "4. Composition",
-        "5. Light kept, last of the gates",
-    ] {
-        assert!(
-            instructions.contains(gate),
-            "the gates are ranked, and {gate} is one of them: {instructions}"
-        );
-    }
-    let ranked: Vec<usize> = [
-        "1. Sharp and still",
-        "2. The moment",
-        "3. Facing the camera",
-        "4. Composition",
-        "5. Light kept",
-    ]
-    .iter()
-    .map(|gate| {
-        instructions
-            .find(gate)
-            .unwrap_or_else(|| panic!("{gate} is missing from the ranking: {instructions}"))
-    })
-    .collect();
     assert!(
-        ranked.windows(2).all(|pair| pair[0] < pair[1]),
-        "the gates appear in rank order, sharpness first and light last: {instructions}"
+        instructions.contains(
+            "Read each frame for what it is trying to be — a portrait, a landscape, an event, a \
+             street frame, a snapshot"
+        ),
+        "no genre is assumed, so a group's frames are read on their own terms: {instructions}"
     );
     assert!(
-        instructions.contains("rule 1 decides by itself, and rules 2 to 5 only separate frames"),
-        "crispness outranks every other gate, and says so: {instructions}"
+        instructions.contains("without holding it to something it never aimed at"),
+        "the comparison must not punish a frame for not being the genre it never aimed at: \
+         {instructions}"
     );
     assert!(
-        instructions.contains("a sharp frame beats a softer frame with the better expression"),
-        "the trade-off is named, not left to the choice head: {instructions}"
+        instructions.contains(
+            "A distinctive moment, gesture, expression or quality of light counts for more than \
+             clinical perfection"
+        ),
+        "the trade-off `general` makes is made here too, or the two commands disagree about the \
+         same folder: {instructions}"
     );
     assert!(
-        instructions.contains("If every frame fails this rule, keep the sharpest and stillest"),
-        "a soft burst still names a frame: {instructions}"
+        instructions.contains(
+            "a frame that is slightly soft but holds something beats a sharp frame in which \
+             nothing happens"
+        ),
+        "the soft frame holding the moment keeps winning: {instructions}"
     );
     assert!(
-        instructions.contains("its eyes or face, or its principal detail, crisp"),
-        "a face at 512 px cannot be asked about eye by eye: {instructions}"
-    );
-    assert!(
-        instructions.contains("looking towards the camera with its face turned to it"),
-        "the shoot's preference for direct address is stated, not implied: {instructions}"
-    );
-    assert!(
-        instructions.contains("keep the more pleasant picture")
-            && instructions.contains("the calmer background")
-            && instructions.contains("the more natural pose"),
-        "`pleasant` is operationalised rather than left to the choice head: {instructions}"
+        instructions.contains("cannot carry the picture")
+            && instructions.contains("is not the one to keep, however good its moment"),
+        "the stance stops at misuse, so an unusable frame never wins on its moment alone: \
+         {instructions}"
     );
     assert!(
         instructions.contains("Do not prefer a frame because it is first"),
         "position was measured deciding a pick the comparison should decide: {instructions}"
     );
+    for retired in [
+        "Sharp and still, above all else",
+        "a sharp frame beats a softer frame with the better expression",
+        "looking towards the camera with its face turned to it",
+        "The rules are ranked",
+    ] {
+        assert!(
+            !instructions.contains(retired),
+            "sharpness-first was retired with the ranked gates, and `{retired}` must not come \
+             back without a new measurement: {instructions}"
+        );
+    }
     assert!(
         instructions.ends_with("Answer with the key of that frame."),
         "the answer is a key and nothing else: {instructions}"
