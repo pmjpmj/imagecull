@@ -770,6 +770,36 @@ fn a_server_nobody_named_still_posts_where_it_always_did() {
 }
 
 #[test]
+fn only_the_omlx_path_is_the_one_doctor_and_models_can_read() {
+    // `doctor` and `models` read oMLX's own probes, and no other server has
+    // them. The question is asked of the path template, so a server that keeps
+    // oMLX's fixed path is oMLX to these two commands and a server that puts
+    // its model in the path is not.
+    assert!(
+        Resolved::default().settle(None).asks_omlx(),
+        "a file that names no path posts to oMLX's"
+    );
+    assert!(
+        resolved("[server]\npath = \"/v1/systemone\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "naming oMLX's path explicitly is the same path"
+    );
+    assert!(
+        !resolved("[server]\npath = \"/{model}\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "a template with a model in it is another server's addressing"
+    );
+    assert!(
+        !resolved("[server]\npath = \"/v1/decisions\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "and so is any fixed path that is not oMLX's"
+    );
+}
+
+#[test]
 fn a_brace_that_never_closes_is_not_a_placeholder() {
     // A placeholder is `{…}`. An unclosed brace is a typo the server will 404
     // on, not a template this validator has anything to say about.

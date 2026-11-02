@@ -1035,6 +1035,53 @@ fn a_server_that_predates_decision_models_fails_preflight() {
 }
 
 #[test]
+fn a_workers_ai_run_asks_no_omlx_probe_before_its_first_decision() {
+    // Workers AI has no `/health` and no listing fit for a one-shot check, so
+    // the run's preflight is skipped rather than improvised: inventing a probe
+    // would spend a request per run to prove a token works, where the 401 rule
+    // costs one request total and says something useful. The first request of a
+    // Workers AI run is therefore the decision itself.
+    let shoot = shoot(1);
+    let stub = Stub::scripted(vec![(200, answer_document())]);
+    let adapter = workers_ai_adapter(&stub, WORKERS_AI_MODEL, workers_ai_wire(), None)
+        .expect("a model id fills the path");
+    let config = Config::new(
+        Builtin::General.rubric().expect("parse"),
+        Some(WORKERS_AI_MODEL.to_string()),
+        Params::default(),
+        ingest::ScanOptions::default(),
+        None,
+        support::unwatched(),
+    );
+
+    let run = scoring::run(
+        shoot.path(),
+        &config,
+        &adapter,
+        &imagecull_core::sidecar::Filesystem,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run against a server with no oMLX probes");
+
+    assert_eq!(run.scored(), 1, "the frame was rated");
+    let requests = stub.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a run that probes nothing makes exactly its decision: {:?}",
+        requests
+            .iter()
+            .map(|request| &request.path)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        requests[0].path, "/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash",
+        "and that request is the model's path, not /health, /v1/models or /v1/models/status"
+    );
+}
+
+#[test]
 fn a_run_against_a_server_that_does_not_serve_the_alias_never_asks_a_question() {
     let shoot = shoot(2);
     let stub = Stub::serving(Vec::new(), &["clef-27b-oQ4e"]);

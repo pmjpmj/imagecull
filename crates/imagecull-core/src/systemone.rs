@@ -24,8 +24,19 @@ use crate::scoring::{Decider, Request, Response, State};
 /// The path a decision model is served on by default (spec §7.1).
 ///
 /// It is oMLX's, which is why it is the default [`Wire`] and what `config.rs`
-/// settles to; nothing in the adapter reads the constant itself.
+/// settles to. The two places that ask the question ask [`is_omlx`], so a run and
+/// its preflight cannot disagree about which server they are addressing.
 pub const PATH: &str = "/v1/systemone";
+
+/// Whether a path template addresses oMLX's own decision path, the one whose
+/// probes `doctor` and `models` read.
+///
+/// Asked by [`crate::config::Effective::asks_omlx`], which decides whether those
+/// commands run at all, and by [`Adapter::preflight`], which skips oMLX's
+/// diagnosis when the answer is no.
+pub fn is_omlx(path: &str) -> bool {
+    path == PATH
+}
 
 /// The one placeholder a path template may carry.
 const MODEL_PLACEHOLDER: &str = "{model}";
@@ -121,7 +132,16 @@ impl Decider for Adapter {
     /// ([`crate::doctor::Report::can_score`] has the list). `imagecull doctor`
     /// stays strict, so the strictness is available where it is useful —
     /// explaining a server — and does not stop a working one from scoring.
+    ///
+    /// A path that is not oMLX's is not asked at all: Workers AI has no
+    /// `/health` and no model listing suitable for a one-shot check, and
+    /// spending a decision request per run to prove the token works is worse
+    /// than the 401 rule, which costs one request and names the variable to
+    /// check. So the preflight is skipped, not faked.
     fn preflight(&self) -> Result<()> {
+        if !is_omlx(&self.path) {
+            return Ok(());
+        }
         let report = doctor::diagnose(&self.client, &self.model);
         if report.can_score() {
             Ok(())

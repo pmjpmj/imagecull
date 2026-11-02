@@ -768,6 +768,18 @@ pub struct Effective {
 }
 
 impl Effective {
+    /// Whether this run addresses oMLX's own decision path, the one whose probes
+    /// `doctor` and `models` read. A template with `{model}` in it is some other
+    /// server's addressing, and neither command can say anything about it.
+    ///
+    /// The comparison itself is [`systemone::is_omlx`], which
+    /// [`systemone::Adapter::preflight`] also asks. So the two commands that
+    /// refuse a non-oMLX path and the preflight that skips oMLX's diagnosis
+    /// cannot come to different conclusions about the same config.
+    pub fn asks_omlx(&self) -> bool {
+        systemone::is_omlx(&self.path)
+    }
+
     /// What the request body's `model` field should say: the selector when the
     /// file named one, and the model id whole otherwise.
     ///

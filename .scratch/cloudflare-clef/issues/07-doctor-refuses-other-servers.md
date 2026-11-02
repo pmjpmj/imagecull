@@ -1,6 +1,6 @@
 # 07: `doctor`/`models` refuse a non-oMLX path; the run's preflight is skipped
 
-Status: ready-for-agent
+Status: resolved (2026-11-02)
 Type: task
 Blocked by: 04
 Spec: `.scratch/cloudflare-clef/spec.md`
@@ -63,3 +63,31 @@ to prove the token works is worse than the 401 rule in ticket 06, which costs on
 - `crates/imagecull-core/tests/systemone_http.rs`: a `score`/`decide` run against a
   Workers AI config issues **no** `/health`, `/v1/models` or `/v1/models/status`
   request before its first decision — one mock asserting exactly the decision POST.
+
+## Comments
+
+**Implemented 2026-11-02.** `Effective::asks_omlx` decides, `cli::refuse_other_server`
+says, `Adapter::preflight` skips, and one mock per command proves the refusal
+costs no request. Five notes:
+
+1. **The comparison moved into `systemone::is_omlx`.** The ticket's code sketch put
+   `self.path == systemone::PATH` in `asks_omlx`, with `preflight` comparing the
+   same thing separately. Two comparisons of the same rule can drift, so both now
+   call `systemone::is_omlx` — the predicate is still `asks_omlx`, and `PATH`'s doc
+   no longer claims the adapter never reads it.
+2. **`cli.rs` reads it, as the ticket asked.** `refuse_other_server(effective,
+   command, reads) -> Option<u8>` asks `asks_omlx`, prints the message and hands back
+   `ExitCode::Fatal`, so `doctor.rs` and `models.rs` are one `if let` each rather
+   than two copies of the same guard. Only the probe list differs: `doctor` names
+   three endpoints, `models` names the two listings it joins.
+3. **The file check is refused with the server check.** `doctor` returns before
+   `check_file` runs at all, so `doctor <FILE>` says one thing — the refusal — and
+   nothing else; `score --dry-run` writes the same previews. Tested with a path
+   that does not exist, which would otherwise have produced an error of its own.
+4. **`models` shares the new `tests/doctor_command.rs`.** The ticket said "a new
+   `doctor_command.rs` if none exists"; there was none, so both commands' refusals
+   live there, each against a real stub asserting `requests()` is empty.
+5. **A trailing slash is not oMLX.** `asks_omlx` compares the template exactly, as
+   the ticket prescribed, so `path = "/v1/systemone/"` is refused as another
+   server's. That is a config typo whose run would 404 anyway; trimming it would
+   be a guess about the server rather than about the config.

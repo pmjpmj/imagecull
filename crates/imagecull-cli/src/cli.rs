@@ -1,15 +1,17 @@
 //! The command line itself: what a photographer types.
 //!
-//! Only arguments live here — no rendering, no decisions. Every flag maps to a
-//! core value, so nothing about the pipeline can be reachable only from the
-//! terminal; and no default is filled here either, because a config file may
-//! supply it. Each command asks [`CommonArgs::effective`] for the values it will
-//! actually use, which is why the flags are `Option<T>`: this layer has to say
-//! "the photographer did not say" without guessing what the answer is.
+//! Only arguments and the strings that follow from them live here — no
+//! decisions about a run, and no output a core type could have described. Every
+//! flag maps to a core value, so nothing about the pipeline can be reachable only
+//! from the terminal; and no default is filled here either, because a config file
+//! may supply it. Each command asks [`CommonArgs::effective`] for the values it
+//! will actually use, which is why the flags are `Option<T>`: this layer has to
+//! say "the photographer did not say" without guessing what the answer is.
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use imagecull_core::ExitCode;
 use imagecull_core::config::{self, Effective, Loaded, Resolved};
 use imagecull_core::group;
 use imagecull_core::ingest::ScanOptions;
@@ -163,6 +165,37 @@ impl CommonArgs {
             token,
         ))
     }
+}
+
+/// Refuse a config that addresses some other server, for the two commands that
+/// read oMLX's own endpoints: prints what the command would have read, the URL
+/// this run actually posts to, and the two commands that do work there, and says
+/// which exit code the command owes when it does. `None` is "this run addresses
+/// oMLX, carry on".
+///
+/// The URL is the endpoint and the path template *as configured*, never the
+/// interpolated path: filling the template needs a model these commands were not
+/// given, and a message about a URL the config does not contain would send the
+/// photographer looking for a key that is not there.
+///
+/// `reads` is the probe list the command depends on, said in its own words —
+/// `doctor` reads three endpoints, `models` joins two listings — because that
+/// difference is the whole diagnosis.
+///
+/// The question is [`Effective::asks_omlx`], never a second comparison here: a
+/// run's preflight asks it too, and the two must not disagree.
+pub fn refuse_other_server(effective: &Effective, command: &str, reads: &str) -> Option<u8> {
+    if effective.asks_omlx() {
+        return None;
+    }
+    eprintln!(
+        "error: {command} reads {reads}, and this run posts to {}{} instead — there is nothing for \
+         it to check. imagecull score and imagecull groups work against any SystemOne server; only \
+         doctor and models are oMLX-only.",
+        effective.endpoint.trim_end_matches('/'),
+        effective.path
+    );
+    Some(ExitCode::Fatal.code())
 }
 
 #[derive(Args, Debug)]

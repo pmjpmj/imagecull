@@ -8,8 +8,12 @@
 use imagecull_core::ExitCode;
 use imagecull_core::omlx::{Catalog, MIN_DECISION_VERSION};
 
-use crate::cli::CommonArgs;
+use crate::cli::{self, CommonArgs};
 use crate::progress::plural;
+
+/// The two listings `models` joins, named in the refusal to a server that does
+/// not serve them.
+const LISTINGS: &str = "oMLX's model listing (GET /v1/models and GET /v1/models/status)";
 
 /// Run the command and return the process exit code.
 pub fn run(args: &CommonArgs) -> u8 {
@@ -20,6 +24,14 @@ pub fn run(args: &CommonArgs) -> u8 {
             return ExitCode::Fatal.code();
         }
     };
+
+    // The catalogue this command reads is oMLX's, and no other server has it:
+    // asking for `/v1/models` where a model *is* the path would report a 404 as
+    // a server with nothing loaded. The refusal comes before a client is built,
+    // so it costs no request.
+    if let Some(code) = cli::refuse_other_server(&effective, "models", LISTINGS) {
+        return code;
+    }
     let client = match args.client(&effective) {
         Ok(client) => client,
         Err(message) => {
