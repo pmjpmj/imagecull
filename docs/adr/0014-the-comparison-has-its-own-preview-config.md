@@ -123,3 +123,12 @@ migration is one error message per file and there is still one spelling per key.
 The preview split itself — two pairs, one per kind of request, `[group]`'s pair
 defaulting to the measured 512 px — stands unchanged; it is now `[score] max_edge`
 beside `[group] max_edge`.
+
+**ADR 0018 moved `max` as well, and kept `floor`.** `Budget` held `max` and
+`floor` as "facts about the model" a run could not move. Half of that survived:
+the confidence floor is a measurement of the answer's quality, and it is still a
+constant, but twenty frames per request was always the *reference server's*
+measured batch. Workers AI takes four, so `[group] max_images` sets it and
+`Budget::max` is a default a run may lower — the same argument this ADR made for
+the edge, arriving at the other number. `chunk` splits a group by the cap, so a
+smaller batch costs requests and changes no verdict.

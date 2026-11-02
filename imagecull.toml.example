@@ -26,13 +26,35 @@
 # `--quiet`/`--verbose`.
 
 [server]
-# Base URL of the local oMLX server. Default: http://127.0.0.1:8000
+# Base URL of the server this run talks to: a local oMLX by default, and any host
+# speaking the same decision API when something else is named here. Default:
+# http://127.0.0.1:8000
 endpoint = "http://127.0.0.1:8000"
+# The request path, as a template: `{model}` becomes the model id, verbatim and
+# unencoded — a Workers AI id contains `/` and `@`, and encoding them would
+# address something else. Default: /v1/systemone (oMLX's fixed path)
+# path = "/v1/systemone"
 # Model alias to ask. `score` defaults to the rubric's own alias; `groups`,
 # `doctor` and `models` default to clef-flash-oQ4e when neither this nor
 # `--model` is given. Changing the alias changes the rubric hash, and two runs
 # with different hashes are not comparable.
 # model = "clef-flash-oQ4e"
+# What the request body's `model` field says, when the server wants a selector
+# (`clef-flash` on Workers AI) rather than the model id. Default: the model,
+# whole — which is what oMLX, Vultr and DeepInfra read.
+# selector = "clef-flash"
+# The environment variable a bearer token is read from, for a server that wants
+# one. The variable wins over `token` below. Default: no token source, so no
+# Authorization header is sent.
+# token_env = "CLOUDFLARE_API_TOKEN"
+# A literal bearer token, for a machine whose environment cannot hold one.
+# Default: none — `token_env` is where a token belongs. A secret in a file that
+# travels with a shoot folder is one `git add` away from being published; the
+# variable is the default for a reason.
+# token = "..."
+# Whether the body carries oMLX's `truncate: true`. Workers AI's schema does not
+# list the field, so a Workers AI config sets false and sends none. Default: true
+# truncate = true
 # Read timeout, in seconds. Default: 120
 # timeout = 120
 
@@ -123,3 +145,36 @@ endpoint = "http://127.0.0.1:8000"
 # scheduling, not algorithm, so it does not enter the grouping hash either.
 # Default: 20
 # max_images = 20
+
+# ---------------------------------------------------------------------------
+# Rating a shoot with Cloudflare's hosted Clef (Workers AI)
+#
+# Requires an account id and an API token with Workers AI:Read. Export the token
+# first — it is read from the environment, never from this file:
+#
+#     export CLOUDFLARE_API_TOKEN=...
+#
+# then copy the block below into your shoot's imagecull.toml, in place of the
+# `[server]` keys above. The rest of this file — `[scan]`, the rating's other
+# keys — is unchanged.
+#
+# recipe begins
+# [server]
+# endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run"
+# path = "/{model}"
+# model = "@cf/cloudflare/clef-flash"
+# selector = "clef-flash"
+# token_env = "CLOUDFLARE_API_TOKEN"
+# truncate = false
+#
+# [score]
+# max_edge = 1024      # Workers AI resizes past ~1 MP, so 1568 buys nothing
+#
+# [group]
+# max_images = 4       # Workers AI's per-request cap; a bigger burst is split
+# recipe ends
+#
+# `score` and `groups` work against it as they do against oMLX. `doctor` and
+# `models` do not: they read oMLX's own probes, and refuse this config by name
+# rather than inventing a diagnosis they have no endpoint for.
+# ---------------------------------------------------------------------------

@@ -1056,6 +1056,110 @@ fn the_committed_example_parses() {
         .expect("imagecull.toml.example must be a valid config");
 }
 
+#[test]
+fn the_workers_ai_recipe_in_the_example_is_a_config_that_parses() {
+    // The example ends with a Workers AI recipe a photographer pastes over their
+    // account id: commented out, so the test above never sees it. One key
+    // renamed in the loader and the recipe rots into a file imagecull refuses —
+    // discovered after the photographer has filled in their account.
+    let recipe = recipe_block(include_str!("../../../imagecull.toml.example"));
+    let effective = ConfigFile::from_toml(&recipe)
+        .expect("the example's recipe must be a config imagecull accepts")
+        .resolve(None)
+        .settle(None);
+
+    assert_eq!(
+        effective.path, "/{model}",
+        "the id is the path on Workers AI"
+    );
+    assert_eq!(
+        effective.model.as_deref(),
+        Some("@cf/cloudflare/clef-flash"),
+        "the path template needs the model id"
+    );
+    assert_eq!(
+        effective.selector.as_deref(),
+        Some("clef-flash"),
+        "the body says the selector, not the id"
+    );
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert!(
+        !effective.truncate,
+        "Workers AI's schema lists no truncate, so the recipe must not send one"
+    );
+    assert_eq!(
+        effective.max_images, 4,
+        "Workers AI takes four images a request"
+    );
+    assert_eq!(effective.score_params.max_edge, 1024);
+    assert!(
+        !effective.asks_omlx(),
+        "the recipe addresses another server"
+    );
+}
+
+#[test]
+fn the_readme_recipe_and_the_example_recipe_describe_the_same_server() {
+    // The README repeats the recipe so a photographer need not open a second
+    // file, which makes it the copy that can rot without a test noticing: the
+    // one above only ever reads the example.
+    let readme = fenced_recipe(include_str!("../../../README.md"));
+    let example = recipe_block(include_str!("../../../imagecull.toml.example"));
+    let settle = |text: &str| {
+        ConfigFile::from_toml(text)
+            .expect("a recipe a reader pastes must be a config imagecull accepts")
+            .resolve(None)
+            .settle(None)
+    };
+
+    assert_eq!(
+        settle(&readme),
+        settle(&example),
+        "the two copies of the Workers AI recipe must describe the same server"
+    );
+}
+
+/// The first fenced `toml` block in a document that names an account id: the
+/// Workers AI recipe a README shows whole, rather than commented out.
+fn fenced_recipe(document: &str) -> String {
+    for block in document.split("```toml").skip(1) {
+        let body = block.split("```").next().unwrap_or_default();
+        if body.contains("<ACCOUNT_ID>") {
+            return body.trim_start_matches('\n').to_string();
+        }
+    }
+    panic!("no ```toml block naming <ACCOUNT_ID> in the document");
+}
+
+/// The commented recipe an example file carries between its two rules, with the
+/// comment markers taken off: the config a photographer would paste.
+fn recipe_block(example: &str) -> String {
+    const BEGINS: &str = "recipe begins";
+    const ENDS: &str = "recipe ends";
+    let mut recipe = String::new();
+    let mut inside = false;
+    for line in example.lines() {
+        if line.contains(ENDS) {
+            break;
+        }
+        if inside {
+            let text = line
+                .strip_prefix("# ")
+                .or_else(|| line.strip_prefix('#'))
+                .unwrap_or(line);
+            recipe.push_str(text);
+            recipe.push('\n');
+        } else if line.contains(BEGINS) {
+            inside = true;
+        }
+    }
+    assert!(
+        inside,
+        "the example must carry a '{BEGINS}' … '{ENDS}' recipe"
+    );
+    recipe
+}
+
 /// Write a user-level config under `base`, the way discovery expects it.
 fn write_user_config(base: &Path, text: &str) {
     let dir = base.join(config::USER_CONFIG_DIR);

@@ -32,6 +32,19 @@ _Avoid_: session, job, batch, process
 The act of deciding which frames to keep. The tool rates every frame and marks
 the ones that lost their group; the photographer decides what to do about them.
 
+### The server
+
+**Server**:
+The HTTP service a run asks for one rating per request, speaking the SystemOne
+decision API — a local oMLX by default, and any host speaking that API when
+`[server]` names one. A server is described by its wire, never by its vendor.
+_Avoid_: backend, provider, model host, cloud
+
+**Token**:
+The bearer credential a configured server may demand, read from the environment
+variable `[server] token_env` names and never written anywhere a run writes.
+_Avoid_: API key, secret, password, credential
+
 ### How frames relate
 
 **Group**:
