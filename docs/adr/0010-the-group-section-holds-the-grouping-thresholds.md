@@ -109,3 +109,12 @@ about where the numbers came from needs to be written down for the hash to work.
 - `Resolved` and `Effective` lose `Eq` (they now carry `f64`). `PartialEq` is
   what the tests and the merge need; nothing compared an effective config for
   total equality.
+
+**ADR 0016 moved `[run] shoot_context` to `[score] shoot_context`.** The "keys
+under `[run]`" option below is now the file's shape for every rating key, so the
+one key a cull borrows from a rating's section is `shoot_context`. The `[preview]
+jpeg_quality` note in this ADR's consequences was already superseded by ADR 0014
+and is now superseded again by ADR 0016, which renames the pair `[score] max_edge`
+/ `jpeg_quality`. The decision this ADR records — a section holding the grouping
+thresholds, and `groups` reading the file through the one merge — stands
+unchanged; only the section names in its consequences moved.

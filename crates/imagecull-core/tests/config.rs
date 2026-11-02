@@ -21,17 +21,13 @@ endpoint = "http://192.168.1.9:8000"
 model = "clef-27b-oQ4e"
 timeout = 300
 
-[preview]
-max_edge = 1024
-jpeg_quality = 72
-
 [scan]
 recursive = true
 
-[outputs]
+[score]
+max_edge = 1024
+jpeg_quality = 72
 json_scores = "answers.json"
-
-[run]
 rubric = "mine.toml"
 shoot_context = "night street, pushed two stops"
 dedupe = false
@@ -78,7 +74,7 @@ fn a_file_may_set_only_the_section_it_cares_about() {
         Some("http://127.0.0.1:9000"),
         "the server section is enough on its own"
     );
-    assert_eq!(resolved.max_edge, None, "and the rest stays unset");
+    assert_eq!(resolved.score_max_edge, None, "and the rest stays unset");
     assert_eq!(resolved.rubric, None);
 }
 
@@ -91,8 +87,8 @@ fn every_key_reaches_the_resolved_values() {
     );
     assert_eq!(resolved.model.as_deref(), Some("clef-27b-oQ4e"));
     assert_eq!(resolved.timeout, Some(300));
-    assert_eq!(resolved.max_edge, Some(1024));
-    assert_eq!(resolved.jpeg_quality, Some(72));
+    assert_eq!(resolved.score_max_edge, Some(1024));
+    assert_eq!(resolved.score_jpeg_quality, Some(72));
     assert_eq!(resolved.recursive, Some(true));
     assert_eq!(resolved.json_scores, Some(PathBuf::from("answers.json")));
     assert_eq!(
@@ -110,14 +106,14 @@ fn every_key_reaches_the_resolved_values() {
     assert_eq!(
         resolved.group_max_edge,
         Some(700),
-        "a comparison's edge is its own key, not [preview]'s"
+        "a comparison's edge is its own key, not [score]'s"
     );
     assert_eq!(resolved.group_jpeg_quality, Some(60));
 }
 
 #[test]
 fn an_unknown_key_is_fatal_and_names_itself() {
-    let message = error("[preview]\nmax_edeg = 1568\n");
+    let message = error("[score]\nmax_edeg = 1568\n");
     assert!(
         message.contains("max_edeg"),
         "the message must name the key that has to change: {message}"
@@ -143,11 +139,60 @@ fn the_deleted_rewrite_interval_is_an_unknown_key() {
 }
 
 #[test]
+fn the_retired_sections_name_the_key_that_replaced_them() {
+    for (text, old, new) in [
+        (
+            "[preview]\nmax_edge = 1024\n",
+            "preview.max_edge",
+            "score.max_edge",
+        ),
+        (
+            "[preview]\njpeg_quality = 72\n",
+            "preview.jpeg_quality",
+            "score.jpeg_quality",
+        ),
+        (
+            "[outputs]\njson_scores = \"answers.json\"\n",
+            "outputs.json_scores",
+            "score.json_scores",
+        ),
+        (
+            "[run]\nrubric = \"holiday\"\n",
+            "run.rubric",
+            "score.rubric",
+        ),
+        (
+            "[run]\nshoot_context = \"dusk\"\n",
+            "run.shoot_context",
+            "score.shoot_context",
+        ),
+        ("[run]\ndedupe = false\n", "run.dedupe", "score.dedupe"),
+    ] {
+        let message = error(text);
+        assert!(
+            message.contains(old) && message.contains(new),
+            "rejecting {text:?} must name {old} and where it went ({new}): {message}"
+        );
+    }
+}
+
+#[test]
+fn a_retired_key_is_refused_before_its_value_is_judged() {
+    // The move is the mistake to report; the range of a key about to be moved
+    // is not. Otherwise a file migrated by halves loses the useful message.
+    let message = error("[preview]\njpeg_quality = 101\n");
+    assert!(
+        message.contains("score.jpeg_quality"),
+        "the move has to be named first: {message}"
+    );
+}
+
+#[test]
 fn a_value_the_flags_would_reject_is_fatal() {
     let cases = [
-        ("[preview]\nmax_edge = 0\n", "max_edge"),
-        ("[preview]\njpeg_quality = 0\n", "jpeg_quality"),
-        ("[preview]\njpeg_quality = 101\n", "jpeg_quality"),
+        ("[score]\nmax_edge = 0\n", "max_edge"),
+        ("[score]\njpeg_quality = 0\n", "jpeg_quality"),
+        ("[score]\njpeg_quality = 101\n", "jpeg_quality"),
         ("[group]\nmax_edge = 0\n", "group.max_edge"),
         ("[group]\njpeg_quality = 0\n", "group.jpeg_quality"),
         ("[group]\njpeg_quality = 101\n", "group.jpeg_quality"),
@@ -177,7 +222,7 @@ fn a_value_the_flags_would_reject_is_fatal() {
 #[test]
 fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
     for text in [
-        "[preview]\njpeg_quality = 101\n",
+        "[score]\njpeg_quality = 101\n",
         "[group]\njpeg_quality = 101\n",
     ] {
         let message = error(text);
@@ -213,7 +258,7 @@ fn a_relative_path_is_anchored_to_the_files_own_directory() {
 fn an_absolute_path_is_left_alone() {
     let base = Path::new("/Volumes/Shoot A");
     let file = ConfigFile::from_toml(
-        "[run]\nrubric = \"/etc/rubrics/mine.toml\"\n[outputs]\njson_scores = \"/tmp/answers.json\"\n",
+        "[score]\nrubric = \"/etc/rubrics/mine.toml\"\njson_scores = \"/tmp/answers.json\"\n",
     )
     .expect("a valid config");
     let resolved = file.resolve(Some(base));
@@ -231,20 +276,23 @@ fn an_absolute_path_is_left_alone() {
 fn the_flags_win_over_the_file() {
     let file = resolved(EVERY_KEY);
     let flags = Resolved {
-        max_edge: Some(1568),
+        score_max_edge: Some(1568),
         model: Some("clef-flash-oQ4e".to_string()),
         json_scores: Some(PathBuf::from("elsewhere.json")),
         ..Resolved::default()
     };
     let effective = file.override_with(flags).settle(None);
-    assert_eq!(effective.params.max_edge, 1568, "--max-edge beat the file");
+    assert_eq!(
+        effective.score_params.max_edge, 1568,
+        "--max-edge beat the file"
+    );
     assert_eq!(effective.model.as_deref(), Some("clef-flash-oQ4e"));
     assert_eq!(
         effective.outputs.json_scores,
         Some(PathBuf::from("elsewhere.json"))
     );
     assert_eq!(
-        effective.params.jpeg_quality, 72,
+        effective.score_params.jpeg_quality, 72,
         "a flag that said nothing leaves the file's value alone"
     );
     assert_eq!(
@@ -282,12 +330,12 @@ fn a_groups_flag_wins_over_the_file() {
 fn the_comparison_has_its_own_preview_pair() {
     let effective = resolved(EVERY_KEY).settle(None);
     assert_eq!(
-        effective.params,
+        effective.score_params,
         Params {
             max_edge: 1024,
             jpeg_quality: 72,
         },
-        "[preview] is the pair a rating sends"
+        "[score] is the pair a rating sends"
     );
     assert_eq!(
         effective.group_params,
@@ -303,13 +351,13 @@ fn the_comparison_has_its_own_preview_pair() {
 fn a_scores_preview_flag_leaves_the_comparisons_pair_alone() {
     let file = resolved(EVERY_KEY);
     let flags = Resolved {
-        max_edge: Some(1568),
-        jpeg_quality: Some(88),
+        score_max_edge: Some(1568),
+        score_jpeg_quality: Some(88),
         ..Resolved::default()
     };
     let effective = file.override_with(flags).settle(None);
     assert_eq!(
-        effective.params,
+        effective.score_params,
         Params {
             max_edge: 1568,
             jpeg_quality: 88,
@@ -343,7 +391,7 @@ fn a_culls_preview_flag_leaves_the_scores_pair_alone() {
         "groups --max-edge beat the file's comparison edge"
     );
     assert_eq!(
-        effective.params,
+        effective.score_params,
         Params {
             max_edge: 1024,
             jpeg_quality: 72,
@@ -366,8 +414,8 @@ fn a_whole_number_is_a_threshold_like_any_other() {
 #[test]
 fn the_file_wins_over_the_built_in_default() {
     let effective = resolved(EVERY_KEY).settle(None);
-    assert_eq!(effective.params.max_edge, 1024);
-    assert_eq!(effective.params.jpeg_quality, 72);
+    assert_eq!(effective.score_params.max_edge, 1024);
+    assert_eq!(effective.score_params.jpeg_quality, 72);
     assert_eq!(effective.timeout, 300);
     assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
     assert!(!effective.dedupe);
@@ -395,7 +443,7 @@ fn an_empty_source_settles_to_the_specs_defaults() {
         "no alias means the rubric's own alias, which is part of its hash"
     );
     assert_eq!(effective.timeout, 120);
-    assert_eq!(effective.params, Params::default());
+    assert_eq!(effective.score_params, Params::default());
     assert_eq!(
         effective.group_params,
         Params {
@@ -429,12 +477,12 @@ fn the_source_is_kept_for_provenance() {
 #[test]
 fn a_rubric_name_selects_a_built_in_and_a_path_names_a_file() {
     assert_eq!(
-        resolved("[run]\nrubric = \"holiday\"\n").rubric,
+        resolved("[score]\nrubric = \"holiday\"\n").rubric,
         Some(RubricSource::Builtin(Builtin::Holiday)),
         "a bare name is a built-in, exactly as on the command line"
     );
     assert_eq!(
-        resolved("[run]\nrubric = \"rubrics/mine.toml\"\n").rubric,
+        resolved("[score]\nrubric = \"rubrics/mine.toml\"\n").rubric,
         Some(RubricSource::File(PathBuf::from("rubrics/mine.toml")))
     );
 }
@@ -442,7 +490,7 @@ fn a_rubric_name_selects_a_built_in_and_a_path_names_a_file() {
 #[test]
 fn a_name_is_not_anchored_to_the_config_files_directory() {
     let base = Path::new("/Volumes/Shoot A");
-    let file = ConfigFile::from_toml("[run]\nrubric = \"holiday\"\n").expect("a valid config");
+    let file = ConfigFile::from_toml("[score]\nrubric = \"holiday\"\n").expect("a valid config");
     assert_eq!(
         file.resolve(Some(base)).rubric,
         Some(RubricSource::Builtin(Builtin::Holiday)),
@@ -452,7 +500,7 @@ fn a_name_is_not_anchored_to_the_config_files_directory() {
 
 #[test]
 fn a_blank_rubric_is_fatal_and_lists_the_built_ins() {
-    let message = error("[run]\nrubric = \"  \"\n");
+    let message = error("[score]\nrubric = \"  \"\n");
     assert!(
         message.contains("rubric"),
         "the message must name the key: {message}"
@@ -470,7 +518,7 @@ fn the_shoot_config_is_found_in_the_working_directory() {
     let dir = TempDir::new().expect("a temp dir");
     fs::write(
         dir.path().join(config::SHOOT_CONFIG),
-        "[preview]\nmax_edge = 1024\n",
+        "[score]\nmax_edge = 1024\n",
     )
     .expect("write the shoot config");
 
@@ -479,7 +527,7 @@ fn the_shoot_config_is_found_in_the_working_directory() {
         .expect("the shoot config");
 
     assert_eq!(loaded.path, dir.path().join(config::SHOOT_CONFIG));
-    assert_eq!(loaded.resolve().max_edge, Some(1024));
+    assert_eq!(loaded.resolve().score_max_edge, Some(1024));
 }
 
 #[test]
@@ -487,17 +535,17 @@ fn an_explicit_config_wins_over_the_shoot_config() {
     let dir = TempDir::new().expect("a temp dir");
     fs::write(
         dir.path().join(config::SHOOT_CONFIG),
-        "[preview]\nmax_edge = 1024\n",
+        "[score]\nmax_edge = 1024\n",
     )
     .expect("write the shoot config");
-    fs::write(dir.path().join("mine.toml"), "[preview]\nmax_edge = 800\n").expect("write");
+    fs::write(dir.path().join("mine.toml"), "[score]\nmax_edge = 800\n").expect("write");
 
     let loaded = config::discover(Some(Path::new("mine.toml")), &env_in(dir.path()))
         .expect("discovery")
         .expect("the explicit config");
 
     assert_eq!(loaded.path, dir.path().join("mine.toml"));
-    assert_eq!(loaded.resolve().max_edge, Some(800));
+    assert_eq!(loaded.resolve().score_max_edge, Some(800));
 }
 
 #[test]
@@ -505,7 +553,7 @@ fn an_explicit_config_that_does_not_exist_is_fatal_not_a_fall_back() {
     let dir = TempDir::new().expect("a temp dir");
     fs::write(
         dir.path().join(config::SHOOT_CONFIG),
-        "[preview]\nmax_edge = 1024\n",
+        "[score]\nmax_edge = 1024\n",
     )
     .expect("write the shoot config");
 
@@ -525,10 +573,10 @@ fn the_shoot_config_wins_over_the_user_config() {
     let user = TempDir::new().expect("a temp home");
     fs::write(
         dir.path().join(config::SHOOT_CONFIG),
-        "[preview]\nmax_edge = 1024\n",
+        "[score]\nmax_edge = 1024\n",
     )
     .expect("write the shoot config");
-    write_user_config(user.path(), "[preview]\nmax_edge = 800\n");
+    write_user_config(user.path(), "[score]\nmax_edge = 800\n");
 
     let env = Env {
         cwd: dir.path().to_path_buf(),
@@ -540,7 +588,7 @@ fn the_shoot_config_wins_over_the_user_config() {
         .expect("a config");
 
     assert_eq!(
-        loaded.resolve().max_edge,
+        loaded.resolve().score_max_edge,
         Some(1024),
         "one file wins whole; they never layer"
     );
@@ -550,7 +598,7 @@ fn the_shoot_config_wins_over_the_user_config() {
 fn the_user_config_is_found_when_no_shoot_config_exists() {
     let dir = TempDir::new().expect("a temp dir");
     let user = TempDir::new().expect("a temp config home");
-    write_user_config(user.path(), "[preview]\nmax_edge = 800\n");
+    write_user_config(user.path(), "[score]\nmax_edge = 800\n");
 
     let env = Env {
         cwd: dir.path().to_path_buf(),
@@ -567,14 +615,14 @@ fn the_user_config_is_found_when_no_shoot_config_exists() {
             .join(config::USER_CONFIG_DIR)
             .join(config::USER_CONFIG_FILE)
     );
-    assert_eq!(loaded.resolve().max_edge, Some(800));
+    assert_eq!(loaded.resolve().score_max_edge, Some(800));
 }
 
 #[test]
 fn the_user_config_falls_back_to_dot_config_under_home() {
     let dir = TempDir::new().expect("a temp dir");
     let home = TempDir::new().expect("a temp home");
-    write_user_config(&home.path().join(".config"), "[preview]\nmax_edge = 640\n");
+    write_user_config(&home.path().join(".config"), "[score]\nmax_edge = 640\n");
 
     let env = Env {
         cwd: dir.path().to_path_buf(),
@@ -585,7 +633,7 @@ fn the_user_config_falls_back_to_dot_config_under_home() {
         .expect("discovery")
         .expect("a config");
 
-    assert_eq!(loaded.resolve().max_edge, Some(640));
+    assert_eq!(loaded.resolve().score_max_edge, Some(640));
 }
 
 #[test]
@@ -603,7 +651,7 @@ fn nothing_found_is_not_an_error() {
 fn a_malformed_discovered_file_names_its_path() {
     let dir = TempDir::new().expect("a temp dir");
     let path = dir.path().join(config::SHOOT_CONFIG);
-    fs::write(&path, "[preview]\nmax_edeg = 1024\n").expect("write");
+    fs::write(&path, "[score]\nmax_edeg = 1024\n").expect("write");
 
     let message = config::discover(None, &env_in(dir.path()))
         .expect_err("a typo must stop the run")

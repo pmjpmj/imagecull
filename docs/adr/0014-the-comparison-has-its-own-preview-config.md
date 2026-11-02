@@ -113,3 +113,13 @@ a verdict for a question nobody asked.
   filling two (`[group]` → `Thresholds` and `Params`). The principle it was
   reaching for survives — a section owns what one command needs — but the
   one-for-one phrasing no longer describes the file.
+
+**ADR 0016 took the option this ADR rejected.** "Moving both pairs under a
+per-command subsection" was declined here because it "would break every config in
+the wild that sets `[preview] max_edge`, or need alias support". The move has now
+happened, and neither cost is paid silently: `[preview]`, `[outputs]` and `[run]`
+are tombstones that refuse any key by name and point at its `[score]` home, so the
+migration is one error message per file and there is still one spelling per key.
+The preview split itself — two pairs, one per kind of request, `[group]`'s pair
+defaulting to the measured 512 px — stands unchanged; it is now `[score] max_edge`
+beside `[group] max_edge`.

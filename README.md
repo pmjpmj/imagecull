@@ -247,19 +247,25 @@ never layer — and the first that exists wins:
 
 A flag beats the file, and the file beats the built-in default. Unknown keys are
 an error, so a typo cannot silently run a shoot at the wrong resolution.
-`--no-config` ignores every config file.
+`--no-config` ignores every config file. The `[preview]`, `[outputs]` and
+`[run]` sections of older files are gone: a file that still sets one is refused,
+naming the `[score]` key it became.
 
 ```toml
 [server]
 endpoint = "http://127.0.0.1:8000"
 # model = "clef-flash-oQ4e"
 
-[preview]
-# max_edge = 1568
-# jpeg_quality = 88
-
 [scan]
 # recursive = false
+
+[score]
+# max_edge = 1568
+# jpeg_quality = 88
+# json_scores = "scores.json"
+# rubric = "holiday"
+# shoot_context = "night street, pushed two stops"
+# dedupe = true
 
 [group]
 # gap = 2.0
@@ -267,11 +273,11 @@ endpoint = "http://127.0.0.1:8000"
 # exposure_stops = 2.0
 # max_edge = 512
 # jpeg_quality = 88
-
-[run]
-# rubric = "holiday"
-# shoot_context = "night street, pushed two stops"
 ```
+
+`[score]` is what a rating needs and `[group]` what a cull needs; `[server]` and
+`[scan]` are shared. `groups` reads one key from `[score]` — `shoot_context`, so a
+burst is framed the way the frame was rated — and nothing else.
 
 ## What gets written
 

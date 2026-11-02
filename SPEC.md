@@ -154,8 +154,8 @@ Typical payload: 1568 px JPEG ≈ 250–400 KB → ≈ 340–540 KB base64. Irre
 
 A comparison carries several images in one request, so `groups` has its own
 pair — `[group] max_edge` / `[group] jpeg_quality`, `groups --max-edge` /
-`--jpeg-quality`, defaulting to 512 px / 88 — and `[preview]` never reaches a
-cull (ADR 0014). Twenty previews at 512 px are 4,154 of the 16,384 image
+`--jpeg-quality`, defaulting to 512 px / 88 — and a rating's `[score] max_edge` /
+`jpeg_quality` never reaches a cull (ADR 0014, ADR 0016). Twenty previews at 512 px are 4,154 of the 16,384 image
 tokens; the same twenty at 1568 px do not fit, which is why the two numbers are
 separate.
 
@@ -229,8 +229,8 @@ the terms it appears to set for itself), `press` (a photo editor culling a
 photojournalistic shoot) and `holiday` (a family album from a trip, where a family
 member recognised and unguarded is the subject and a landscape must hold the
 place and its light). `--rubric` takes one of those three names or a path to any
-other file that keeps the `stars` id and the five rating keys; `[run] rubric` in
-a config file takes the same value. Each rubric's file stays in the tree under
+other file that keeps the `stars` id and the five rating keys; `[score] rubric`
+in a config file takes the same value. Each rubric's file stays in the tree under
 `crates/imagecull-core/rubrics/` as the copy to read and to start a draft from;
 ADR 0004 records the family.
 
@@ -505,24 +505,33 @@ failure's message.
 ### 11.1 Config files
 
 Values that stay true across runs can come from a TOML file instead of being
-retyped as flags. Keys are grouped into six sections, each owning what one
-command needs: `[server]` (`endpoint`, `model`, `timeout`),
-`[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
-(`json_scores`), `[run]` (`rubric`, `shoot_context`, `dedupe`), and `[group]`
-(`gap`, `similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`).
-`[run] rubric` holds exactly what `--rubric` holds: a built-in's name or a path.
-`imagecull.toml.example` is the commented reference; ADR 0003 records why this
-shape, ADR 0004 the three built-ins, ADR 0010 the `[group]` section, and ADR 0014
-why a comparison has a preview pair of its own.
+retyped as flags. Keys are grouped into four sections, split by who reads them:
+`[server]` (`endpoint`, `model`, `timeout`) and `[scan]` (`recursive`) are every
+command's, `[score]` (`max_edge`, `jpeg_quality`, `json_scores`, `rubric`,
+`shoot_context`, `dedupe`) is what a rating needs, and `[group]` (`gap`,
+`similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`) is what a cull needs.
+`[score] rubric` holds exactly what `--rubric` holds: a built-in's name or a
+path. `imagecull.toml.example` is the commented reference; ADR 0003 records why
+this file at all, ADR 0004 the three built-ins, ADR 0010 the `[group]` section,
+ADR 0014 why a comparison has a preview pair of its own, and ADR 0016 why the
+rating's keys share one section too.
 
 **Which command reads which key.** `score` resolves every key. `groups` resolves
 `[server]` (the alias and endpoint a cull asks), all of `[group]` — including
 `max_edge` and `jpeg_quality`, the pair every image in a comparison is rendered
-at — `[scan] recursive` and `[run] shoot_context`. It rates nothing and compares
-nothing one frame at a time, so `[preview]`, `[run] rubric`, `[run] dedupe` and
-`[outputs] json_scores` are not its business: a rating's preview size and a
-comparison's are different payloads, and one key cannot be both. Key names are
-always accepted; a key another command reads is simply not consulted by this one.
+at — `[scan] recursive`, and `[score] shoot_context`: a shoot's framing is a
+property of the shoot, so the comparison is framed the way the rating was.
+Everything else under `[score]` is a rating's alone — a rating's preview size and
+a comparison's are different payloads, and one key cannot be both. `doctor`
+reads `[server]` and `[score] max_edge` / `jpeg_quality`, the pair its file check
+renders; `models` reads `[server]`. Key names are always accepted; a key another
+command reads is simply not consulted by this one.
+
+**Retired sections.** `[preview]`, `[outputs]` and `[run]` are gone. A file that
+still sets a key under one is fatal and names its new home — `preview.max_edge
+has moved to score.max_edge` — and `[outputs] csv` and `[outputs] absolute` keep
+the refusals they already had, because they died with the CSV report rather than
+moving.
 
 **Discovery.** Exactly one file is read. The first of these that exists wins
 whole: `--config <FILE>`, `./imagecull.toml`,
@@ -539,7 +548,7 @@ entirely.
 three `--group-*` thresholds, `--max-edge` and `--jpeg-quality` do have keys,
 and the `--recursive` flag takes an explicit `true`/`false` so a file that turned
 recursion on can be turned off for one run. `--max-edge` and `--jpeg-quality`
-name the preview of the command that was typed: `[preview]` for `score` and
+name the preview of the command that was typed: `[score]` for `score` and
 `doctor`, `[group]` for `groups`.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are

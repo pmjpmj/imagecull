@@ -148,8 +148,8 @@ impl DoctorArgs {
     /// photographer is about to use, so it takes the same knobs a run would.
     pub fn overrides(&self) -> Resolved {
         Resolved {
-            max_edge: self.max_edge,
-            jpeg_quality: self.jpeg_quality,
+            score_max_edge: self.max_edge,
+            score_jpeg_quality: self.jpeg_quality,
             ..self.common.overrides()
         }
     }
@@ -456,8 +456,8 @@ impl ScoreArgs {
     /// turn dedupe off, so leaving it out leaves the decision to the file.
     pub fn overrides(&self) -> Resolved {
         Resolved {
-            max_edge: self.max_edge,
-            jpeg_quality: self.jpeg_quality,
+            score_max_edge: self.max_edge,
+            score_jpeg_quality: self.jpeg_quality,
             recursive: self.recursive,
             json_scores: self.json_scores.clone(),
             rubric: self.rubric.clone(),
@@ -533,8 +533,11 @@ mod tests {
         assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
         assert_eq!(effective.model, None, "no alias means the rubric's own");
         assert_eq!(effective.timeout, 120);
-        assert_eq!(effective.params.max_edge, Params::DEFAULT_MAX_EDGE);
-        assert_eq!(effective.params.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
+        assert_eq!(effective.score_params.max_edge, Params::DEFAULT_MAX_EDGE);
+        assert_eq!(
+            effective.score_params.jpeg_quality,
+            Params::DEFAULT_JPEG_QUALITY
+        );
         assert!(!effective.recursive);
         assert!(!effective.scan(None).recursive);
         assert_eq!(effective.outputs.json_scores, None, "no report path at all");
@@ -566,8 +569,8 @@ mod tests {
         assert_eq!(args.previews_dir, PathBuf::from("/tmp/out"));
 
         let effective = effective(&args);
-        assert_eq!(effective.params.max_edge, 1024);
-        assert_eq!(effective.params.jpeg_quality, 70);
+        assert_eq!(effective.score_params.max_edge, 1024);
+        assert_eq!(effective.score_params.jpeg_quality, 70);
         assert!(effective.recursive);
         assert_eq!(effective.scan(Some(20)).limit, Some(20));
     }
@@ -828,7 +831,7 @@ mod tests {
         let effective = args.overrides().settle(None);
         assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
         assert_eq!(args.common.alias(&effective), omlx::DEFAULT_MODEL);
-        assert_eq!(effective.params.max_edge, Params::DEFAULT_MAX_EDGE);
+        assert_eq!(effective.score_params.max_edge, Params::DEFAULT_MAX_EDGE);
 
         let Command::Doctor(args) = parse(&[
             "doctor",
@@ -852,8 +855,33 @@ mod tests {
             panic!("not a doctor command");
         };
         let effective = args.overrides().settle(None);
-        assert_eq!(effective.params.max_edge, 1024);
-        assert_eq!(effective.params.jpeg_quality, Params::DEFAULT_JPEG_QUALITY);
+        assert_eq!(effective.score_params.max_edge, 1024);
+        assert_eq!(
+            effective.score_params.jpeg_quality,
+            Params::DEFAULT_JPEG_QUALITY
+        );
+    }
+
+    #[test]
+    fn doctor_reads_the_ratings_preview_pair_from_the_config_file() {
+        let file = config::ConfigFile::from_toml("[score]\nmax_edge = 800\njpeg_quality = 65\n")
+            .expect("a valid config");
+        let Command::Doctor(args) = parse(&["doctor"]) else {
+            panic!("not a doctor command");
+        };
+
+        let effective = file
+            .resolve(None)
+            .override_with(args.overrides())
+            .settle(None);
+        assert_eq!(
+            effective.score_params,
+            Params {
+                max_edge: 800,
+                jpeg_quality: 65,
+            },
+            "the file check renders the preview a rating would send"
+        );
     }
 
     #[test]
@@ -921,7 +949,7 @@ mod tests {
             }
         );
         assert_eq!(
-            effective.params,
+            effective.score_params,
             Params::default(),
             "a cull's --max-edge is not a rating's"
         );
@@ -959,9 +987,9 @@ mod tests {
             "[group] max_edge and jpeg_quality reach the cull"
         );
         assert_eq!(
-            effective.params,
+            effective.score_params,
             Params::default(),
-            "and [preview] stays score's"
+            "and the file's [score] pair is untouched by a cull"
         );
     }
 

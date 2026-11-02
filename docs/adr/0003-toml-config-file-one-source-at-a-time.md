@@ -110,3 +110,11 @@ for `[server]`, `[preview] jpeg_quality`, `[scan] recursive`, `[run]
 shoot_context` and `[group]`. The decision this ADR records — TOML, one file,
 flag > file > default, strict, core-side resolution — is unchanged; only the
 section list and the reader list grew.
+
+**ADR 0010 added a sixth section, and ADR 0016 cut the file back to four.** The
+five-section map above and ADR 0010's sixth became `[server]`, `[scan]`,
+`[score]` and `[group]`: the rating's keys from `[preview]`, `[outputs]` and
+`[run]` now share one section, and a file that still writes a retired section is
+refused by name. The decision this ADR records — TOML, exactly one file read,
+flag > file > default, strict, core-side resolution, per-key `Resolved` — is
+unchanged; only the section list and the reader list shrank.

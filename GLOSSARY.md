@@ -20,7 +20,7 @@ _Avoid_: photo, image, file, shot
 The downscaled JPEG rendered from a frame and sent to the model, after
 orientation. A comparison renders its own, at its own edge: one request carries
 many frames of one moment, so a rating's 1568 px and a comparison's 512 px are
-separate numbers with separate keys.
+separate numbers with separate keys — `[score] max_edge` and `[group] max_edge`.
 _Avoid_: thumbnail, resized image, payload
 
 **Run**:
@@ -138,13 +138,16 @@ _Avoid_: checksum, fingerprint, version
 
 **Effective config**:
 The values a run actually uses — rubric (a built-in's name or a file's path),
-alias, preview parameters, scan breadth, grouping thresholds, output paths —
-after every source has been resolved.
+alias, the rating's preview parameters, scan breadth, the comparison's preview
+parameters, grouping thresholds, output paths — after every source has been
+resolved.
 _Avoid_: settings, options, arguments, parameters
 
 **Config file**:
 A file that supplies values for an effective config, so they need not be typed
 as flags on every run. A source of config, never the effective config itself.
+Four sections: `[score]` and `[group]` own what one command needs, `[server]`
+and `[scan]` hold what every command shares.
 _Avoid_: settings file, config, profile, preset, rc file
 
 **Shoot config**:

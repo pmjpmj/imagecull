@@ -10,6 +10,11 @@
 # A flag always beats the file; the file always beats the built-in default.
 # Every key below is optional — leave one out and its default applies.
 #
+# Four sections, split by who reads them: `[score]` holds what a rating needs and
+# `[group]` what a cull needs, while `[server]` and `[scan]` hold what both do.
+# The `[preview]`, `[outputs]` and `[run]` sections of older files are gone: a
+# file that still writes one is refused, naming the `[score]` key it became.
+#
 # Unknown keys are an error, not a warning: a typo'd `max_edeg` would otherwise
 # cost you a whole run at the wrong resolution. Out-of-range values are errors
 # too. Relative paths are resolved against this file's directory, so a config
@@ -31,19 +36,50 @@ endpoint = "http://127.0.0.1:8000"
 # Read timeout, in seconds. Default: 120
 # timeout = 120
 
-[preview]
-# Cap on the longest edge of the preview sent for one frame's rating, in pixels.
-# Smaller is faster and cheaper in context; below ~1000 px fine detail stops
-# being judgeable. `score` and `doctor` read this pair: a comparison has its own
-# under `[group]`. Default: 1568
-# max_edge = 1568
-# JPEG quality of that preview, 1-100. Default: 88
-# jpeg_quality = 88
-
 [scan]
 # Also scan subdirectories, in `score` and in `groups` alike. Hidden
 # directories are never scanned. Default: false (the shoot folder only)
 # recursive = false
+
+[score]
+# What one rating needs: how much picture to send, where the raw answers go, and
+# how the frame is judged. `score` reads all of it; `doctor <FILE>` reads the
+# preview pair too, because its file check renders the preview a rating would
+# send. `groups` borrows `shoot_context` and nothing else.
+#
+# Cap on the longest edge of the preview sent for one frame's rating, in pixels.
+# Smaller is faster and cheaper in context; below ~1000 px fine detail stops
+# being judgeable. A comparison has its own pair under `[group]`. Default: 1568
+# max_edge = 1568
+# JPEG quality of that preview, 1-100. Default: 88
+# jpeg_quality = 88
+#
+# Every raw model answer, as JSON, so a surprising score loses nothing. It is
+# `score`'s record, not `groups`, which writes its measures to `--out`.
+# Default: not written
+# json_scores = "scores.json"
+#
+# The rubric to judge by: a built-in's name, or a path to a rubric file.
+# Default: general. Three rubrics are compiled in — `general`, which assumes no
+# genre and is what runs when nothing else is selected; `press`, a photo editor
+# culling a photojournalistic shoot; and `holiday`, which judges a frame as a
+# family-album keeper. A bare name is always a built-in, so use `./holiday` for
+# a file that happens to be called that. The rubric's hash is written into each
+# sidecar, so a rating can always say which wording made it, and a re-run under a
+# different rubric skips the frames already rated unless you pass --force.
+# rubric = "holiday"
+# A rubric of your own: a path, relative to this file's directory.
+# rubric = "mine.toml"
+# Free text about the shoot, passed to the model as state.shoot_context, so a
+# dim, high-ISO street shoot is judged as that. `groups` passes it to the
+# comparison too, since a dim, high-ISO burst deserves the same framing: the
+# description belongs to the shoot, not to the pass, which is why a cull reads
+# this one key from `[score]`.
+# shoot_context = "night street, pushed two stops"
+# Reuse the outcome of a frame whose preview is byte-identical to another.
+# `score` only: a group's frames are different pictures of one moment, never
+# duplicates. Default: true
+# dedupe = true
 
 [group]
 # What counts as one moment, and how much picture a comparison sends. `groups`
@@ -72,34 +108,3 @@ endpoint = "http://127.0.0.1:8000"
 # max_edge = 512
 # JPEG quality of one image in a comparison, 1-100. Default: 88
 # jpeg_quality = 88
-
-[outputs]
-# Ratings do not come out of a report: a run writes each one into an XMP sidecar
-# beside its frame (`DSC_0001.NEF` -> `DSC_0001.xmp`), where Lightroom, Bridge and
-# darktable can read it. There is nothing to configure about that.
-#
-# Every raw model answer, as JSON, so a surprising score loses nothing.
-# `score`'s record, not `groups`, which writes its measures to `--out`.
-# Default: not written
-# json_scores = "scores.json"
-
-[run]
-# The rubric to judge by: a built-in's name, or a path to a rubric file.
-# Default: general. Three rubrics are compiled in — `general`, which assumes no
-# genre and is what runs when nothing else is selected; `press`, a photo editor
-# culling a photojournalistic shoot; and `holiday`, which judges a frame as a
-# family-album keeper. A bare name is always a built-in, so use `./holiday` for
-# a file that happens to be called that. The rubric's hash is written into each
-# sidecar, so a rating can always say which wording made it, and a re-run under a
-# different rubric skips the frames already rated unless you pass --force.
-# rubric = "holiday"
-# A rubric of your own: a path, relative to this file's directory.
-# rubric = "mine.toml"
-# Free text about the shoot, passed to the model as state.shoot_context, so a
-# dim, high-ISO street shoot is judged as that. `groups` passes it to the
-# comparison too, since a dim, high-ISO burst deserves the same framing.
-# shoot_context = "night street, pushed two stops"
-# Reuse the outcome of a frame whose preview is byte-identical to another.
-# `score` only: a group's frames are different pictures of one moment, never
-# duplicates. Default: true
-# dedupe = true

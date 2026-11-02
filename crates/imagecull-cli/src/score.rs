@@ -45,7 +45,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
     let mut config = scoring::Config::new(
         rubric,
         effective.model.clone(),
-        effective.params,
+        effective.score_params,
         effective.scan(args.limit),
         effective.shoot_context.clone(),
         effective.outputs.clone(),
@@ -128,7 +128,7 @@ fn dry_run_command(args: &ScoreArgs, effective: &Effective) -> u8 {
         &args.dir,
         &args.previews_dir,
         &effective.scan(args.limit),
-        &effective.params,
+        &effective.score_params,
     ) {
         Ok(export) => {
             print!("{}", render(&export));

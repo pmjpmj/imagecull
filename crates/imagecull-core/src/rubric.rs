@@ -52,7 +52,7 @@ pub struct Rubric {
 
 impl Rubric {
     /// The rubric a run judges by: the one selected, or the default built-in
-    /// when nothing selected another — `--rubric` and `[run] rubric`.
+    /// when nothing selected another — `--rubric` and `[score] rubric`.
     pub fn select(source: Option<&RubricSource>) -> Result<Rubric> {
         match source {
             None => Builtin::DEFAULT.rubric(),
@@ -233,7 +233,7 @@ pub enum RubricSource {
 
 impl RubricSource {
     /// Read a value that may be a built-in's name or a path: `--rubric` and
-    /// `[run] rubric` both hold one.
+    /// `[score] rubric` both hold one.
     ///
     /// The only failure is a selection that names nothing at all; a path that
     /// does not exist is [`Rubric::load`]'s failure, where the file is opened.

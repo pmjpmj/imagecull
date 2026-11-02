@@ -42,10 +42,7 @@ pub fn run(args: &GroupsArgs) -> u8 {
             return ExitCode::Fatal.code();
         }
     };
-    let console = Console {
-        quiet: args.quiet,
-        verbose: args.verbose,
-    };
+    let console = Console { quiet: args.quiet };
     let options = args.options(&effective);
     let outcome = match drive(args, &effective, &options, &console) {
         Ok(outcome) => outcome,
@@ -140,7 +137,7 @@ fn cull_streamed(
         budget,
         // The comparison renders its own previews, at the comparison's own
         // payload shape: `[group] max_edge` / `jpeg_quality`, or the flags that
-        // beat them. A rating's `[preview]` pair never reaches a cull.
+        // beat them. A rating's `[score]` pair never reaches a cull.
         preview: effective.group_params,
         grouping_hash,
         allow_foreign: args.allow_foreign,
@@ -169,7 +166,6 @@ fn cull_streamed(
 /// pass's order and no lock is needed between the readers.
 struct Console {
     quiet: bool,
-    verbose: bool,
 }
 
 impl Console {
@@ -226,10 +222,24 @@ impl cull::Watcher for Console {
                             failure.message
                         ),
                     );
-                } else if self.verbose && !self.quiet {
+                } else if !self.quiet {
                     write(Stream::Out, &verdict_text(verdict));
                 }
             }
+            cull::Event::GroupStarted {
+                number,
+                start,
+                size,
+            } if !self.quiet => {
+                write(
+                    Stream::Out,
+                    &format!(
+                        "  asking group {number}  {size} {}  starting at {start}\n",
+                        plural(*size, "frame", "frames")
+                    ),
+                );
+            }
+            cull::Event::GroupStarted { .. } => {}
             cull::Event::Unwritten { filename, message } => {
                 write(
                     Stream::Err,
@@ -811,16 +821,10 @@ mod tests {
         let started = group::Event::Started(group::Started { total: 40, jobs: 8 });
         let frame = group::Event::Frame(frame_event(1, 40, "DSC_0001.NEF", sidecar::OK));
 
-        let quiet = Console {
-            quiet: true,
-            verbose: true,
-        };
+        let quiet = Console { quiet: true };
         assert!(quiet.text(&started).is_none());
         assert!(quiet.text(&frame).is_none());
-        let console = Console {
-            quiet: false,
-            verbose: false,
-        };
+        let console = Console { quiet: false };
         assert!(console.text(&started).is_some());
         assert_eq!(
             console.text(&frame).as_deref(),
