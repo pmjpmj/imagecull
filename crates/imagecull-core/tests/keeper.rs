@@ -150,6 +150,24 @@ fn a_group_over_one_request_is_split_into_even_batches_in_capture_order() {
 }
 
 #[test]
+fn a_smaller_request_cap_splits_a_group_the_same_way_and_leaves_no_lone_frame() {
+    let places: Vec<usize> = (0..12).collect();
+
+    let chunks = keeper::chunk(&places, 4);
+
+    assert_eq!(
+        chunks,
+        [
+            (0..4).collect::<Vec<_>>(),
+            (4..8).collect::<Vec<_>>(),
+            (8..12).collect::<Vec<_>>()
+        ],
+        "a server that takes four images per request compares twelve frames in three batches of \
+         four, each a real comparison"
+    );
+}
+
+#[test]
 fn a_remainder_that_would_be_one_frame_is_spread_across_the_batches() {
     let places: Vec<usize> = (0..21).collect();
 

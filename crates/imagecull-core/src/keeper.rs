@@ -15,16 +15,19 @@
 //! only two outcomes — but a request that 413s has already been built, paid for
 //! and refused. So the request is built to fit: previews at [`EDGE`] px by
 //! default and at most [`MAX`] of them (4,154 tokens, a quarter of the budget,
-//! measured). The edge is the one part of that shape a run may move — `[group]
-//! max_edge` or `groups --max-edge` — because a photographer weighing detail
-//! against the token cap is asking about the picture; the cap and the floor stay
-//! measured.
+//! measured). Both numbers in that shape are defaults a run may move: `[group]
+//! max_edge` or `groups --max-edge` for the picture's detail, and `[group]
+//! max_images` for how many images the server takes at once — a host that refuses
+//! more than four is a fact about the host, and [`chunk`] splits a group into
+//! batches of the cap either way. The confidence [`FLOOR`] is the one number that
+//! stays measured.
 //!
 //! # A group larger than one request is compared in rounds
 //!
 //! Nothing narrows a group before the model has seen it. A group the budget holds
 //! is compared whole; a larger one is split by [`chunk`] into consecutive batches
-//! of at most [`MAX`] frames, split evenly so no batch is left with one frame to
+//! of at most the run's cap — [`MAX`] by default, `[group] max_images` when a
+//! server takes fewer — split evenly so no batch is left with one frame to
 //! "compare", each batch answered by one request, and the batch winners compared
 //! again, until one survives. Every frame of the group enters a
 //! request, which is the point: the per-frame rating cannot see the alternatives,
@@ -82,8 +85,13 @@ pub const fn default_preview() -> Params {
     }
 }
 
-/// The most frames one comparative request carries: 4,154 tokens of the
-/// 16,384-token image budget, measured.
+/// The most frames one comparative request carries by default: 4,154 tokens of
+/// the 16,384-token image budget, measured.
+///
+/// It is the reference server's measured batch, not a constant of the algorithm:
+/// a host that takes fewer images per request sets `[group] max_images`, and
+/// [`chunk`] batches a group by that cap instead. A smaller cap costs requests
+/// and changes no verdict, because every round's winners are compared again.
 pub const MAX: usize = 20;
 
 /// The confidence under which a group's verdict is reported as a low-confidence
@@ -166,10 +174,12 @@ pub const INSTRUCTIONS: &str = "Several frames of one moment are shown, in order
 /// How much of a group one comparative request may carry, and how sure its
 /// answer has to be before it is not called shaky.
 ///
-/// The defaults are the measured ones and are part of the algorithm, like
-/// [`Thresholds`](crate::group::Thresholds): a run does not take them from the
-/// command line, because choosing them would be choosing how many frames are
-/// compared at once and how sure is sure, which are facts about the model.
+/// `max` is a capacity rather than a judgement: [`MAX`] is the measured batch on
+/// the reference server, and `[group] max_images` moves it for a host that takes
+/// fewer images per request. [`chunk`] splits any group into batches of it, so a
+/// smaller cap costs requests and changes no verdict. `floor` stays measured,
+/// like [`Thresholds`](crate::group::Thresholds): how sure is sure is a fact
+/// about the model, not a preference.
 ///
 /// The *size* of each preview is not here: it is the run's own [`Params`],
 /// defaulting to [`EDGE`], because a

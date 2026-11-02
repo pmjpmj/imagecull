@@ -1,6 +1,7 @@
 # 02: `[group] max_images` fills `keeper::Budget::max`
 
-Status: ready-for-agent
+Status: resolved (2026-11-28) — the cap is a config key, settled into
+`keeper::Budget::max`; two test placements moved (see Comments)
 Type: task
 Spec: `.scratch/cloudflare-clef/spec.md`
 
@@ -44,3 +45,31 @@ instead of `Budget::default()`.
 ## Done
 
 `cargo test --workspace` green; a file without the key still batches 20.
+
+## Comments
+
+**Implemented 2026-11-28.** The key, the settle and the wiring landed as written;
+`groups` builds `keeper::Budget { max: effective.max_images, ..Budget::default() }`,
+so the floor stays `keeper::FLOOR`. Three notes:
+
+1. **The twelve-frame cull test moved to `tests/groups_marking.rs`.** The in-crate
+   fixtures at `cull.rs` point at `/no-such-shoot`, so a twelve-frame cull there
+   could not render a preview and would only ever assert `undecided == 1`. The
+   test lives where synthetic NEFs already do and asserts a decided keeper, eleven
+   reds, `undecided == 0`.
+2. **`rounds == 3` was one request short.** `Verdict::rounds` counts comparative
+   requests: three batches of four plus the final batch of three winners is four.
+   The test pins the batch shapes `[4, 4, 4, 3]`, which is what makes the count
+   checkable rather than asserted.
+3. **The CLI test is `crates/imagecull-cli/tests/group_cap.rs`, not
+   `groups_command.rs`.** That file's doc assigns sockets to `systemone_http.rs` and
+   has no fixture of its own; the new test includes the core's `tests/support`
+   through `#[path]` and adds `image` as a CLI dev-dependency rather than copying a
+   NEF writer and a stub. Two cases: a cap of two costs three requests for four
+   frames, and the same folder without the key costs one.
+
+`keeper`'s prose was corrected with the code: its budget docs said `max` was a fact
+about the model that a run could not move, which `[group] max_images` now
+contradicts (ADR 0014 decided that line, and ADR 0018 / ticket 08 may want to say
+so). The module docs and `Budget` now describe `max` as the measured default, the
+way `EDGE` already reads.

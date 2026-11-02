@@ -115,3 +115,11 @@ endpoint = "http://127.0.0.1:8000"
 # server is shared and every group should wait its turn. `--cull-jobs` beats
 # this key for one run. Default: 4
 # cull_jobs = 4
+
+# The most previews one comparative request carries: the batch a group is split
+# into when it is larger than this. Valid 2-20 — one image is not a comparison,
+# and 20 is the batch the token budget was measured at. Lower it for a server
+# that refuses more per request (Workers AI takes 4). Like `cull_jobs` it is
+# scheduling, not algorithm, so it does not enter the grouping hash either.
+# Default: 20
+# max_images = 20

@@ -20,3 +20,6 @@ ctrlc = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# The end-to-end `[group] max_images` test drives a real folder and a real
+# socket, through the core's own fixtures rather than a second copy of them.
+image = { workspace = true }

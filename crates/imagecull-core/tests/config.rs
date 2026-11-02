@@ -44,6 +44,7 @@ exposure_stops = 1.5
 max_edge = 700
 jpeg_quality = 60
 cull_jobs = 2
+max_images = 4
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -132,6 +133,11 @@ fn every_key_reaches_the_resolved_values() {
         resolved.group_cull_jobs,
         Some(2),
         "a shoot may carry the degree its comparison runs at"
+    );
+    assert_eq!(
+        resolved.group_max_images,
+        Some(4),
+        "and the most frames one comparison may carry"
     );
 }
 
@@ -252,12 +258,44 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[group]\nexposure_stops = nan\n", "group.exposure_stops"),
         ("[group]\nexposure_stops = inf\n", "group.exposure_stops"),
         ("[group]\ncull_jobs = 0\n", "group.cull_jobs"),
+        ("[group]\nmax_images = 0\n", "group.max_images"),
+        ("[group]\nmax_images = 1\n", "group.max_images"),
+        ("[group]\nmax_images = 21\n", "group.max_images"),
     ];
     for (text, key) in cases {
         let message = error(text);
         assert!(
             message.contains(key),
             "rejecting {text:?} must name {key}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_comparison_cap_outside_two_to_twenty_states_the_range_and_why() {
+    // The range is not a guess to be rounded: a request carrying one frame is
+    // not a comparison, and 20 is the batch the token budget was measured at.
+    for text in [
+        "[group]\nmax_images = 0\n",
+        "[group]\nmax_images = 1\n",
+        "[group]\nmax_images = 21\n",
+    ] {
+        let message = error(text);
+        assert!(
+            message.contains("between 2 and 20"),
+            "a range mistake must say what the range is: {message}"
+        );
+        assert!(
+            message.contains("one image is not a comparison"),
+            "and why the floor is where it is: {message}"
+        );
+    }
+    for accepted in [2, keeper::MAX] {
+        let resolved = resolved(&format!("[group]\nmax_images = {accepted}\n"));
+        assert_eq!(
+            resolved.group_max_images,
+            Some(accepted),
+            "{accepted} is inside the range and is carried as written"
         );
     }
 }
@@ -537,6 +575,10 @@ fn the_file_wins_over_the_built_in_default() {
         effective.cull_jobs, 2,
         "the file's degree is what a run with no --cull-jobs uses"
     );
+    assert_eq!(
+        effective.max_images, 4,
+        "and the file's cap is what a run's comparisons carry"
+    );
 }
 
 #[test]
@@ -577,6 +619,11 @@ fn an_empty_source_settles_to_the_specs_defaults() {
         effective.cull_jobs,
         imagecull_core::cull::DEFAULT_JOBS,
         "an absent degree is the cull's own default, not a second copy of it"
+    );
+    assert_eq!(
+        effective.max_images,
+        keeper::MAX,
+        "an absent cap is the measured batch of 20, not a second copy of it"
     );
     assert_eq!(effective.source, None);
     assert_eq!(
@@ -643,8 +690,8 @@ fn a_body_selector_falls_back_to_the_model_whole() {
 
 #[test]
 fn a_key_no_flag_sets_survives_the_flags() {
-    // No flag sets these five, so `override_with` must project them: a flag
-    // layer that says nothing may not quietly drop the file's wire.
+    // No flag sets these six, so `override_with` must project them: a flag
+    // layer that says nothing may not quietly drop the file's wire or its cap.
     let effective = resolved(EVERY_KEY)
         .override_with(Resolved {
             timeout: Some(30),
@@ -656,6 +703,10 @@ fn a_key_no_flag_sets_survives_the_flags() {
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
     assert_eq!(effective.token.as_deref(), Some("a-literal-secret"));
     assert!(!effective.truncate);
+    assert_eq!(
+        effective.max_images, 4,
+        "and the file's comparison cap is not a flag's to lose"
+    );
 }
 
 #[test]

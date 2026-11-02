@@ -532,6 +532,80 @@ fn a_group_larger_than_one_request_is_compared_in_rounds_and_drops_no_frame() {
 }
 
 #[test]
+fn a_burst_of_twelve_against_a_four_image_cap_is_decided_in_batches_of_four() {
+    // Workers AI takes four images per request. A twelve-frame burst is three
+    // batches of four, and their three winners are one more batch: four
+    // comparative requests, one decided group, and not a single frame left
+    // uncompared.
+    let names = [
+        "DSC_0001.NEF",
+        "DSC_0002.NEF",
+        "DSC_0003.NEF",
+        "DSC_0004.NEF",
+        "DSC_0005.NEF",
+        "DSC_0006.NEF",
+        "DSC_0007.NEF",
+        "DSC_0008.NEF",
+        "DSC_0009.NEF",
+        "DSC_0010.NEF",
+        "DSC_0011.NEF",
+        "DSC_0012.NEF",
+    ];
+    let shoot = shoot_of(&[
+        frame(names[0], 0.00, 0, "10"),
+        frame(names[1], 0.05, 0, "11"),
+        frame(names[2], 0.10, 0, "12"),
+        frame(names[3], 0.15, 0, "13"),
+        frame(names[4], 0.20, 0, "14"),
+        frame(names[5], 0.25, 0, "15"),
+        frame(names[6], 0.30, 0, "16"),
+        frame(names[7], 0.35, 0, "17"),
+        frame(names[8], 0.40, 0, "18"),
+        frame(names[9], 0.45, 0, "19"),
+        frame(names[10], 0.50, 0, "20"),
+        frame(names[11], 0.55, 0, "21"),
+    ]);
+    let decider = Scripted::answering(Vec::new()).comparing(vec![
+        Ok(keeper("1", 0.91)),
+        Ok(keeper("1", 0.88)),
+        Ok(keeper("1", 0.86)),
+        Ok(keeper("2", 0.80)),
+    ]);
+    let recorded = quiet();
+    let budget = keeper::Budget {
+        max: 4,
+        ..keeper::Budget::default()
+    };
+
+    let culled = cull_through(shoot.path(), &decider, &recorded, budget);
+
+    let compared = decider.compared();
+    assert_eq!(
+        compared
+            .iter()
+            .map(|request| request.previews.len())
+            .collect::<Vec<_>>(),
+        [4, 4, 4, 3],
+        "three batches of four, then the three winners: no request carries a lone frame and \
+         none exceeds the cap"
+    );
+    let verdict = recorded.verdicts().remove(0);
+    assert_eq!(
+        verdict.keeper.as_deref(),
+        Some("DSC_0005.NEF"),
+        "the survivor of the final batch, one decided keeper for the whole group"
+    );
+    assert_eq!(
+        verdict.confidence, 0.80,
+        "the final call is the shakiest step"
+    );
+    assert_eq!(culled.undecided, 0, "the cap costs requests, not groups");
+    assert_eq!(culled.rounds, 4, "three batches and the final one");
+    assert_eq!(culled.red, 11, "every frame that is not the keeper is red");
+    assert_eq!(culled.green, 1);
+}
+
+#[test]
 fn a_losing_batchs_coin_flip_does_not_shadow_the_winners_path() {
     let shoot = shoot_of(&[
         frame("DSC_0001.NEF", 0.0, 0, "10"),

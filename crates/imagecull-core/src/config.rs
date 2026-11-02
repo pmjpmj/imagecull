@@ -230,6 +230,7 @@ impl ConfigFile {
             group_max_edge: self.group.max_edge,
             group_jpeg_quality: self.group.jpeg_quality,
             group_cull_jobs: self.group.cull_jobs,
+            group_max_images: self.group.max_images,
         }
     }
 
@@ -277,6 +278,16 @@ impl ConfigFile {
             return Err(Error::fatal(
                 "group.cull_jobs must be at least 1, or no group would be culled",
             ));
+        }
+        if let Some(max) = self.group.max_images
+            && !(2..=keeper::MAX).contains(&max)
+        {
+            return Err(Error::fatal(format!(
+                "group.max_images must be between 2 and {}, not {max} — one image is not a \
+                 comparison, and {} is the batch a comparison's token budget was measured at",
+                keeper::MAX,
+                keeper::MAX
+            )));
         }
         if let Some(gap) = self.group.gap
             && !(gap > 0.0 && gap.is_finite())
@@ -500,6 +511,8 @@ struct GroupSection {
     jpeg_quality: Option<u8>,
     /// How many groups the cull judges at once.
     cull_jobs: Option<usize>,
+    /// The most previews one comparative request carries.
+    max_images: Option<usize>,
 }
 
 /// Refuse a key that was set to nothing, naming it and — when the key has one —
@@ -599,6 +612,8 @@ pub struct Resolved {
     pub group_jpeg_quality: Option<u8>,
     /// How many groups the cull judges at once.
     pub group_cull_jobs: Option<usize>,
+    /// The most previews one comparative request carries.
+    pub group_max_images: Option<usize>,
 }
 
 impl Resolved {
@@ -629,6 +644,7 @@ impl Resolved {
             group_max_edge: flags.group_max_edge.or(self.group_max_edge),
             group_jpeg_quality: flags.group_jpeg_quality.or(self.group_jpeg_quality),
             group_cull_jobs: flags.group_cull_jobs.or(self.group_cull_jobs),
+            group_max_images: flags.group_max_images.or(self.group_max_images),
         }
     }
 
@@ -689,6 +705,7 @@ impl Resolved {
                     .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
             },
             cull_jobs: self.group_cull_jobs.unwrap_or(cull::DEFAULT_JOBS),
+            max_images: self.group_max_images.unwrap_or(keeper::MAX),
         }
     }
 }
@@ -743,6 +760,12 @@ pub struct Effective {
     /// in flight, whose default is [`cull::DEFAULT_JOBS`]. It is scheduling, not
     /// algorithm, so the grouping hash does not cover it.
     pub cull_jobs: usize,
+    /// The most previews one comparative request may carry, whose default is
+    /// [`keeper::MAX`]. It fills [`keeper::Budget::max`]: a server that refuses
+    /// more than four images per request is a scheduling fact about that server,
+    /// not a change to how a group is judged, so the grouping hash does not
+    /// cover it either.
+    pub max_images: usize,
 }
 
 impl Effective {

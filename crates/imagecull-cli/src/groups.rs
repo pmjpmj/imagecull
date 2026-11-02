@@ -131,7 +131,13 @@ fn cull_streamed(
         .clone()
         .unwrap_or_else(|| omlx::DEFAULT_MODEL.to_string());
     let client = args.common.client(effective)?;
-    let budget = keeper::Budget::default();
+    // The comparison's capacity is the shoot's, not the model's: a server that
+    // takes four images per request is a fact about that server, and `chunk`
+    // splits any group into batches of it (ADR 0011's rounds are unchanged).
+    let budget = keeper::Budget {
+        max: effective.max_images,
+        ..keeper::Budget::default()
+    };
     let config = cull::Config {
         model: &alias,
         shoot_context: effective.shoot_context.clone(),
