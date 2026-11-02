@@ -24,6 +24,7 @@ use imagecull_core::progress::Silent;
 use imagecull_core::reading;
 use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
+use imagecull_core::secret::Secret;
 use imagecull_core::systemone::Adapter;
 use serde_json::{Value, json};
 use support::ExifFacts;
@@ -78,7 +79,7 @@ fn posts(stub: &Stub) -> Vec<support::stub::Received> {
 /// The real adapter, pointed at the stub, with the timeouts a run would use.
 fn adapter(stub: &Stub, model: &str) -> Adapter {
     Adapter::new(
-        Client::new(stub.endpoint(), Timeouts::with_read_seconds(5)),
+        Client::new(stub.endpoint(), Timeouts::with_read_seconds(5), None),
         model,
     )
 }
@@ -111,6 +112,10 @@ fn a_canned_answer_comes_back_as_a_reading_with_the_one_answer() {
     let requests = stub.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/systemone");
+    assert_eq!(
+        requests[0].authorization, None,
+        "a config with no token source sends no Authorization header"
+    );
     assert!(
         requests[0]
             .content_type
@@ -118,6 +123,73 @@ fn a_canned_answer_comes_back_as_a_reading_with_the_one_answer() {
             .is_some_and(|value| value.starts_with("application/json")),
         "the body is JSON, announced: {:?}",
         requests[0].content_type
+    );
+}
+
+/// A token distinctive enough that finding it in a rendering means it leaked.
+const TOKEN: &str = "cf-token-backstage-do-not-print";
+
+/// The header value a server expects for `TOKEN`, written out rather than
+/// rebuilt from it, so the assertion can disagree with the client.
+const BEARER: &str = "Bearer cf-token-backstage-do-not-print";
+
+/// The real client, pointed at the stub, carrying a bearer token.
+fn client_with_token(stub: &Stub) -> Client {
+    Client::new(
+        stub.endpoint(),
+        Timeouts::with_read_seconds(5),
+        Some(Secret::new(TOKEN)),
+    )
+}
+
+#[test]
+fn a_client_with_a_token_sends_it_as_a_bearer_header() {
+    let stub = Stub::scripted(vec![(200, answer_document())]);
+    let preview = preview(100, 100);
+    let adapter = Adapter::new(client_with_token(&stub), "clef-flash-oQ4e");
+    let rubric = Builtin::General.rubric().expect("parse");
+
+    adapter
+        .decide(&request(
+            &rubric,
+            &preview,
+            State::for_frame("DSC_0001.NEF", None),
+            "clef-flash-oQ4e",
+        ))
+        .expect("a 200 is an answer");
+
+    assert_eq!(
+        stub.requests()[0].authorization.as_deref(),
+        Some(BEARER),
+        "the token rides on the request as the server states it"
+    );
+}
+
+#[test]
+fn a_token_rides_on_the_get_probes_too() {
+    // An oMLX guarded with a key answers `/v1/models` with 401 otherwise, and
+    // `doctor` reads that endpoint. One code path is worth more than one header
+    // saved on a run that has exactly one GET.
+    let stub = Stub::routed(vec![support::stub::Route::new(
+        "/health",
+        200,
+        json!({"status": "ok"}).to_string(),
+    )]);
+
+    client_with_token(&stub).health().expect("a 200 is a read");
+
+    assert_eq!(stub.requests()[0].authorization.as_deref(), Some(BEARER));
+}
+
+#[test]
+fn a_client_holding_a_token_does_not_print_it() {
+    // The invariant, proven at the type: whatever a diagnostic prints, the
+    // token is not in it.
+    let stub = Stub::scripted(Vec::new());
+    let rendered = format!("{:#?}", client_with_token(&stub));
+    assert!(
+        !rendered.contains(TOKEN),
+        "a client's Debug printed its token: {rendered}"
     );
 }
 
@@ -401,6 +473,7 @@ fn nothing_listening_is_server_unreachable() {
         Client::new(
             Endpoint::parse(&format!("http://{addr}")).expect("valid endpoint"),
             Timeouts::with_read_seconds(5),
+            None,
         ),
         "clef-flash-oQ4e",
     );
@@ -428,6 +501,7 @@ fn a_server_that_never_answers_times_out() {
                 connect: Duration::from_secs(5),
                 read: Duration::from_millis(200),
             },
+            None,
         ),
         "clef-flash-oQ4e",
     );

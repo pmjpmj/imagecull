@@ -10,6 +10,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::keeper;
 use imagecull_core::preprocess::Params;
 use imagecull_core::rubric::{Builtin, RubricSource};
+use imagecull_core::secret::Secret;
 
 use tempfile::TempDir;
 
@@ -104,7 +105,11 @@ fn every_key_reaches_the_resolved_values() {
         Some("CLOUDFLARE_API_TOKEN"),
         "the variable's name is plumbing: nothing resolves it at settle time"
     );
-    assert_eq!(resolved.token.as_deref(), Some("a-literal-secret"));
+    assert_eq!(
+        resolved.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret"),
+        "the literal is carried as a secret, which is how it stays unprintable"
+    );
     assert_eq!(resolved.truncate, Some(false));
     assert_eq!(resolved.timeout, Some(300));
     assert_eq!(resolved.score_max_edge, Some(1024));
@@ -356,6 +361,108 @@ fn a_blank_selector_says_how_to_send_the_model_instead() {
     );
 }
 
+/// An injected environment: the lookup a resolution reads, over fixed pairs,
+/// so a test never touches a process variable another test could race.
+fn environment<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_string())
+    }
+}
+
+#[test]
+fn no_token_source_resolves_to_no_token() {
+    let effective = Resolved::default().settle(None);
+    let token = effective
+        .resolve_token(|name| panic!("nothing should be looked up, and {name} was"))
+        .expect("no token source is not a failure");
+    assert_eq!(token, None, "no key means no header, as before");
+}
+
+#[test]
+fn the_environment_wins_over_a_literal_token() {
+    let effective =
+        resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\ntoken = \"a-literal-secret\"\n")
+            .settle(None);
+    let token = effective
+        .resolve_token(environment(&[(
+            "CLOUDFLARE_API_TOKEN",
+            "from-the-environment",
+        )]))
+        .expect("a set variable resolves");
+    assert_eq!(
+        token,
+        Some(Secret::new("from-the-environment")),
+        "the variable wins, because a literal travels with the shoot folder"
+    );
+}
+
+#[test]
+fn a_variable_with_stray_whitespace_is_trimmed() {
+    // Shell quoting leaves whitespace a photographer cannot see, and a server
+    // answers `Bearer  abc ` with 401 per frame. The literal is left as written:
+    // a file's value is one its author can read.
+    let effective = resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\n").settle(None);
+    let token = effective
+        .resolve_token(environment(&[(
+            "CLOUDFLARE_API_TOKEN",
+            "  from-the-environment  ",
+        )]))
+        .expect("a padded variable is still a variable");
+    assert_eq!(token, Some(Secret::new("from-the-environment")));
+}
+
+#[test]
+fn an_unset_or_empty_variable_falls_back_to_the_literal() {
+    let effective =
+        resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\ntoken = \"a-literal-secret\"\n")
+            .settle(None);
+    for pairs in [
+        vec![],
+        vec![("CLOUDFLARE_API_TOKEN", "")],
+        vec![("CLOUDFLARE_API_TOKEN", "   ")],
+        vec![("SOMETHING_ELSE", "not-the-one-named")],
+    ] {
+        let token = effective
+            .resolve_token(environment(&pairs))
+            .expect("a literal beside the name is enough");
+        assert_eq!(
+            token,
+            Some(Secret::new("a-literal-secret")),
+            "with nothing in {pairs:?}, the literal is what is sent"
+        );
+    }
+}
+
+#[test]
+fn a_named_variable_with_nothing_behind_it_is_fatal_and_names_it() {
+    let effective = resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\n").settle(None);
+    let message = effective
+        .resolve_token(environment(&[("CLOUDFLARE_API_TOKEN", "")]))
+        .expect_err("an empty variable with no literal describes no request")
+        .to_string();
+    assert!(
+        message.contains("CLOUDFLARE_API_TOKEN"),
+        "the message has to name the variable to export: {message}"
+    );
+    assert!(
+        message.contains("[server] token is empty"),
+        "and the key it falls back to: {message}"
+    );
+}
+
+#[test]
+fn a_settled_token_is_not_printed_by_the_effective_configs_debug() {
+    let effective = resolved("[server]\ntoken = \"a-literal-secret\"\n").settle(None);
+    let rendered = format!("{effective:#?}");
+    assert!(
+        !rendered.contains("a-literal-secret"),
+        "a run's config is printed in diagnostics; the token may not be: {rendered}"
+    );
+}
+
 #[test]
 fn a_file_that_is_not_toml_points_at_the_line() {
     let message = error("[preview\nmax_edge = 1568\n");
@@ -556,7 +663,10 @@ fn the_file_wins_over_the_built_in_default() {
     );
     assert_eq!(effective.body_model(), Some("clef-27b"));
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
-    assert_eq!(effective.token.as_deref(), Some("a-literal-secret"));
+    assert_eq!(
+        effective.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret")
+    );
     assert!(!effective.dedupe);
     assert!(effective.recursive);
     assert_eq!(
@@ -701,7 +811,10 @@ fn a_key_no_flag_sets_survives_the_flags() {
     assert_eq!(effective.path, "/{model}");
     assert_eq!(effective.body_model(), Some("clef-27b"));
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
-    assert_eq!(effective.token.as_deref(), Some("a-literal-secret"));
+    assert_eq!(
+        effective.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret")
+    );
     assert!(!effective.truncate);
     assert_eq!(
         effective.max_images, 4,

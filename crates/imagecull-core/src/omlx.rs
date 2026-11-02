@@ -18,6 +18,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::error::{Error, ErrorKind, Result};
+use crate::secret::Secret;
 
 /// Where oMLX listens by default.
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000";
@@ -242,16 +243,26 @@ impl Catalog {
 /// `Sync`, so the cull's workers share it and may have several comparative
 /// requests in flight, while a rating run still sends one at a time because oMLX
 /// serialises them server-side.
+///
+/// A client that carries a [`Secret`] sends it as `Authorization: Bearer …` on
+/// every request, the GET probes included: an oMLX guarded with a key answers
+/// `/v1/models` with 401 otherwise, and one code path is worth more than one
+/// header saved on a run that has exactly one GET. The token is a field rather
+/// than a parameter, so it is attached in one place instead of at every call.
 #[derive(Debug, Clone)]
 pub struct Client {
     endpoint: Endpoint,
     agent: ureq::Agent,
     timeouts: Timeouts,
+    /// The bearer credential, when the config resolved one. Its `Debug` prints
+    /// `<redacted>`, so a client held in a diagnostic reveals nothing.
+    token: Option<Secret>,
 }
 
 impl Client {
-    /// Build a client for `endpoint` with the given timeouts.
-    pub fn new(endpoint: Endpoint, timeouts: Timeouts) -> Client {
+    /// Build a client for `endpoint` with the given timeouts, carrying `token`
+    /// as the bearer credential when there is one.
+    pub fn new(endpoint: Endpoint, timeouts: Timeouts, token: Option<Secret>) -> Client {
         let config = ureq::Agent::config_builder()
             .timeout_connect(Some(timeouts.connect))
             .timeout_global(Some(timeouts.read))
@@ -263,6 +274,7 @@ impl Client {
             endpoint,
             agent: config.new_agent(),
             timeouts,
+            token,
         }
     }
 
@@ -362,8 +374,7 @@ impl Client {
     pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Fetched> {
         let url = self.endpoint.url(path);
         let mut response = self
-            .agent
-            .post(&url)
+            .authorized(self.agent.post(&url))
             .send_json(body)
             .map_err(|error| self.transport_error("POST", path, error))?;
         let http_status = response.status().as_u16();
@@ -387,8 +398,7 @@ impl Client {
     fn get(&self, path: &str) -> Result<Fetched> {
         let url = self.endpoint.url(path);
         let mut response = self
-            .agent
-            .get(&url)
+            .authorized(self.agent.get(&url))
             .call()
             .map_err(|error| self.transport_error("GET", path, error))?;
         let http_status = response.status().as_u16();
@@ -397,6 +407,15 @@ impl Client {
             .read_to_string()
             .map_err(|error| self.transport_error("GET", path, error))?;
         Ok(Fetched { http_status, body })
+    }
+
+    /// Attach the bearer credential, when this client has one. The one place a
+    /// token is read, so a review has one call to check.
+    fn authorized<Any>(&self, request: ureq::RequestBuilder<Any>) -> ureq::RequestBuilder<Any> {
+        match &self.token {
+            Some(token) => request.header("authorization", format!("Bearer {}", token.as_str())),
+            None => request,
+        }
     }
 
     fn transport_error(&self, method: &str, path: &str, error: ureq::Error) -> Error {

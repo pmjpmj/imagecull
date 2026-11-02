@@ -116,11 +116,20 @@ impl CommonArgs {
 
     /// Build the client the effective config describes, or the message
     /// explaining why it describes nothing.
+    ///
+    /// This is where the token's environment is read: the config file names a
+    /// variable and [`Effective::resolve_token`] takes a lookup, so the reading
+    /// happens at the boundary and everything below it is a function of values
+    /// rather than of a machine's state.
     pub fn client(&self, effective: &Effective) -> Result<Client, String> {
         let endpoint = Endpoint::parse(&effective.endpoint).map_err(|error| error.to_string())?;
+        let token = effective
+            .resolve_token(|name| std::env::var(name).ok())
+            .map_err(|error| error.to_string())?;
         Ok(Client::new(
             endpoint,
             Timeouts::with_read_seconds(effective.timeout),
+            token,
         ))
     }
 }

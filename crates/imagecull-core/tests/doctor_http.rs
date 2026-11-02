@@ -41,7 +41,7 @@ fn route(path: &'static str, status: u16, body: String) -> Route {
 }
 
 fn client(endpoint: Endpoint) -> Client {
-    Client::new(endpoint, Timeouts::with_read_seconds(5))
+    Client::new(endpoint, Timeouts::with_read_seconds(5), None)
 }
 
 /// A port that was free a moment ago: connection refused rather than a timeout.

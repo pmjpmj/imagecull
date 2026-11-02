@@ -33,6 +33,10 @@
 //! group's keeper ([`keeper`]); ticket 03 gave the cull its own pass ([`cull`]):
 //! `imagecull groups` asks the comparative question itself, one request per
 //! round, and marks every non-keeper red. `score` rates frames and nothing else.
+//! The Cloudflare slice makes the wire configurable: `[server]` gains a request
+//! path, a body selector and a token source, and the token is a [`Secret`] —
+//! resolved from the variable that source names ([`config::Effective`]'s
+//! `resolve_token`), carried and compared, never printed.
 #![forbid(unsafe_code)]
 #![deny(
     clippy::print_stdout,
@@ -58,6 +62,7 @@ pub mod progress;
 pub mod reading;
 pub mod rubric;
 pub mod scoring;
+pub mod secret;
 pub mod sidecar;
 pub mod systemone;
 pub mod time;
@@ -83,4 +88,5 @@ pub use scoring::{
     Cancel, Config, Decider, Ending, Outcome, Persisted, Request, Response, RetryPolicy, Run,
     State, Usage,
 };
+pub use secret::Secret;
 pub use sidecar::{ExistingLabel, Failure, Mark, Outputs, Prior, Properties, Row, Written};

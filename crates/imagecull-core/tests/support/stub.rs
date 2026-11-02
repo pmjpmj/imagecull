@@ -42,6 +42,9 @@ impl Route {
 pub struct Received {
     pub path: String,
     pub content_type: Option<String>,
+    /// The `authorization` header, verbatim: `None` when the request carried
+    /// none at all, which is what a keyless oMLX sees.
+    pub authorization: Option<String>,
     /// The body, parsed as JSON when it is JSON and kept as a string otherwise.
     pub body: Value,
 }
@@ -214,6 +217,7 @@ fn handle(mut stream: TcpStream, state: &State) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut path = String::from("/");
     let mut content_type = None;
+    let mut authorization = None;
     let mut length = 0usize;
     let mut first = true;
     loop {
@@ -235,6 +239,8 @@ fn handle(mut stream: TcpStream, state: &State) {
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-type") {
             content_type = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("content-length") {
             length = value.parse().unwrap_or(0);
         }
@@ -252,6 +258,7 @@ fn handle(mut stream: TcpStream, state: &State) {
     state.requests.lock().expect("requests").push(Received {
         path: path.clone(),
         content_type,
+        authorization,
         body: parsed,
     });
 

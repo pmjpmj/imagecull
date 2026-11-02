@@ -1,6 +1,7 @@
 # 03: The client carries a token and a path template; `Secret` redacts
 
-Status: ready-for-agent
+Status: resolved (2026-11-02) — the token is a `Secret`, resolved through an
+injected lookup, and the client attaches it to every request
 Type: task
 Blocked by: 01
 Spec: `.scratch/cloudflare-clef/spec.md`
@@ -80,3 +81,39 @@ saved on a run that has exactly one GET.
 ## Done
 
 Workspace tests green, clippy clean; no call site can print a token.
+
+## Comments
+
+**Implemented 2026-11-02.** `secret::Secret`, `Effective::resolve`, the token
+field on both `Resolved` and `Effective`, and the header on both the GETs and the
+POST landed as written. Five notes:
+
+1. **`resolve_token` hangs off `Effective`, and is not called `resolve`.** The
+   ticket's sketch shows it with no receiver; it reads `token_env` and `token`, so
+   it needs the settled config to read them from. The name grew the suffix because
+   `ConfigFile::resolve` and `Loaded::resolve` already mean "anchor paths into
+   `Resolved`", which is a different job — two `resolve`s one screen apart with
+   different meanings read as a bug. `cli.rs`'s `CommonArgs::client` is the only
+   caller and passes `|name| std::env::var(name).ok()`.
+2. **One constructor, not a builder.** `Client::new(endpoint, timeouts, token)`
+   takes the `Option<Secret>` directly: six call sites, one of which carries a
+   token, and a `with_token` builder would have meant two constructors to keep in
+   step for no readable gain.
+3. **The variable's value is trimmed, and a whitespace-only one counts as
+   empty.** A config refuses a blank `[server] token` by trimming, so a
+   `token_env` whose variable is `"   "` is refused the same way, and one holding
+   `"  abc  "` sends `Bearer abc` rather than `Bearer   abc  ` and 401s per frame.
+   The literal is left as written: a value in a file is one its author can read.
+4. **`Effective::token` is a `Secret` too**, as the ticket asked, so the field can
+   no longer be printed by a diagnostic even before it reaches the client. A test
+   proves `{:#?}` of the whole effective config does not contain it.
+5. **The stub records the `authorization` header** (`tests/support/stub.rs`),
+   which is what lets the absent-header assertion be explicit rather than implied
+   by the request still working. `a_token_rides_on_the_get_probes_too` covers the
+   rule that the GETs carry it as well.
+6. **The boundary has its own test** (`crates/imagecull-cli/tests/token_env.rs`).
+   Every core test injects a lookup, so all of them would stay green if `cli.rs`
+   stopped reading `std::env` — the one-line regression that makes every
+   `token_env` config fatal. Two cases through the real binary: the exported value
+   is what the request carries, and the variable's absence is a fatal exit with no
+   request at all.

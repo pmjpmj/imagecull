@@ -26,6 +26,7 @@ use crate::keeper;
 use crate::omlx;
 use crate::preprocess::Params;
 use crate::rubric::RubricSource;
+use crate::secret::Secret;
 use crate::sidecar::Outputs;
 use crate::systemone;
 
@@ -210,7 +211,7 @@ impl ConfigFile {
             model: self.server.model.clone(),
             selector: self.server.selector.clone(),
             token_env: self.server.token_env.clone(),
-            token: self.server.token.clone(),
+            token: self.server.token.clone().map(Secret::new),
             truncate: self.server.truncate,
             timeout: self.server.timeout,
             score_max_edge: self.score.max_edge,
@@ -585,8 +586,8 @@ pub struct Resolved {
     pub selector: Option<String>,
     /// The environment variable a bearer token is read from.
     pub token_env: Option<String>,
-    /// A literal bearer token.
-    pub token: Option<String>,
+    /// A literal bearer token, wrapped so no `Debug` of this struct prints it.
+    pub token: Option<Secret>,
     /// Whether the body carries `truncate: true`.
     pub truncate: Option<bool>,
     pub timeout: Option<u64>,
@@ -727,10 +728,8 @@ pub struct Effective {
     pub selector: Option<String>,
     /// The environment variable a bearer token is read from, as written.
     pub token_env: Option<String>,
-    /// A literal bearer token, as written. A plain string here rather than a
-    /// redacting `Secret`, which is ticket 03: `Effective`'s derived `Debug`
-    /// would print it, so until that ticket lands nothing may debug-print one.
-    pub token: Option<String>,
+    /// A literal bearer token, as written, wrapped so it cannot be printed.
+    pub token: Option<Secret>,
     /// Whether the request body carries oMLX's `truncate: true`.
     pub truncate: bool,
     /// The read timeout, in seconds.
@@ -789,6 +788,42 @@ impl Effective {
         ScanOptions {
             recursive: self.recursive,
             limit,
+        }
+    }
+
+    /// The bearer token this config asks for, if any: the environment variable
+    /// it names when that variable is set and non-empty, else the literal
+    /// fallback.
+    ///
+    /// The environment arrives as a lookup rather than from `std::env` here,
+    /// for the same reason [`Env`] takes its paths as arguments: the tests run
+    /// in threads, and a test that set a process variable would race every
+    /// other test in the binary. The front end passes
+    /// `|name| std::env::var(name).ok()`; a test passes a closure over a map.
+    ///
+    /// A `token_env` that names a variable with nothing behind it, and no
+    /// literal beside it, is fatal and names the variable: a typo'd name must
+    /// not become an anonymous request the server then rejects 401 frames in a
+    /// row for. The message names the variable, never a value.
+    ///
+    /// The variable's value is trimmed; the literal is not. Stray whitespace in
+    /// an exported variable is a shell quoting accident nobody can see, and
+    /// `Bearer  abc ` is a 401 per frame, while a literal is a value the
+    /// photographer wrote out and can read — `token = " abc "` is theirs to
+    /// keep.
+    pub fn resolve_token(&self, lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Secret>> {
+        let Some(name) = &self.token_env else {
+            return Ok(self.token.clone());
+        };
+        if let Some(value) = lookup(name).filter(|value| !value.trim().is_empty()) {
+            return Ok(Some(Secret::new(value.trim())));
+        }
+        match &self.token {
+            Some(token) => Ok(Some(token.clone())),
+            None => Err(Error::fatal(format!(
+                "{name} is not set and [server] token is empty — export the variable or write \
+                 the key"
+            ))),
         }
     }
 }
