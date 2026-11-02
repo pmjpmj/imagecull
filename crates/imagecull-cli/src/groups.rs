@@ -26,7 +26,6 @@ use imagecull_core::keeper;
 use imagecull_core::omlx;
 use imagecull_core::scoring::RetryPolicy;
 use imagecull_core::sidecar;
-use imagecull_core::systemone::Adapter;
 use imagecull_core::{ExitCode, cull::Verdict};
 
 use crate::cli::GroupsArgs;
@@ -131,6 +130,10 @@ fn cull_streamed(
         .clone()
         .unwrap_or_else(|| omlx::DEFAULT_MODEL.to_string());
     let client = args.common.client(effective)?;
+    // The request the config describes: which path, which body `model`, and
+    // whether the body carries oMLX's `truncate`. A path that needs a model and
+    // has none is refused before a group is culled.
+    let adapter = args.common.adapter(effective, client, &alias)?;
     // The comparison's capacity is the shoot's, not the model's: a server that
     // takes four images per request is a fact about that server, and `chunk`
     // splits any group into batches of it (ADR 0011's rounds are unchanged).
@@ -159,7 +162,7 @@ fn cull_streamed(
     };
     cull::run_streaming(
         &config,
-        &Adapter::new(client, &alias),
+        &adapter,
         writer,
         console,
         effective.cull_jobs,

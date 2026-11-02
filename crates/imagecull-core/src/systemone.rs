@@ -1,11 +1,13 @@
-//! `POST /v1/systemone`: the request body the rubric becomes, and the one
-//! production [`Decider`].
+//! `POST {path}`: the request body the rubric becomes, and the one production
+//! [`Decider`].
 //!
 //! The endpoint is new surface (spec §7), so the body is built in one place and
-//! kept inspectable: exactly one image, a non-null state, `truncate: true`, and
-//! the rubric's questions in declaration order. The adapter classifies
-//! transport and status failures into the taxonomy and hands the raw document
-//! on untouched; reading it is [`reading`](crate::reading)'s job.
+//! kept inspectable: exactly one image, a non-null state, the rubric's questions
+//! in declaration order, and the three facts a `[server]` section decides — the
+//! path a request addresses, what the body's `model` says, and whether it
+//! carries oMLX's `truncate`. The adapter classifies transport and status
+//! failures into the taxonomy and hands the raw document on untouched; reading
+//! it is [`reading`](crate::reading)'s job.
 
 use std::time::Instant;
 
@@ -19,24 +21,92 @@ use crate::keeper::{self, Comparison};
 use crate::omlx::Client;
 use crate::scoring::{Decider, Request, Response, State};
 
-/// The path a decision model is served on (spec §7.1).
+/// The path a decision model is served on by default (spec §7.1).
+///
+/// It is oMLX's, which is why it is the default [`Wire`] and what `config.rs`
+/// settles to; nothing in the adapter reads the constant itself.
 pub const PATH: &str = "/v1/systemone";
 
-/// The oMLX HTTP adapter: the only [`Decider`] that opens a socket.
+/// The one placeholder a path template may carry.
+const MODEL_PLACEHOLDER: &str = "{model}";
+
+/// The HTTP wire a run addresses: the three facts a `[server]` section decides.
+///
+/// Built in `cli.rs` from the effective config and handed to [`Adapter::new`],
+/// which fills a missing selector with the model it was built for and
+/// interpolates the path. Owned values rather than a borrowed `Effective`,
+/// because the adapter is `Clone` and shared across a cull's workers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wire {
+    /// The request path, as a template: `{model}` becomes the run's model id,
+    /// verbatim and unencoded.
+    pub path: String,
+    /// The body's `model` value, when the server wants a selector rather than
+    /// the id. `None` sends the model whole, which is oMLX's case.
+    pub selector: Option<String>,
+    /// Whether the body carries oMLX's `truncate: true`. Workers AI's schema
+    /// lists no such field, and sends it absent rather than false.
+    pub truncate: bool,
+}
+
+impl Default for Wire {
+    /// oMLX's wire, which is what a config that names no `[server]` key
+    /// describes: the fixed path, the model id whole, and `truncate`.
+    fn default() -> Wire {
+        Wire {
+            path: PATH.to_string(),
+            selector: None,
+            truncate: true,
+        }
+    }
+}
+
+/// The HTTP adapter: the only [`Decider`] that opens a socket.
 #[derive(Debug, Clone)]
 pub struct Adapter {
     client: Client,
+    /// The model id: interpolated into the path, and the body's `model` when no
+    /// selector was configured.
     model: String,
+    /// The path template, unresolved: [`Adapter::path_for`] fills it per request,
+    /// because only the request knows the path it posts to.
+    path: String,
+    /// The body's `model` value: the config's selector, or the model id whole.
+    selector: String,
+    /// Whether the body carries oMLX's `truncate: true`.
+    truncate: bool,
 }
 
 impl Adapter {
-    /// Wrap a client for one alias. The client's timeouts are the request's
-    /// timeouts, and the alias is what the preflight looks for on the server.
-    pub fn new(client: Client, model: impl Into<String>) -> Adapter {
-        Adapter {
-            client,
-            model: model.into(),
+    /// Wrap a client and a [`Wire`] for one model. The client's timeouts are the
+    /// request's timeouts, the model is what the preflight looks for on an oMLX
+    /// server, and the wire is where each request goes and what it says.
+    ///
+    /// A path that needs a model, with no model to fill it, is fatal here rather
+    /// than at the first request: a config can be legal and still describe
+    /// nothing, and a template with a brace in it would 404 once per frame.
+    pub fn new(client: Client, model: impl Into<String>, wire: Wire) -> Result<Adapter> {
+        let model = model.into();
+        if model.trim().is_empty() && wire.path.contains(MODEL_PLACEHOLDER) {
+            return Err(Error::fatal(
+                "the configured request path needs a model — pass --model or set [server] model",
+            ));
         }
+        Ok(Adapter {
+            client,
+            selector: wire.selector.unwrap_or_else(|| model.clone()),
+            model,
+            path: wire.path,
+            truncate: wire.truncate,
+        })
+    }
+
+    /// The path this adapter posts to, with the model id interpolated verbatim.
+    ///
+    /// No escaping: Workers AI ids contain `/` and `@`, which *are* the address
+    /// being asked for, and encoding them would address something else.
+    fn path_for(&self) -> String {
+        self.path.replace(MODEL_PLACEHOLDER, &self.model)
     }
 }
 
@@ -61,11 +131,11 @@ impl Decider for Adapter {
     }
 
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
-        self.ask(body(request), Asked::Frame)
+        self.ask(self.body(request), Asked::Frame)
     }
 
     fn compare(&self, comparison: &Comparison) -> Result<Response> {
-        self.ask(comparison_body(comparison), Asked::Group)
+        self.ask(self.comparison_body(comparison), Asked::Group)
     }
 }
 
@@ -77,12 +147,18 @@ impl Adapter {
     /// body which is not JSON is still kept cannot drift apart between a frame
     /// and a group.
     fn ask(&self, payload: Value, kind: Asked) -> Result<Response> {
+        let path = self.path_for();
         let started = Instant::now();
-        let fetched = self.client.post_json(PATH, &payload)?;
+        let fetched = self.client.post_json(&path, &payload)?;
         let client_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !(200..300).contains(&fetched.http_status) {
-            return Err(failure(fetched.http_status, &fetched.body, kind));
+            return Err(failure(
+                fetched.http_status,
+                &fetched.body,
+                kind,
+                &self.client.endpoint().path_of(&path),
+            ));
         }
 
         // A body that is not JSON is still kept as the document (as a string),
@@ -95,26 +171,84 @@ impl Adapter {
             client_latency_ms,
         })
     }
+
+    /// The JSON body of one request, exactly as it goes on the wire.
+    ///
+    /// Private on purpose: the one seam is [`Decider`], and contract tests assert
+    /// on this document by recording what a real request carried rather than by
+    /// calling the renderer behind the adapter's back.
+    fn body(&self, request: &Request<'_>) -> Value {
+        self.envelope(
+            &request.state,
+            vec![data_uri(&request.preview.jpeg)],
+            request.rubric.questions_json(),
+        )
+    }
+
+    /// The JSON body of one comparative request: several previews of one moment,
+    /// and the question which of them to keep.
+    ///
+    /// The shape is the one measured against the reference server (see
+    /// `.scratch/burst-grouping-v1/evidence/comparison-budget.md`): `questions` is
+    /// a map keyed by question id, `criteria` is a map from option key to
+    /// description, and every image is a data URI. The option keys are the
+    /// frames' positions, so the answer is a position in this list and nothing
+    /// else.
+    fn comparison_body(&self, comparison: &Comparison) -> Value {
+        let mut criteria = Map::new();
+        for position in 1..=comparison.previews.len() {
+            criteria.insert(
+                position.to_string(),
+                Value::String(format!("image at position {position}")),
+            );
+        }
+        let mut question = Map::new();
+        question.insert("type".to_string(), Value::String("choice".to_string()));
+        question.insert(
+            "instructions".to_string(),
+            Value::String(keeper::INSTRUCTIONS.to_string()),
+        );
+        question.insert("criteria".to_string(), Value::Object(criteria));
+        let mut questions = Map::new();
+        questions.insert(keeper::QUESTION.to_string(), Value::Object(question));
+
+        self.envelope(
+            &comparison.state,
+            comparison
+                .previews
+                .iter()
+                .map(|preview| data_uri(&preview.jpeg))
+                .collect(),
+            Value::Object(questions),
+        )
+    }
+
+    /// The envelope every request in this run shares: the model the server is
+    /// asked for, the state, the images, oMLX's `truncate` when the wire wants
+    /// it, and the questions last.
+    ///
+    /// One builder, so a rating and a comparison cannot disagree about what a
+    /// request is made of. `truncate` is written only when the wire asks for it —
+    /// absent and `false` are different requests, and Workers AI's schema has no
+    /// such field — and in its original position, because `serde_json` keeps
+    /// insertion order and an oMLX body has to stay byte for byte what it was.
+    fn envelope(&self, state: &State, images: Vec<String>, questions: Value) -> Value {
+        let mut body = json!({
+            "model": self.selector,
+            "state": state_json(state),
+            "images": images,
+        });
+        if self.truncate {
+            body["truncate"] = json!(true);
+        }
+        body["questions"] = questions;
+        body
+    }
 }
 
-/// The JSON body of one request, exactly as it goes on the wire.
-///
-/// Crate-internal on purpose: the one seam is [`Decider`], and contract tests
-/// assert on this document by recording what a real request carried rather than
-/// by calling the renderer behind the adapter's back.
-pub(crate) fn body(request: &Request<'_>) -> Value {
-    json!({
-        "model": request.model,
-        "state": state(&request.state),
-        "images": [data_uri(&request.preview.jpeg)],
-        "truncate": true,
-        "questions": request.rubric.questions_json(),
-    })
-}
-
-/// The request's state. Never null: a cull always has a task and a filename
-/// (spec §7.1), and the photographer's context when they gave one.
-fn state(state: &State) -> Value {
+/// The request's state as JSON. Never null: a cull always has a task and a
+/// filename (spec §7.1), and the photographer's context when they gave one.
+fn state_json(state: &State) -> Value {
     let mut state_json = Map::new();
     state_json.insert("task".to_string(), Value::String(state.task.clone()));
     state_json.insert(
@@ -125,45 +259,6 @@ fn state(state: &State) -> Value {
         state_json.insert("shoot_context".to_string(), Value::String(context.clone()));
     }
     Value::Object(state_json)
-}
-
-/// The JSON body of one comparative request: several previews of one moment, and
-/// the question which of them to keep.
-///
-/// The shape is the one measured against the reference server (see
-/// `.scratch/burst-grouping-v1/evidence/comparison-budget.md`): `questions` is a
-/// map keyed by question id, `criteria` is a map from option key to description,
-/// and every image is a data URI. The option keys are the frames' positions, so
-/// the answer is a position in this list and nothing else.
-pub(crate) fn comparison_body(comparison: &Comparison) -> Value {
-    let mut criteria = Map::new();
-    for position in 1..=comparison.previews.len() {
-        criteria.insert(
-            position.to_string(),
-            Value::String(format!("image at position {position}")),
-        );
-    }
-    let mut question = Map::new();
-    question.insert("type".to_string(), Value::String("choice".to_string()));
-    question.insert(
-        "instructions".to_string(),
-        Value::String(keeper::INSTRUCTIONS.to_string()),
-    );
-    question.insert("criteria".to_string(), Value::Object(criteria));
-    let mut questions = Map::new();
-    questions.insert(keeper::QUESTION.to_string(), Value::Object(question));
-
-    json!({
-        "model": comparison.model,
-        "state": state(&comparison.state),
-        "images": comparison
-            .previews
-            .iter()
-            .map(|preview| data_uri(&preview.jpeg))
-            .collect::<Vec<String>>(),
-        "truncate": true,
-        "questions": questions,
-    })
 }
 
 /// The preview as the full data URI oMLX takes (spec §6.6).
@@ -187,10 +282,12 @@ enum Asked {
 /// The row is the only thing the photographer reads after a run, so a status
 /// with a known remedy says what to change: a context that is too long asks for
 /// a smaller preview, and a group that does not fit is a group nothing was
-/// marked for.
-fn failure(status: u16, body: &str, asked: Asked) -> Error {
+/// marked for. The path is the one this request actually posted to, never a
+/// constant: it has to be the request the photographer can reproduce with
+/// `curl`.
+fn failure(status: u16, body: &str, asked: Asked, path: &str) -> Error {
     let kind = ErrorKind::from_status_code(status).unwrap_or(ErrorKind::BadResponse);
-    let mut message = format!("POST {PATH} returned HTTP {status}");
+    let mut message = format!("POST {path} returned HTTP {status}");
     let detail = detail(body);
     if !detail.is_empty() {
         message.push_str(": ");

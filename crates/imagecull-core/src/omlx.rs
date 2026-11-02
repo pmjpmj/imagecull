@@ -95,6 +95,26 @@ impl Endpoint {
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.0, path)
     }
+
+    /// The path portion of the URL a request to `path` addresses: the endpoint's
+    /// own path when it carries one, followed by `path`.
+    ///
+    /// This is what a failure row names, because the row has to read the same
+    /// whether or not the endpoint carries a prefix: an oMLX on
+    /// `http://127.0.0.1:8000` posts to `/v1/systemone` and stays silent about the
+    /// host, while a Workers AI account's base URL carries
+    /// `/client/v4/accounts/<id>/ai/run` and the photographer needs all of it to
+    /// reproduce the request.
+    pub fn path_of(&self, path: &str) -> String {
+        let after_scheme = self
+            .0
+            .split_once("://")
+            .map_or(self.0.as_str(), |(_scheme, rest)| rest);
+        match after_scheme.find('/') {
+            Some(prefix) => format!("{}{}", &after_scheme[prefix..], path),
+            None => path.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Endpoint {
@@ -554,6 +574,24 @@ mod tests {
             let error = Endpoint::parse(bad).unwrap_err();
             assert!(error.is_fatal(), "{bad} should be a fatal argument error");
         }
+    }
+
+    #[test]
+    fn a_request_path_is_the_endpoints_own_path_plus_the_request() {
+        let bare = Endpoint::parse("http://127.0.0.1:8000").expect("a base URL");
+        assert_eq!(
+            bare.path_of("/v1/systemone"),
+            "/v1/systemone",
+            "an endpoint with no path of its own names only the request path, as it always has"
+        );
+
+        let prefixed = Endpoint::parse("https://api.cloudflare.com/client/v4/accounts/abc/ai/run")
+            .expect("a base URL with a path");
+        assert_eq!(
+            prefixed.path_of("/@cf/cloudflare/clef-flash"),
+            "/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash",
+            "a prefixed endpoint names the whole path the request addresses"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use imagecull_core::group;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::omlx::{self, Client, Endpoint, Timeouts};
 use imagecull_core::rubric::{Builtin, RubricSource};
+use imagecull_core::systemone::{Adapter, Wire};
 
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
@@ -106,6 +107,36 @@ impl CommonArgs {
         }
         let env = config::Env::of_process().map_err(|error| error.to_string())?;
         config::discover(self.config.as_deref(), &env).map_err(|error| error.to_string())
+    }
+
+    /// The HTTP wire this run's requests carry: the path template, the body's
+    /// selector and whether the body carries `truncate`, straight from the
+    /// effective config.
+    ///
+    /// The template stays unresolved and a missing selector stays missing: only
+    /// the command knows the model the run settles on — a rating's is the
+    /// rubric's alias when nothing named one — and [`Wire`] is resolved against
+    /// it when the adapter is built.
+    pub fn wire(&self, effective: &Effective) -> Wire {
+        Wire {
+            path: effective.path.clone(),
+            selector: effective.body_model().map(str::to_string),
+            truncate: effective.truncate,
+        }
+    }
+
+    /// The adapter the effective config describes, for the model the command
+    /// settled on: the client it was given, and the wire above.
+    ///
+    /// The only failure is the one [`Adapter::new`] refuses — a path that needs a
+    /// model, with nothing to put in it — and it arrives before a frame is read.
+    pub fn adapter(
+        &self,
+        effective: &Effective,
+        client: Client,
+        model: &str,
+    ) -> Result<Adapter, String> {
+        Adapter::new(client, model, self.wire(effective)).map_err(|error| error.to_string())
     }
 
     /// The alias `doctor` and `models` work with: the configured one, or the
@@ -682,6 +713,45 @@ mod tests {
             "a path stays a path through every layer"
         );
         assert_eq!(effective.timeout, 240);
+    }
+
+    #[test]
+    fn the_config_file_settles_into_the_wire_it_describes() {
+        // The mapping itself, from the settled config to the three facts a
+        // request carries. The contract tests prove what the adapter does with
+        // them once it has them.
+        let file = config::ConfigFile::from_toml(
+            "[server]\n\
+             endpoint = \"https://api.cloudflare.com/client/v4/accounts/abc/ai/run\"\n\
+             path = \"/{model}\"\n\
+             model = \"@cf/cloudflare/clef-flash\"\n\
+             selector = \"clef-flash\"\n\
+             truncate = false\n",
+        )
+        .expect("a valid config");
+        let Command::Score(args) = parse(&["score", "shoot"]) else {
+            panic!("not a score command");
+        };
+
+        let effective = file
+            .resolve(None)
+            .override_with(args.overrides())
+            .settle(None);
+        let wire = args.common.wire(&effective);
+        assert_eq!(
+            wire.path, "/{model}",
+            "the template stays unresolved: only the adapter knows the model"
+        );
+        assert_eq!(
+            wire.selector.as_deref(),
+            Some("clef-flash"),
+            "the body's model is the selector, not the id"
+        );
+        assert!(!wire.truncate, "Workers AI's schema lists no truncate");
+
+        // And a config that says nothing describes oMLX's wire exactly.
+        let bare = args.overrides().settle(None);
+        assert_eq!(args.common.wire(&bare), Wire::default());
     }
 
     #[test]

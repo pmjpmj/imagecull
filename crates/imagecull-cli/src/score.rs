@@ -13,7 +13,6 @@ use std::sync::Arc;
 use imagecull_core::config::Effective;
 use imagecull_core::rubric::Rubric;
 use imagecull_core::scoring::{self, Cancel};
-use imagecull_core::systemone::Adapter;
 use imagecull_core::{ExitCode, dry_run};
 
 use crate::cli::ScoreArgs;
@@ -65,6 +64,17 @@ pub fn run(args: &ScoreArgs) -> u8 {
         }
     };
 
+    // The request the config describes: which path, which body `model`, and
+    // whether the body carries oMLX's `truncate`. A path that needs a model and
+    // has none is fatal here, before a frame is read.
+    let adapter = match args.common.adapter(&effective, client, &config.model) {
+        Ok(adapter) => adapter,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::Fatal.code();
+        }
+    };
+
     let cancel = Arc::new(Cancel::new());
     install_cancel_handler(&cancel);
 
@@ -78,14 +88,7 @@ pub fn run(args: &ScoreArgs) -> u8 {
     } else {
         &imagecull_core::sidecar::Filesystem
     };
-    match scoring::run(
-        &args.dir,
-        &config,
-        &Adapter::new(client, &config.model),
-        writer,
-        &reporter,
-        &cancel,
-    ) {
+    match scoring::run(&args.dir, &config, &adapter, writer, &reporter, &cancel) {
         Ok(run) => run.exit_code().code(),
         Err(error) => {
             eprintln!("error: {error}");
