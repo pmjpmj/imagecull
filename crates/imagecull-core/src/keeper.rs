@@ -13,8 +13,12 @@
 //! pixel area: 1,639 at 1568 px, 696 at 1024, 201 at 512. Over the cap it answers
 //! `413` and drops nothing, so a whole-group answer or a reported failure are the
 //! only two outcomes — but a request that 413s has already been built, paid for
-//! and refused. So the request is built to fit: previews at [`EDGE`] px and at
-//! most [`MAX`] of them (4,154 tokens, a quarter of the budget, measured).
+//! and refused. So the request is built to fit: previews at [`EDGE`] px by
+//! default and at most [`MAX`] of them (4,154 tokens, a quarter of the budget,
+//! measured). The edge is the one part of that shape a run may move — `[group]
+//! max_edge` or `groups --max-edge` — because a photographer weighing detail
+//! against the token cap is asking about the picture; the cap and the floor stay
+//! measured.
 //!
 //! # A group larger than one request is compared in rounds
 //!
@@ -52,12 +56,31 @@
 
 use serde_json::Value;
 
-use crate::preprocess::Encoded;
+use crate::preprocess::{Encoded, Params};
 use crate::scoring::{Response, State};
 
 /// The longest edge of a comparison preview, in pixels: measured decisive on a
 /// real difference (0.98 sharp against soft) and 3× cheaper than 1024.
+///
+/// This is the default, not a constant of the algorithm: a run sends its
+/// comparison previews at [`Params::max_edge`](crate::preprocess::Params::max_edge),
+/// which [`cull::Config::preview`](crate::cull::Config::preview) carries. A
+/// larger edge sees more detail and costs more tokens per frame, so [`MAX`]
+/// frames at 1568 px no longer fit one request and the group's `413` says which
+/// flag would make it fit.
 pub const EDGE: u32 = 512;
+
+/// The payload shape of one image in a comparison, when the run said nothing:
+/// [`EDGE`] px, at the quality a rating would encode at.
+///
+/// The quality is not a second measurement — it only moves bytes on the wire —
+/// so the two commands share it and the edge is the number a cull can differ on.
+pub const fn default_preview() -> Params {
+    Params {
+        max_edge: EDGE,
+        jpeg_quality: Params::DEFAULT_JPEG_QUALITY,
+    }
+}
 
 /// The most frames one comparative request carries: 4,154 tokens of the
 /// 16,384-token image budget, measured.
@@ -150,12 +173,15 @@ pub const INSTRUCTIONS: &str = "Several frames of one burst are shown, in order.
 ///
 /// The defaults are the measured ones and are part of the algorithm, like
 /// [`Thresholds`](crate::group::Thresholds): a run does not take them from the
-/// command line, because a photographer choosing them would be choosing how much
-/// picture the model gets to see, which is a fact about the model.
+/// command line, because choosing them would be choosing how many frames are
+/// compared at once and how sure is sure, which are facts about the model.
+///
+/// The *size* of each preview is not here: it is the run's own [`Params`],
+/// defaulting to [`EDGE`], because a
+/// photographer weighing token budget against detail is asking about the picture
+/// and not about the comparison's shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
-    /// The longest edge of each preview in the request, in pixels.
-    pub edge: u32,
     /// The most previews one request carries.
     pub max: usize,
     /// The confidence below which a group is counted as low-confidence and its
@@ -166,7 +192,6 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Budget {
         Budget {
-            edge: EDGE,
             max: MAX,
             floor: FLOOR,
         }
@@ -225,8 +250,8 @@ pub fn shakiest(confidences: impl IntoIterator<Item = f64>) -> f64 {
 /// question which of them to keep.
 ///
 /// Owned rather than borrowed, unlike [`Request`](crate::scoring::Request),
-/// because the previews are rendered for this request alone at [`Budget::edge`]
-/// and die with it.
+/// because the previews are rendered for this request alone, at the run's
+/// comparison [`Params`], and die with it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comparison {
     /// The alias the request asks.

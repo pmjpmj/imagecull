@@ -201,7 +201,8 @@ fn failure(status: u16, body: &str, asked: Asked) -> Error {
             Asked::Frame => " — the preview is too big for the model's context; lower --max-edge",
             Asked::Group => {
                 " — the group needs more image tokens than this model's context holds, so nothing \
-                 was marked; the request is refused rather than quietly made smaller"
+                 was marked; the request is refused rather than quietly made smaller, and a lower \
+                 --max-edge (or [group] max_edge) is how to ask for less picture"
             }
         });
     }

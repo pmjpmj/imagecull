@@ -131,12 +131,14 @@ pub struct Config<'a> {
     pub model: &'a str,
     /// The photographer's framing of the shoot, when they gave one.
     pub shoot_context: Option<String>,
-    /// The measured request shape: edge, cap and confidence floor.
+    /// The comparison's shape: at most how many frames one request carries, and
+    /// the confidence under which a verdict is reported as shaky.
     pub budget: Budget,
-    /// The JPEG quality a comparison preview is encoded at. Its edge is the
-    /// budget's, because that is the measured number and a caller cannot choose
-    /// how much picture the model sees.
-    pub jpeg_quality: u8,
+    /// The payload shape of one image in a request: its longest edge and its
+    /// JPEG quality. The run's own — `[group] max_edge` / `[group]
+    /// jpeg_quality`, `groups --max-edge` / `--jpeg-quality` — defaulting to
+    /// [`keeper::EDGE`] and [`Params::DEFAULT_JPEG_QUALITY`].
+    pub preview: Params,
     /// The grouping hash the groups were computed under, written with every
     /// verdict.
     pub grouping_hash: &'a str,
@@ -569,22 +571,18 @@ fn choose(
     }
 }
 
-/// One batch's comparative request: its previews at the measured edge, the
-/// group's name and framing, and one answer naming the frame to keep.
+/// One batch's comparative request: its previews at the run's comparison edge,
+/// the group's name and framing, and one answer naming the frame to keep.
 fn compare_batch(
     row: &GroupRow<'_>,
     batch: &[usize],
     config: &Config<'_>,
     decider: &dyn Decider,
 ) -> std::result::Result<keeper::Choice, Failure> {
-    let params = Params {
-        max_edge: config.budget.edge,
-        jpeg_quality: config.jpeg_quality,
-    };
     let mut previews = Vec::with_capacity(batch.len());
     for &place in batch {
         previews.push(
-            scoring::prepare(&row.frames[place].source, &params)
+            scoring::prepare(&row.frames[place].source, &config.preview)
                 .map_err(|error| Failure::of(&error))?,
         );
     }
@@ -898,7 +896,7 @@ mod tests {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: Budget::default(),
-            jpeg_quality: Params::default().jpeg_quality,
+            preview: Params::default(),
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -918,7 +916,7 @@ mod tests {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: Budget::default(),
-            jpeg_quality: Params::default().jpeg_quality,
+            preview: Params::default(),
             grouping_hash: &hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -972,7 +970,7 @@ mod tests {
                 max: 1,
                 ..Budget::default()
             },
-            jpeg_quality: Params::default().jpeg_quality,
+            preview: Params::default(),
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -1011,7 +1009,7 @@ mod tests {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: Budget::default(),
-            jpeg_quality: Params::default().jpeg_quality,
+            preview: Params::default(),
             grouping_hash: &plan.hash,
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),

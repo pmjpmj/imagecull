@@ -288,6 +288,16 @@ pub struct GroupsArgs {
     #[arg(long, value_name = "STOPS", value_parser = exposure_stops)]
     pub group_exposure_stops: Option<f64>,
 
+    /// Cap on the longest edge of one image in a comparison, in pixels (default
+    /// 512): every frame of a group is sent at this size, so it sets what detail
+    /// the comparison can see and what one request costs
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_edge: Option<u32>,
+
+    /// JPEG quality of one image in a comparison, 1-100 (default 88)
+    #[arg(long, value_name = "QUALITY", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub jpeg_quality: Option<u8>,
+
     /// How many frames to read at once, on this machine's own cores
     /// (default: one per core)
     #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
@@ -331,14 +341,19 @@ impl GroupsArgs {
     /// `--recursive` is included even though a run's breadth is the file's
     /// subject and not the invocation's: the flag takes an explicit `false`, so
     /// a shoot config that turns recursion on can still be turned off for one
-    /// run. `--limit`, `--out`, `--jobs`, `--cull-jobs` and the cull/console
-    /// flags describe the invocation and stay out.
+    /// run. `--max-edge` and `--jpeg-quality` are the comparison's own pair, and
+    /// land on the `group_` keys: `score`'s `--max-edge` does not reach a cull,
+    /// and a cull's does not reach a rating. `--limit`, `--out`, `--jobs`,
+    /// `--cull-jobs` and the cull/console flags describe the invocation and stay
+    /// out.
     pub fn overrides(&self) -> Resolved {
         Resolved {
             recursive: self.recursive,
             group_gap: self.group_gap,
             group_similarity: self.group_similarity,
             group_exposure_stops: self.group_exposure_stops,
+            group_max_edge: self.max_edge,
+            group_jpeg_quality: self.jpeg_quality,
             ..self.common.overrides()
         }
     }
@@ -860,6 +875,8 @@ mod tests {
         assert_eq!(args.group_gap, None);
         assert_eq!(args.group_similarity, None);
         assert_eq!(args.group_exposure_stops, None);
+        assert_eq!(args.max_edge, None);
+        assert_eq!(args.jpeg_quality, None);
         assert_eq!(args.jobs, None);
         assert_eq!(args.cull_jobs, None);
 
@@ -868,6 +885,84 @@ mod tests {
         assert_eq!(options.jobs, None, "unasked means one job per core");
         assert!(!options.scan.recursive);
         assert_eq!(options.scan.limit, None);
+
+        let effective = args.overrides().settle(None);
+        assert_eq!(
+            effective.group_params,
+            Params {
+                max_edge: imagecull_core::keeper::EDGE,
+                jpeg_quality: Params::DEFAULT_JPEG_QUALITY,
+            },
+            "a comparison defaults to the measured 512 px, not a rating's 1568"
+        );
+    }
+
+    #[test]
+    fn groups_takes_the_comparisons_preview_flags() {
+        let Command::Groups(args) = parse(&[
+            "groups",
+            "shoot",
+            "--max-edge",
+            "640",
+            "--jpeg-quality",
+            "60",
+        ]) else {
+            panic!("not a groups command");
+        };
+        assert_eq!(args.max_edge, Some(640));
+        assert_eq!(args.jpeg_quality, Some(60));
+
+        let effective = args.overrides().settle(None);
+        assert_eq!(
+            effective.group_params,
+            Params {
+                max_edge: 640,
+                jpeg_quality: 60,
+            }
+        );
+        assert_eq!(
+            effective.params,
+            Params::default(),
+            "a cull's --max-edge is not a rating's"
+        );
+
+        for arguments in [
+            &["groups", "shoot", "--max-edge", "0"][..],
+            &["groups", "shoot", "--jpeg-quality", "0"][..],
+            &["groups", "shoot", "--jpeg-quality", "101"][..],
+        ] {
+            assert!(
+                parse_result(arguments).is_err(),
+                "{arguments:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_takes_its_comparison_pair_from_the_config_file() {
+        let file = config::ConfigFile::from_toml("[group]\nmax_edge = 700\njpeg_quality = 55\n")
+            .expect("a valid config");
+        let Command::Groups(args) = parse(&["groups", "shoot"]) else {
+            panic!("not a groups command");
+        };
+
+        let effective = file
+            .resolve(None)
+            .override_with(args.overrides())
+            .settle(None);
+        assert_eq!(
+            effective.group_params,
+            Params {
+                max_edge: 700,
+                jpeg_quality: 55,
+            },
+            "[group] max_edge and jpeg_quality reach the cull"
+        );
+        assert_eq!(
+            effective.params,
+            Params::default(),
+            "and [preview] stays score's"
+        );
     }
 
     #[test]
