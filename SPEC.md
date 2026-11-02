@@ -1,7 +1,7 @@
 # imagecull — Specification
 
 **Status:** Draft v0.1 · **Target platform:** macOS on Apple Silicon · **Language:** Rust
-**One-liner:** Score a folder of Nikon mirrorless NEFs with a local Clef decision model over oMLX, and write each rating into an XMP sidecar so Lightroom Classic opens pre-culled.
+**One-liner:** Score a folder of Nikon mirrorless NEFs with a Clef decision model — a local oMLX by default, any SystemOne host when configured (§7) — and write each rating into an XMP sidecar so Lightroom Classic opens pre-culled.
 
 ---
 
@@ -9,7 +9,7 @@
 
 A shoot lands as 300–800 NEFs. All of them are technically fine; maybe 10% are the keepers. Judging that today means opening every frame in a RAW editor and tapping stars — an hour or two of pure triage, before any editing starts.
 
-The task is *decision*, not generation: each frame gets one keeper rating from 1 to 5. That maps exactly onto Cloudflare's **Clef**, served locally by **oMLX** on `POST /v1/systemone` — it reads a state plus a schema of typed questions and returns a probability for every allowed option in **one forward pass**, with no generated text to parse.
+The task is *decision*, not generation: each frame gets one keeper rating from 1 to 5. That maps exactly onto Cloudflare's **Clef**, served locally by **oMLX** on `POST /v1/systemone` (or by Workers AI on `POST …/ai/run/@cf/cloudflare/clef`, §7) — it reads a state plus a schema of typed questions and returns a probability for every allowed option in **one forward pass**, with no generated text to parse.
 
 ## 2. Goals
 
@@ -30,7 +30,7 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
 - No catalog database, no library management, no import/export to Lightroom's catalog.
 - No writing anywhere but the sidecars of the shoot folder (no catalogue import, no raw edits), no GUI (v3, §13).
 - No video (`/v1/systemone` does not accept video over HTTP).
-- No cloud calls, no telemetry, no server management (starting/stopping oMLX).
+- No cloud calls by default, no telemetry, no server management (starting/stopping oMLX). A configured `[server] endpoint` may name a service — Workers AI, a tunnel to a workstation, a gateway — and the run then sends it the same previews it would have sent a local oMLX. That is the photographer's decision, made per shoot in one file, and it is why a token is read from the environment rather than written into the file (§7, ADR 0018).
 - No batching. A frame is rated by one request and a group is compared by one request per round; the client never packs several frames into a per-frame decision. The group cull may have several *groups'* comparative requests in flight at once (`--cull-jobs`), which is a pipeline, not a batch.
 
 ## 4. Locked decisions
@@ -163,16 +163,29 @@ separate.
 
 ---
 
-## 7. Clef over oMLX — the wire contract
+## 7. The SystemOne wire — Clef over oMLX, and over any other host
 
-**Requires oMLX ≥ 0.7.1.dev1** (decision models merged in `jundot/omlx#4315`). Before that, Clef checkpoints loaded as plain VLMs and returned meaningless text; `POST /v1/chat/completions` on a decision model returns **400** pointing at `/v1/systemone`. `imagecull doctor` must detect and explain exactly this.
+oMLX is the **reference server** this contract is written against, not the only one. Cloudflare hosts the same model family on Workers AI (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`) behind the same decision API: the request body and the answer are the same shape. Five facts about addressing and the payload differ, and each is a `[server]` or `[group]` key, so oMLX, Workers AI and any other SystemOne host (Vultr, DeepInfra) are one code path with different config — never a `provider` switch with a branch inside it (ADR 0018). The sixth row is why `doctor` and `models` stay oMLX-only.
+
+| | local oMLX | Cloudflare Workers AI |
+|---|---|---|
+| address | `http://127.0.0.1:8000/v1/systemone` (the default) | `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}` — the id's own prefix is in the address |
+| body `model` | the alias, `clef-flash-oQ4e` | the name, `clef` or `clef-flash` — the same string `{model}` becomes |
+| auth | none | `Authorization: Bearer <API token>` |
+| `truncate: true` | an oMLX request field | not in Workers AI's schema |
+| images per request | the measured budget of 20 | `maxItems: 4` |
+| `/health`, `/v1/models`, `/v1/models/status` | oMLX's own probes | absent |
+
+**Requires oMLX ≥ 0.7.1.dev1** (decision models merged in `jundot/omlx#4315`). Before that, Clef checkpoints loaded as plain VLMs and returned meaningless text; `POST /v1/chat/completions` on a decision model returns **400** pointing at `/v1/systemone`. `imagecull doctor` must detect and explain exactly this — against oMLX, which is the only server whose probes it reads.
 
 ### 7.1 Request
 
 ```http
-POST {endpoint}/v1/systemone
+POST {endpoint}
 Content-Type: application/json
 ```
+
+`endpoint` is the whole address a request is posted to, path and all — there is no separate `path` key (ADR 0019). It is a template interpolated once per request: `{model}` becomes the run's model name, verbatim and unencoded, because a Workers AI name contains `/` and `@` and those *are* the address. The address defaults to `http://127.0.0.1:8000/v1/systemone`, oMLX's own. A placeholder other than `{model}` is fatal when the client is built, as is one in the scheme or host; a `{model}` template with no model configured is fatal when the adapter is built, because `--model` or the rubric's own alias may still supply one. A model name carrying whitespace or braces is fatal there too, since it is both a path segment and a body value. Each refusal names what to change.
 
 ```json
 {
@@ -189,13 +202,17 @@ Content-Type: application/json
 ```
 
 - `state` must not be null. It carries the *task framing* and user context — never the scores.
+- `model` is the run's model name — the same string the address's `{model}` becomes, and by default the rubric's own alias. Workers AI wants the short name (`clef-flash`) where oMLX wants the full alias (`clef-flash-oQ4e`); the `@cf/…` id is not sent as `model` at all, and never has to be typed, because the id's prefix lives in the address.
 - Exactly **one** image per request. Several are supported by the API, but one frame per decision keeps results attributable.
-- `truncate: true` (default). Clef cuts the state to fit 16,384 tokens instead of returning 413. Our prompt is far smaller than that, so truncation should never fire — if it does, the telemetry in §9 will show it via an unexpectedly low `input_tokens` ceiling.
+- `truncate: true` (default). It is an oMLX request field: `[server] truncate = false` for servers whose schema does not list it, and the field is then absent rather than `false`. Clef cuts the state to fit 16,384 tokens instead of returning 413. Our prompt is far smaller than that, so truncation should never fire — if it does, the telemetry in §9 will show it via an unexpectedly low `input_tokens` ceiling.
+- A comparison carries up to twenty images (`[group] max_images`, `keeper::MAX`), which is the reference server's measured budget: a server that takes fewer per request (Workers AI: 4) sets the key lower, and a group larger than the cap is split into rounds rather than refused (§11.1, `keeper::chunk`). It is scheduling, not algorithm, so it does not enter the grouping hash.
+- Answer envelopes differ in one way that is not configurable: Workers AI wraps the answer document in a `result` object. Reading accepts either — a top-level `answers` wins, else the body's `result` object is read — and nothing deeper is searched, so a document that has genuinely drifted still fails as `bad_response` rather than being found somewhere by luck.
 - A per-frame rating is one request at a time. The group cull may have up to `--cull-jobs` comparative requests in flight at once (default 4, or `[group] cull_jobs`); oMLX serialises them server-side, so the degree is bounded by the setting and is not a promise of server parallelism.
 
 ### 7.2 Response
 
-Per the oMLX implementation, one answer per question:
+One answer per question, as oMLX implements it — Workers AI answers the same
+object, sometimes wrapped (below):
 
 | type | answer fields |
 |---|---|
@@ -207,6 +224,7 @@ Plus `usage.input_tokens` (and `usage.latency_ms` on the reference server).
 
 Parsing rules (defensive — this contract is new surface):
 
+- The document is the body, or the body's `result` object when a Workers AI-style envelope wraps it (a top-level `answers` wins either way).
 - `answer.choice` is a **string** key from `criteria`; parse to `u8` for the rating.
 - `answer.score` is a **float** (expected value over the legend). The cull asks no `score` question today, so none is recorded; the type stays part of the wire contract.
 - `probabilities` may arrive as an ordered array or as an object keyed by option. Deserialize as `serde_json::Value` and only *display* it; **never** derive the recorded answer from it. `choice` and `confidence` are the source of truth.
@@ -216,6 +234,8 @@ Parsing rules (defensive — this contract is new surface):
 ### 7.3 Client
 
 `ureq` (blocking) + `serde_json`. No tokio in v1: the client is blocking and `Sync`, so a rating run stays serial and the cull's workers can share it. A blocking client keeps `imagecull-core` trivially portable into Tauri (which can call it from a background thread). Timeouts: connect 5 s, read 120 s (`--timeout`), overridable because 27B Clef on a long prompt can take tens of seconds.
+
+A client carries the run's token, if any, as `Authorization: Bearer …` on every request, including the oMLX probes. The token is a `Secret`: `Debug` and `Display` redact it, there is no `Serialize` and no conversion into a `String`, and it never reaches a sidecar, the ledger, `--json-scores`, `--dry-run` output or an error message. 401 and 403 are their own error kinds and both abort the run (§10) — one refused request, not four hundred.
 
 ---
 
@@ -401,7 +421,7 @@ document: the run can say what the existing rating was judged by.
 
 ### 9.5 What a run still writes to a file
 
-`--json-scores answers.json` writes every raw `/v1/systemone` answer document,
+`--json-scores answers.json` writes every raw answer document the server sent,
 once, at exit, keyed by the frame's path inside the shoot folder. It is the
 debugging record, not the deliverable, and it is off unless asked for.
 
@@ -424,6 +444,8 @@ against is a wrong legend quietly labelling an entire library.
 | `no_preview` | no embedded JPEG found | continue |
 | `preview_broken` | JPEG decode fails | continue |
 | `http_400` | invalid criteria / bad question schema | **abort run** (rubric is wrong) |
+| `http_401` | the server refused this run's credentials | **abort run** (every remaining frame would fail the same way); the row names `[server] token_env` / `[server] token`, never the token |
+| `http_403` | the credentials lack permission for this account or model | **abort run**, same advice as `http_401` |
 | `http_413` | context too long | record, continue, suggest smaller `--max-edge` |
 | `http_422` | malformed body | abort run (client bug) |
 | `server_unreachable` | connection refused / DNS | abort after retries |
@@ -445,8 +467,9 @@ Exit codes: `0` all ok (a run that skipped every frame is all ok) · `1` complet
 
 ```
 imagecull score <DIR> [OPTIONS]
-        --endpoint <URL>        default: http://127.0.0.1:8000
-    -m, --model <ALIAS>         default: from rubric.toml
+        --endpoint <URL>        whole address; {model} is the name
+                                default: http://127.0.0.1:8000/v1/systemone
+    -m, --model <NAME>          default: from rubric.toml
         --rubric <NAME|FILE>    one of general/press/holiday, or a path
                                 default: general
         --shoot-context <STR>   free text passed into state.shoot_context
@@ -506,21 +529,33 @@ failure's message.
 
 Values that stay true across runs can come from a TOML file instead of being
 retyped as flags. Keys are grouped into four sections, split by who reads them:
-`[server]` (`endpoint`, `model`, `timeout`) and `[scan]` (`recursive`) are every
-command's, `[score]` (`max_edge`, `jpeg_quality`, `json_scores`, `rubric`,
-`shoot_context`, `dedupe`) is what a rating needs, and `[group]` (`gap`,
-`similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`, `cull_jobs`) is what
-a cull needs.
+`[server]` (`endpoint`, `model`, `token_env`, `token`, `truncate`, `timeout`)
+and `[scan]` (`recursive`) are every command's, `[score]`
+(`max_edge`, `jpeg_quality`, `json_scores`, `rubric`, `shoot_context`, `dedupe`)
+is what a rating needs, and `[group]` (`gap`, `similarity`, `exposure_stops`,
+`max_edge`, `jpeg_quality`, `cull_jobs`, `max_images`) is what a cull needs.
 `[score] rubric` holds exactly what `--rubric` holds: a built-in's name or a
-path. `imagecull.toml.example` is the commented reference; ADR 0003 records why
-this file at all, ADR 0004 the three built-ins, ADR 0010 the `[group]` section,
-ADR 0014 why a comparison has a preview pair of its own, and ADR 0016 why the
-rating's keys share one section too.
+path. `imagecull.toml.example` is the commented reference, Cloudflare recipe and
+all; ADR 0003 records why this file at all, ADR 0004 the three built-ins, ADR
+0010 the `[group]` section, ADR 0014 why a comparison has a preview pair of its
+own, ADR 0016 why the rating's keys share one section too, and ADR 0018 why
+`[server]` describes the wire rather than a vendor.
+
+**`[server]` is the wire.** Six keys, none of which names a vendor: `endpoint`,
+the whole address a request is posted to, whose `{model}` is interpolated
+verbatim and unencoded, default `http://127.0.0.1:8000/v1/systemone`; `model`,
+the name that fills it and that the body's `model` field says; `token_env` and
+`token`, the bearer credential, the environment winning over the literal;
+`truncate`, whether the body carries oMLX's `truncate: true`, default true; and
+`timeout`, how long a run waits for the answer. A Workers AI config is an address
+ending in `@cf/cloudflare/{model}`, `model = "clef-flash"`, a `token_env` and
+`truncate = false` (ADR 0019).
 
 **Which command reads which key.** `score` resolves every key. `groups` resolves
-`[server]` (the alias and endpoint a cull asks), all of `[group]` — including
-`max_edge` and `jpeg_quality`, the pair every image in a comparison is rendered
-at, and `cull_jobs`, the degree its workers run at — `[scan] recursive`, and
+`[server]` (the alias, the endpoint and the wire a cull asks), all of `[group]`
+— including `max_edge` and `jpeg_quality`, the pair every image in a comparison
+is rendered at, `cull_jobs`, the degree its workers run at, and `max_images`, the
+most previews one comparative request carries — `[scan] recursive`, and
 `[score] shoot_context`: a shoot's framing is a
 property of the shoot, so the comparison is framed the way the rating was.
 Everything else under `[score]` is a rating's alone — a rating's preview size and
@@ -528,6 +563,15 @@ a comparison's are different payloads, and one key cannot be both. `doctor`
 reads `[server]` and `[score] max_edge` / `jpeg_quality`, the pair its file check
 renders; `models` reads `[server]`. Key names are always accepted; a key another
 command reads is simply not consulted by this one.
+
+**`doctor` and `models` are oMLX-only.** They read oMLX's own probes — `/health`,
+`/v1/models`, `/v1/models/status` — which no other SystemOne host serves, so both
+refuse a config whose `[server] endpoint` does not end in `/v1/systemone` (or
+carries `{model}`, which no oMLX install does), naming the address they would
+have read, and make no request. `score` and `groups` work against any host, and
+their preflight is skipped rather than faked when the address is not oMLX's
+(ADR 0018). An address with no path is legal and means `/`, but it is not oMLX's
+decision path either.
 
 **Retired sections.** `[preview]`, `[outputs]` and `[run]` are gone. A file that
 still sets a key under one is fatal and names its new home — `preview.max_edge
@@ -542,7 +586,15 @@ whole: `--config <FILE>`, `./imagecull.toml`,
 and there are no environment-variable overrides. `--no-config` skips discovery
 entirely.
 
-**Precedence.** Flag > config file > built-in default, per key.
+**Retired `[server]` keys.** `path` and `selector` are gone (ADR 0019). A file
+that still sets one is fatal and says where it went: `path` folds into
+`endpoint`, and `selector` becomes `model` with the id's prefix in the address.
+
+**Precedence.** Flag > config file > built-in default, per key. `--endpoint`
+takes the whole address, `{model}` and all, exactly as the key does. `token_env`,
+`token`, `truncate` and `max_images` have no flags: they describe the server and
+the shoot, not one invocation, so they are the file's alone (`--endpoint` and
+`--model` keep theirs).
 
 **What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
 `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`, `--quiet`,
@@ -554,10 +606,14 @@ name the preview of the command that was typed: `[score]` for `score` and
 `doctor`, `[group]` for `groups`. `--cull-jobs` has a key too — `[group]
 cull_jobs` — because how many of a shoot's groups may be compared at once is a
 property of the shoot and the machine it goes home with, not of one invocation;
-`--jobs` stays a flag, because it is this machine's read degree.
+`--jobs` stays a flag, because it is this machine's read degree. There is
+likewise no `--token`: a token on a command line is in the shell's history.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are
-validated to the same ranges the flags enforce, an unreadable `--config` target
+validated to the same ranges the flags enforce (the wire keys, which have no
+flag, are validated where they are written: a path that does not start with
+`/`, no placeholder but `{model}`, a `token_env` that is not a variable name),
+an unreadable `--config` target
 is fatal, and a malformed file is fatal with the parser's line and column. Exit
 code 2 (`§10`), never a warning-and-continue.
 

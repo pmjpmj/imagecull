@@ -32,6 +32,33 @@ _Avoid_: session, job, batch, process
 The act of deciding which frames to keep. The tool rates every frame and marks
 the ones that lost their group; the photographer decides what to do about them.
 
+### The server
+
+**Server**:
+The HTTP service a run asks for one rating per request, speaking the SystemOne
+decision API — a local oMLX by default, and any host speaking that API when
+`[server]` names one. A server is described by its wire, never by its vendor.
+_Avoid_: backend, provider, model host, cloud
+
+**Endpoint**:
+The whole address a request is posted to — scheme, host, path and all — as
+`[server] endpoint` holds it. Its `{model}` is replaced with the run's model name,
+verbatim and unencoded. There is no separate path setting: the address is the
+request.
+_Avoid_: base URL, host, server URL, route
+
+**Model name**:
+The one string `[server] model` holds: what the body's `model` field says, and
+what the endpoint's `{model}` becomes. oMLX serves full aliases
+(`clef-flash-oQ4e`); Workers AI serves short names (`clef-flash`) whose `@cf/…`
+id prefix lives in the endpoint instead.
+_Avoid_: model id, model alias, selector, checkpoint
+
+**Token**:
+The bearer credential a configured server may demand, read from the environment
+variable `[server] token_env` names and never written anywhere a run writes.
+_Avoid_: API key, secret, password, credential
+
 ### How frames relate
 
 **Group**:

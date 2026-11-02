@@ -27,6 +27,12 @@ pub enum ErrorKind {
     PreviewBroken,
     /// The server rejected the question schema (HTTP 400): the rubric is wrong.
     Http400,
+    /// The server refused this run's credentials (HTTP 401): the token is
+    /// missing, expired, or not the one this endpoint takes.
+    Http401,
+    /// The server accepted the credentials and refused the request (HTTP 403):
+    /// the token lacks permission for this account or model.
+    Http403,
     /// The request did not fit the model's context (HTTP 413).
     Http413,
     /// The server rejected the request body (HTTP 422): a client bug.
@@ -52,11 +58,13 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Every kind, in spec order. Useful for exhaustive tests and doc tables.
-    pub const ALL: [ErrorKind; 13] = [
+    pub const ALL: [ErrorKind; 15] = [
         ErrorKind::Unreadable,
         ErrorKind::NoPreview,
         ErrorKind::PreviewBroken,
         ErrorKind::Http400,
+        ErrorKind::Http401,
+        ErrorKind::Http403,
         ErrorKind::Http413,
         ErrorKind::Http422,
         ErrorKind::Http5xx,
@@ -76,6 +84,8 @@ impl ErrorKind {
             ErrorKind::NoPreview => "no_preview",
             ErrorKind::PreviewBroken => "preview_broken",
             ErrorKind::Http400 => "http_400",
+            ErrorKind::Http401 => "http_401",
+            ErrorKind::Http403 => "http_403",
             ErrorKind::Http413 => "http_413",
             ErrorKind::Http422 => "http_422",
             ErrorKind::Http5xx => "http_5xx",
@@ -105,6 +115,8 @@ impl ErrorKind {
     pub fn from_status_code(status: u16) -> Option<ErrorKind> {
         match status {
             400 => Some(ErrorKind::Http400),
+            401 => Some(ErrorKind::Http401),
+            403 => Some(ErrorKind::Http403),
             413 => Some(ErrorKind::Http413),
             422 => Some(ErrorKind::Http422),
             500..=599 => Some(ErrorKind::Http5xx),
@@ -126,7 +138,11 @@ impl ErrorKind {
             // One darktable sidecar is not a trend: the photographer may well
             // want the rest of the folder rated.
             ErrorKind::XmpForeign => Recovery::Continue,
-            ErrorKind::Http400 | ErrorKind::Http422 => Recovery::AbortRun,
+            // Every remaining frame would fail the same way: a wrong rubric, a
+            // malformed body, a token the server refuses.
+            ErrorKind::Http400 | ErrorKind::Http401 | ErrorKind::Http403 | ErrorKind::Http422 => {
+                Recovery::AbortRun
+            }
             ErrorKind::Http5xx => Recovery::RetryThenRecord,
             ErrorKind::ServerUnreachable => Recovery::RetryThenAbort,
             ErrorKind::Timeout => Recovery::RetryThenRecord,
@@ -321,6 +337,8 @@ mod tests {
                 "no_preview",
                 "preview_broken",
                 "http_400",
+                "http_401",
+                "http_403",
                 "http_413",
                 "http_422",
                 "http_5xx",
@@ -341,6 +359,8 @@ mod tests {
     #[test]
     fn recovery_matches_the_action_column() {
         assert_eq!(ErrorKind::Http400.recovery(), Recovery::AbortRun);
+        assert_eq!(ErrorKind::Http401.recovery(), Recovery::AbortRun);
+        assert_eq!(ErrorKind::Http403.recovery(), Recovery::AbortRun);
         assert_eq!(ErrorKind::Http422.recovery(), Recovery::AbortRun);
         assert_eq!(ErrorKind::Http413.recovery(), Recovery::Continue);
         assert_eq!(ErrorKind::Http5xx.recovery(), Recovery::RetryThenRecord);
@@ -360,12 +380,25 @@ mod tests {
     #[test]
     fn only_the_named_statuses_become_kinds() {
         assert_eq!(ErrorKind::from_status_code(400), Some(ErrorKind::Http400));
+        assert_eq!(ErrorKind::from_status_code(401), Some(ErrorKind::Http401));
+        assert_eq!(ErrorKind::from_status_code(403), Some(ErrorKind::Http403));
         assert_eq!(ErrorKind::from_status_code(413), Some(ErrorKind::Http413));
         assert_eq!(ErrorKind::from_status_code(422), Some(ErrorKind::Http422));
         assert_eq!(ErrorKind::from_status_code(500), Some(ErrorKind::Http5xx));
         assert_eq!(ErrorKind::from_status_code(503), Some(ErrorKind::Http5xx));
         assert_eq!(ErrorKind::from_status_code(599), Some(ErrorKind::Http5xx));
         assert_eq!(ErrorKind::from_status_code(404), None);
+    }
+
+    #[test]
+    fn every_kind_round_trips_through_its_status() {
+        for kind in ErrorKind::ALL {
+            assert_eq!(
+                ErrorKind::from_status(kind.as_str()),
+                Some(kind),
+                "{kind} is not what its own status names"
+            );
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ use imagecull_core::ingest::ScanOptions;
 use imagecull_core::keeper;
 use imagecull_core::preprocess::Params;
 use imagecull_core::rubric::{Builtin, RubricSource};
+use imagecull_core::secret::Secret;
 
 use tempfile::TempDir;
 
@@ -17,8 +18,11 @@ use tempfile::TempDir;
 /// vanished would show up as a missing assertion.
 const EVERY_KEY: &str = r#"
 [server]
-endpoint = "http://192.168.1.9:8000"
+endpoint = "http://192.168.1.9:8000/v1/systemone/{model}"
 model = "clef-27b-oQ4e"
+token_env = "CLOUDFLARE_API_TOKEN"
+token = "a-literal-secret"
+truncate = false
 timeout = 300
 
 [scan]
@@ -39,6 +43,7 @@ exposure_stops = 1.5
 max_edge = 700
 jpeg_quality = 60
 cull_jobs = 2
+max_images = 4
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -84,9 +89,21 @@ fn every_key_reaches_the_resolved_values() {
     let resolved = resolved(EVERY_KEY);
     assert_eq!(
         resolved.endpoint.as_deref(),
-        Some("http://192.168.1.9:8000")
+        Some("http://192.168.1.9:8000/v1/systemone/{model}"),
+        "the address is carried as written, not interpolated here"
     );
     assert_eq!(resolved.model.as_deref(), Some("clef-27b-oQ4e"));
+    assert_eq!(
+        resolved.token_env.as_deref(),
+        Some("CLOUDFLARE_API_TOKEN"),
+        "the variable's name is plumbing: nothing resolves it at settle time"
+    );
+    assert_eq!(
+        resolved.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret"),
+        "the literal is carried as a secret, which is how it stays unprintable"
+    );
+    assert_eq!(resolved.truncate, Some(false));
     assert_eq!(resolved.timeout, Some(300));
     assert_eq!(resolved.score_max_edge, Some(1024));
     assert_eq!(resolved.score_jpeg_quality, Some(72));
@@ -114,6 +131,11 @@ fn every_key_reaches_the_resolved_values() {
         resolved.group_cull_jobs,
         Some(2),
         "a shoot may carry the degree its comparison runs at"
+    );
+    assert_eq!(
+        resolved.group_max_images,
+        Some(4),
+        "and the most frames one comparison may carry"
     );
 }
 
@@ -205,6 +227,24 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[server]\ntimeout = 0\n", "timeout"),
         ("[server]\nmodel = \"  \"\n", "model"),
         ("[server]\nendpoint = \"\"\n", "endpoint"),
+        ("[server]\npath = \"\"\n", "server.path"),
+        ("[server]\npath = \"v1/systemone\"\n", "server.path"),
+        ("[server]\npath = \" /v1/systemone\"\n", "server.path"),
+        ("[server]\npath = \"/v1/{frame}\"\n", "server.path"),
+        ("[server]\npath = \"/{model}/{frame}\"\n", "server.path"),
+        ("[server]\nselector = \"\"\n", "server.selector"),
+        ("[server]\nselector = \"  \"\n", "server.selector"),
+        ("[server]\ntoken = \"\"\n", "server.token"),
+        ("[server]\ntoken = \"  \"\n", "server.token"),
+        ("[server]\ntoken_env = \"\"\n", "server.token_env"),
+        (
+            "[server]\ntoken_env = \"CLOUDFLARE TOKEN\"\n",
+            "server.token_env",
+        ),
+        (
+            "[server]\ntoken_env = \"CLOUDFLARE=TOKEN\"\n",
+            "server.token_env",
+        ),
         ("[group]\ngap = 0.0\n", "group.gap"),
         ("[group]\ngap = -1.0\n", "group.gap"),
         ("[group]\ngap = nan\n", "group.gap"),
@@ -216,12 +256,44 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[group]\nexposure_stops = nan\n", "group.exposure_stops"),
         ("[group]\nexposure_stops = inf\n", "group.exposure_stops"),
         ("[group]\ncull_jobs = 0\n", "group.cull_jobs"),
+        ("[group]\nmax_images = 0\n", "group.max_images"),
+        ("[group]\nmax_images = 1\n", "group.max_images"),
+        ("[group]\nmax_images = 21\n", "group.max_images"),
     ];
     for (text, key) in cases {
         let message = error(text);
         assert!(
             message.contains(key),
             "rejecting {text:?} must name {key}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_comparison_cap_outside_two_to_twenty_states_the_range_and_why() {
+    // The range is not a guess to be rounded: a request carrying one frame is
+    // not a comparison, and 20 is the batch the token budget was measured at.
+    for text in [
+        "[group]\nmax_images = 0\n",
+        "[group]\nmax_images = 1\n",
+        "[group]\nmax_images = 21\n",
+    ] {
+        let message = error(text);
+        assert!(
+            message.contains("between 2 and 20"),
+            "a range mistake must say what the range is: {message}"
+        );
+        assert!(
+            message.contains("one image is not a comparison"),
+            "and why the floor is where it is: {message}"
+        );
+    }
+    for accepted in [2, keeper::MAX] {
+        let resolved = resolved(&format!("[group]\nmax_images = {accepted}\n"));
+        assert_eq!(
+            resolved.group_max_images,
+            Some(accepted),
+            "{accepted} is inside the range and is carried as written"
         );
     }
 }
@@ -238,6 +310,175 @@ fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
             "a range mistake must say what the range is: {message}"
         );
     }
+}
+
+#[test]
+fn an_address_with_no_path_is_a_config_like_any_other() {
+    // The address is posted to as written: `http://127.0.0.1:9000` means `/`, and
+    // a file is not refused for lacking a path. It is simply not an oMLX decision
+    // path, so `doctor` and `models` will not read it.
+    let effective = resolved("[server]\nendpoint = \"http://127.0.0.1:9000\"\n").settle(None);
+    assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
+    assert!(
+        !effective.asks_omlx(),
+        "`/` is not the path oMLX serves a decision on"
+    );
+}
+
+#[test]
+fn a_retired_path_key_names_where_it_went() {
+    // ADR 0019 folded the path into the address. The key is legal TOML, so the
+    // refusal has to be a sentence that names the replacement, not "unknown
+    // field" over a key the photographer copied from an older README.
+    let message = error("[server]\npath = \"/v1/systemone\"\n");
+    assert!(
+        message.contains("server.endpoint") && message.contains("/v1/systemone"),
+        "the refusal must name the key that replaces it: {message}"
+    );
+}
+
+#[test]
+fn a_retired_selector_key_names_where_it_went() {
+    let message = error("[server]\nselector = \"clef-flash\"\n");
+    assert!(
+        message.contains("server.model") && message.contains("endpoint"),
+        "the refusal must say which two values replace it: {message}"
+    );
+}
+
+#[test]
+fn an_address_that_needs_a_model_is_legal_in_a_file() {
+    // `endpoint = "…/{model}"` with no model is fatal when the request is built,
+    // not here: `--model` can supply the model for one run, and a file cannot
+    // know that.
+    let resolved = resolved("[server]\nendpoint = \"http://host/v1/{model}\"\n");
+    assert_eq!(resolved.endpoint.as_deref(), Some("http://host/v1/{model}"));
+    assert_eq!(
+        resolved.model, None,
+        "the file said nothing about the model, and that is allowed"
+    );
+}
+
+#[test]
+fn a_token_env_says_that_it_names_a_variable() {
+    let message = error("[server]\ntoken_env = \"CLOUDFLARE TOKEN\"\n");
+    assert!(
+        message.contains("environment variable"),
+        "a whitespace-bearing name has to be told what the key is for: {message}"
+    );
+}
+
+#[test]
+fn the_retired_wire_keys_are_refused_before_their_values_are_judged() {
+    // A selector is refused for being gone, not for being empty: the key that
+    // replaces it is `model`, and the remedy names both halves.
+    let message = error("[server]\nselector = \"\"\n");
+    assert!(
+        message.contains("server.model") && message.contains("endpoint"),
+        "a retired key has a remedy, and the message must give it: {message}"
+    );
+}
+
+/// An injected environment: the lookup a resolution reads, over fixed pairs,
+/// so a test never touches a process variable another test could race.
+fn environment<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_string())
+    }
+}
+
+#[test]
+fn no_token_source_resolves_to_no_token() {
+    let effective = Resolved::default().settle(None);
+    let token = effective
+        .resolve_token(|name| panic!("nothing should be looked up, and {name} was"))
+        .expect("no token source is not a failure");
+    assert_eq!(token, None, "no key means no header, as before");
+}
+
+#[test]
+fn the_environment_wins_over_a_literal_token() {
+    let effective =
+        resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\ntoken = \"a-literal-secret\"\n")
+            .settle(None);
+    let token = effective
+        .resolve_token(environment(&[(
+            "CLOUDFLARE_API_TOKEN",
+            "from-the-environment",
+        )]))
+        .expect("a set variable resolves");
+    assert_eq!(
+        token,
+        Some(Secret::new("from-the-environment")),
+        "the variable wins, because a literal travels with the shoot folder"
+    );
+}
+
+#[test]
+fn a_variable_with_stray_whitespace_is_trimmed() {
+    // Shell quoting leaves whitespace a photographer cannot see, and a server
+    // answers `Bearer  abc ` with 401 per frame. The literal is left as written:
+    // a file's value is one its author can read.
+    let effective = resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\n").settle(None);
+    let token = effective
+        .resolve_token(environment(&[(
+            "CLOUDFLARE_API_TOKEN",
+            "  from-the-environment  ",
+        )]))
+        .expect("a padded variable is still a variable");
+    assert_eq!(token, Some(Secret::new("from-the-environment")));
+}
+
+#[test]
+fn an_unset_or_empty_variable_falls_back_to_the_literal() {
+    let effective =
+        resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\ntoken = \"a-literal-secret\"\n")
+            .settle(None);
+    for pairs in [
+        vec![],
+        vec![("CLOUDFLARE_API_TOKEN", "")],
+        vec![("CLOUDFLARE_API_TOKEN", "   ")],
+        vec![("SOMETHING_ELSE", "not-the-one-named")],
+    ] {
+        let token = effective
+            .resolve_token(environment(&pairs))
+            .expect("a literal beside the name is enough");
+        assert_eq!(
+            token,
+            Some(Secret::new("a-literal-secret")),
+            "with nothing in {pairs:?}, the literal is what is sent"
+        );
+    }
+}
+
+#[test]
+fn a_named_variable_with_nothing_behind_it_is_fatal_and_names_it() {
+    let effective = resolved("[server]\ntoken_env = \"CLOUDFLARE_API_TOKEN\"\n").settle(None);
+    let message = effective
+        .resolve_token(environment(&[("CLOUDFLARE_API_TOKEN", "")]))
+        .expect_err("an empty variable with no literal describes no request")
+        .to_string();
+    assert!(
+        message.contains("CLOUDFLARE_API_TOKEN"),
+        "the message has to name the variable to export: {message}"
+    );
+    assert!(
+        message.contains("[server] token is empty"),
+        "and the key it falls back to: {message}"
+    );
+}
+
+#[test]
+fn a_settled_token_is_not_printed_by_the_effective_configs_debug() {
+    let effective = resolved("[server]\ntoken = \"a-literal-secret\"\n").settle(None);
+    let rendered = format!("{effective:#?}");
+    assert!(
+        !rendered.contains("a-literal-secret"),
+        "a run's config is printed in diagnostics; the token may not be: {rendered}"
+    );
 }
 
 #[test]
@@ -429,7 +670,24 @@ fn the_file_wins_over_the_built_in_default() {
     assert_eq!(effective.score_params.max_edge, 1024);
     assert_eq!(effective.score_params.jpeg_quality, 72);
     assert_eq!(effective.timeout, 300);
-    assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
+    assert_eq!(
+        effective.endpoint,
+        "http://192.168.1.9:8000/v1/systemone/{model}"
+    );
+    assert!(
+        !effective.truncate,
+        "and a file that turns oMLX's field off keeps it off"
+    );
+    assert_eq!(
+        effective.model.as_deref(),
+        Some("clef-27b-oQ4e"),
+        "the model is what the body says and what {{model}} becomes"
+    );
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert_eq!(
+        effective.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret")
+    );
     assert!(!effective.dedupe);
     assert!(effective.recursive);
     assert_eq!(
@@ -448,16 +706,26 @@ fn the_file_wins_over_the_built_in_default() {
         effective.cull_jobs, 2,
         "the file's degree is what a run with no --cull-jobs uses"
     );
+    assert_eq!(
+        effective.max_images, 4,
+        "and the file's cap is what a run's comparisons carry"
+    );
 }
 
 #[test]
 fn an_empty_source_settles_to_the_specs_defaults() {
     let effective = Resolved::default().settle(None);
-    assert_eq!(effective.endpoint, "http://127.0.0.1:8000");
+    assert_eq!(
+        effective.endpoint, "http://127.0.0.1:8000/v1/systemone",
+        "an absent address is the one oMLX serves a decision model on"
+    );
     assert_eq!(
         effective.model, None,
         "no alias means the rubric's own alias, which is part of its hash"
     );
+    assert_eq!(effective.token_env, None, "and no variable is looked up");
+    assert_eq!(effective.token, None, "and no token is sent");
+    assert!(effective.truncate, "an absent truncate is oMLX's field");
     assert_eq!(effective.timeout, 120);
     assert_eq!(effective.score_params, Params::default());
     assert_eq!(
@@ -478,6 +746,11 @@ fn an_empty_source_settles_to_the_specs_defaults() {
         imagecull_core::cull::DEFAULT_JOBS,
         "an absent degree is the cull's own default, not a second copy of it"
     );
+    assert_eq!(
+        effective.max_images,
+        keeper::MAX,
+        "an absent cap is the measured batch of 20, not a second copy of it"
+    );
     assert_eq!(effective.source, None);
     assert_eq!(
         effective.scan(None),
@@ -485,6 +758,85 @@ fn an_empty_source_settles_to_the_specs_defaults() {
             recursive: false,
             limit: None
         }
+    );
+}
+
+#[test]
+fn a_server_nobody_named_still_posts_where_it_always_did() {
+    // The default address is oMLX's own: the origin constant plus the path
+    // constant, which is what keeps the default from drifting away from the
+    // path `is_omlx` recognises.
+    let effective = Resolved::default().settle(None);
+    assert_eq!(
+        effective.endpoint,
+        imagecull_core::systemone::DEFAULT_ENDPOINT
+    );
+    assert_eq!(
+        imagecull_core::systemone::DEFAULT_ENDPOINT,
+        format!(
+            "{}{}",
+            imagecull_core::omlx::DEFAULT_ENDPOINT,
+            imagecull_core::systemone::PATH
+        ),
+        "the default address is oMLX on its port, on its decision path"
+    );
+    assert_eq!(effective.model, None, "and no model at all");
+}
+
+#[test]
+fn only_the_omlx_path_is_the_one_doctor_and_models_can_read() {
+    // `doctor` and `models` read oMLX's own probes, and no other server has
+    // them. The question is asked of the address, so a server that keeps oMLX's
+    // fixed path is oMLX to these two commands and a server that puts its model
+    // in the path is not.
+    assert!(
+        Resolved::default().settle(None).asks_omlx(),
+        "a file that names no address posts to oMLX's"
+    );
+    assert!(
+        resolved("[server]\nendpoint = \"http://127.0.0.1:9000/v1/systemone\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "another port on oMLX's own path is still oMLX"
+    );
+    assert!(
+        !resolved("[server]\nendpoint = \"https://host/ai/run/{model}\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "an address with a model in it is another server's addressing"
+    );
+    assert!(
+        !resolved("[server]\nendpoint = \"http://127.0.0.1:9000/v1/decisions\"\n")
+            .settle(None)
+            .asks_omlx(),
+        "and so is any fixed path that is not oMLX's"
+    );
+}
+
+#[test]
+fn a_key_no_flag_sets_survives_the_flags() {
+    // No flag sets these six, so `override_with` must project them: a flag
+    // layer that says nothing may not quietly drop the file's wire or its cap.
+    let effective = resolved(EVERY_KEY)
+        .override_with(Resolved {
+            timeout: Some(30),
+            ..Resolved::default()
+        })
+        .settle(None);
+    assert_eq!(
+        effective.endpoint,
+        "http://192.168.1.9:8000/v1/systemone/{model}"
+    );
+    assert_eq!(effective.model.as_deref(), Some("clef-27b-oQ4e"));
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert_eq!(
+        effective.token.as_ref().map(Secret::as_str),
+        Some("a-literal-secret")
+    );
+    assert!(!effective.truncate);
+    assert_eq!(
+        effective.max_images, 4,
+        "and the file's comparison cap is not a flag's to lose"
     );
 }
 
@@ -690,6 +1042,106 @@ fn the_committed_example_parses() {
     // into a file imagecull itself would reject.
     ConfigFile::from_toml(include_str!("../../../imagecull.toml.example"))
         .expect("imagecull.toml.example must be a valid config");
+}
+
+#[test]
+fn the_workers_ai_recipe_in_the_example_is_a_config_that_parses() {
+    // The example ends with a Workers AI recipe a photographer pastes over their
+    // account id: commented out, so the test above never sees it. One key
+    // renamed in the loader and the recipe rots into a file imagecull refuses —
+    // discovered after the photographer has filled in their account.
+    let recipe = recipe_block(include_str!("../../../imagecull.toml.example"));
+    let effective = ConfigFile::from_toml(&recipe)
+        .expect("the example's recipe must be a config imagecull accepts")
+        .resolve(None)
+        .settle(None);
+
+    assert_eq!(
+        effective.endpoint,
+        "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}",
+        "the id's own prefix is part of the address"
+    );
+    assert_eq!(
+        effective.model.as_deref(),
+        Some("clef-flash"),
+        "the name fills {{model}} and is the body's model"
+    );
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert!(
+        !effective.truncate,
+        "Workers AI's schema lists no truncate, so the recipe must not send one"
+    );
+    assert_eq!(
+        effective.max_images, 4,
+        "Workers AI takes four images a request"
+    );
+    assert_eq!(effective.score_params.max_edge, 1024);
+    assert!(
+        !effective.asks_omlx(),
+        "the recipe addresses another server"
+    );
+}
+
+#[test]
+fn the_readme_recipe_and_the_example_recipe_describe_the_same_server() {
+    // The README repeats the recipe so a photographer need not open a second
+    // file, which makes it the copy that can rot without a test noticing: the
+    // one above only ever reads the example.
+    let readme = fenced_recipe(include_str!("../../../README.md"));
+    let example = recipe_block(include_str!("../../../imagecull.toml.example"));
+    let settle = |text: &str| {
+        ConfigFile::from_toml(text)
+            .expect("a recipe a reader pastes must be a config imagecull accepts")
+            .resolve(None)
+            .settle(None)
+    };
+
+    assert_eq!(
+        settle(&readme),
+        settle(&example),
+        "the two copies of the Workers AI recipe must describe the same server"
+    );
+}
+
+/// The first fenced `toml` block in a document that names an account id: the
+/// Workers AI recipe a README shows whole, rather than commented out.
+fn fenced_recipe(document: &str) -> String {
+    for block in document.split("```toml").skip(1) {
+        let body = block.split("```").next().unwrap_or_default();
+        if body.contains("<ACCOUNT_ID>") {
+            return body.trim_start_matches('\n').to_string();
+        }
+    }
+    panic!("no ```toml block naming <ACCOUNT_ID> in the document");
+}
+
+/// The commented recipe an example file carries between its two rules, with the
+/// comment markers taken off: the config a photographer would paste.
+fn recipe_block(example: &str) -> String {
+    const BEGINS: &str = "recipe begins";
+    const ENDS: &str = "recipe ends";
+    let mut recipe = String::new();
+    let mut inside = false;
+    for line in example.lines() {
+        if line.contains(ENDS) {
+            break;
+        }
+        if inside {
+            let text = line
+                .strip_prefix("# ")
+                .or_else(|| line.strip_prefix('#'))
+                .unwrap_or(line);
+            recipe.push_str(text);
+            recipe.push('\n');
+        } else if line.contains(BEGINS) {
+            inside = true;
+        }
+    }
+    assert!(
+        inside,
+        "the example must carry a '{BEGINS}' … '{ENDS}' recipe"
+    );
+    recipe
 }
 
 /// Write a user-level config under `base`, the way discovery expects it.

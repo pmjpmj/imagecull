@@ -118,3 +118,21 @@ five-section map above and ADR 0010's sixth became `[server]`, `[scan]`,
 refused by name. The decision this ADR records — TOML, exactly one file read,
 flag > file > default, strict, core-side resolution, per-key `Resolved` — is
 unchanged; only the section list and the reader list shrank.
+
+**ADR 0019 shrank `[server]` from eight keys to six.** `path` became part of
+`endpoint` and `selector` became `model`: the address a request is posted to is
+one value, `{model}` and all, and the body's `model` is the same name the address
+interpolates. `token_env`, `token` and `truncate` keep the no-flag clause below.
+The resolution discipline is untouched: `endpoint` and `model` are still fields
+on `Resolved`, merged in the one place, their defaults core constants — and
+`--endpoint` now takes exactly what the key takes.
+
+**ADR 0018 grew `[server]` from three keys to eight, and gave `[group]` a
+seventh.** `path`, `selector`, `token_env`, `token` and `truncate` describe the
+HTTP wire a run posts on, and `[group] max_images` the comparison's batch cap, so
+the section a file writes about its server is now the request's shape rather than
+only its address. One clause of this ADR is amended in the narrowest way: "flag >
+file > built-in default, per key" still holds, but those six keys *have* no flag,
+so for them the rule is file > default. The resolution discipline is otherwise
+untouched — every one of them is a field on `Resolved`, merged in the one place,
+with its default a core constant.

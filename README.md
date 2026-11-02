@@ -6,8 +6,12 @@ Classic, Bridge, darktable and digiKam already understand. Open the folder in
 your editor and the cull is partly done: the keepers already carry stars, and
 the frames that lost their group are marked so you can look at them first.
 
-Nothing leaves your machine. There is no cloud call, no telemetry, no catalogue
-and no editing — just ratings written beside your raws, which are never modified.
+Nothing leaves your machine by default. There is no cloud call, no telemetry,
+no catalogue and no editing — just ratings written beside your raws, which are
+never modified. A configured `[server] endpoint` may name a service, and a run
+then sends it previews; that is your decision, and the reason a token lives in
+the environment rather than in a config file ([A server somewhere
+else](#a-server-somewhere-else)).
 
 ## What it does
 
@@ -34,9 +38,12 @@ delete first. You can run either on its own, or both.
   not supported in v1.
 - **Rust** (a recent stable toolchain; the workspace declares its minimum in
   `Cargo.toml`).
-- **A local oMLX server, version 0.7.1.dev1 or newer**, serving a Clef decision
-  model. The default endpoint is `http://127.0.0.1:8000`. imagecull does not
-  start, stop or install oMLX; it only talks to it.
+- **A server that answers one decision per request.** A local oMLX on
+  `127.0.0.1:8000`, version 0.7.1.dev1 or newer, by default; any host speaking
+  the same decision API when `[server]` names one — Cloudflare's hosted Clef on
+  Workers AI, for instance ([A server somewhere
+  else](#a-server-somewhere-else)). imagecull does not start, stop or install a
+  server; it only talks to one.
 - Nikon mirrorless RAW files: `.nef`, `.nrw` or `.dng`. Other files in the
   folder are ignored.
 
@@ -75,6 +82,12 @@ alias exists, that it is being served as a decision model rather than a plain
 vision model, and — when you pass a file — that the camera's embedded preview
 survives the pipeline. If something is wrong it prints one actionable sentence
 instead of letting a 400-file run fail 400 times.
+
+Both commands are oMLX's: they read its own endpoints, which another server does
+not have. Pointed at one, they say so and make no request — including
+`doctor <FILE>`'s preview self-test, which goes with them; `score --dry-run`
+writes the same previews and probes nothing. See [A server somewhere
+else](#a-server-somewhere-else).
 
 ## Quick start
 
@@ -153,7 +166,7 @@ imagecull score --shoot-context "night street, pushed two stops" /path/to/shoot
 ```
 
 Ratings made under different rubrics or models are not comparable, which is why
-each sidecar records the rubric hash and the model alias. Changing the rubric and
+each sidecar records the rubric hash and the model name. Changing the rubric and
 re-running will not re-rate anything unless you also pass `--force`.
 
 ### Useful options
@@ -215,6 +228,10 @@ The defaults suit a typical burst. Tune them when they do not:
 | `-j, --jobs <N>` | one per core | Frames read at once. |
 | `--no-cull` | — | Group and measure only. No request, no label. |
 
+A server that takes fewer than twenty images per request sets `[group]
+max_images`; a group larger than that is split into batches and its winners
+compared again, so the cap costs a few more requests and changes no verdict.
+
 Changing a grouping threshold changes which frames were compared together, so
 verdicts made under one setting are not comparable with those made under
 another. Each sidecar records the grouping hash it was written under.
@@ -253,8 +270,12 @@ naming the `[score]` key it became.
 
 ```toml
 [server]
-endpoint = "http://127.0.0.1:8000"
+endpoint = "http://127.0.0.1:8000/v1/systemone"
 # model = "clef-flash-oQ4e"
+# token_env = "CLOUDFLARE_API_TOKEN"
+# token = "..."
+# truncate = true
+# timeout = 120
 
 [scan]
 # recursive = false
@@ -274,13 +295,78 @@ endpoint = "http://127.0.0.1:8000"
 # max_edge = 512
 # jpeg_quality = 88
 # cull_jobs = 4
+# max_images = 20
 ```
 
 `[score]` is what a rating needs and `[group]` what a cull needs; `[server]` and
 `[scan]` are shared. `groups` reads one key from `[score]` — `shoot_context`, so a
 burst is framed the way the frame was rated — and nothing else. `[group]
 cull_jobs` is the one degree a shoot carries in its file: how many groups may be
-compared at once, which `--cull-jobs` overrides for a single run.
+compared at once, which `--cull-jobs` overrides for a single run. `[group]
+max_images` is the same kind of number one step down: how many frames one
+comparison carries, for a server that refuses more per request.
+
+## A server somewhere else
+
+`[server]` describes the HTTP wire a run posts on, not a vendor: the address a
+request goes to, what its body says it is, and what it carries to be let in. The
+address is the whole request — path and all — and `{model}` in it becomes the
+model name, verbatim and unencoded. So a local oMLX is the default, and
+Cloudflare's hosted Clef — the same model family on Workers AI, for a machine
+with no Apple Silicon to spare — is one config block away rather than a second
+code path. Copy the recipe at the bottom of
+[`imagecull.toml.example`](imagecull.toml.example), put your account id where
+`<ACCOUNT_ID>` is, export the token, and run as usual:
+
+```toml
+[server]
+endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}"
+model = "clef-flash"
+token_env = "CLOUDFLARE_API_TOKEN"
+truncate = false
+
+[score]
+max_edge = 1024      # Workers AI resizes past ~1 MP, so 1568 buys nothing
+
+[group]
+max_images = 4       # Workers AI's per-request cap; a bigger burst is split
+```
+
+```sh
+export CLOUDFLARE_API_TOKEN=...      # Workers AI:Read is enough
+imagecull score /path/to/shoot
+```
+
+Four facts about the request differ from a local oMLX, and each is one key, plus
+`truncate`, which Workers AI's schema does not list at all:
+
+| | local oMLX | Workers AI |
+|---|---|---|
+| address | `http://127.0.0.1:8000/v1/systemone` (the default) | `…/ai/run/@cf/cloudflare/{model}` — the id's prefix is in the address |
+| body `model` | the alias, `clef-flash-oQ4e` | the name, `clef-flash` — the same string `{model}` becomes |
+| auth | none | `Authorization: Bearer $CLOUDFLARE_API_TOKEN` |
+| body extras | `truncate: true` | none — `truncate = false` sends the field absent |
+| images per request | 20 | 4 — a bigger group is split, never refused |
+
+Two models are served: `@cf/cloudflare/clef-flash`, the fast one in the recipe
+above, which is `model = "clef-flash"`, and `@cf/cloudflare/clef`, the bigger one
+— the same address ending in `{model}`, with `model = "clef"`.
+
+**`doctor` and `models` stay oMLX-only.** They read oMLX's own endpoints
+(`/health`, `/v1/models`, `/v1/models/status`), which no other server has, so
+against a Workers AI config they refuse by name and make no request — rather than
+reporting a 404 as "nothing loaded". There is no cheap "is this service alive"
+probe: the run's first real request is the test, and a refused credential (HTTP
+401 or 403) stops the run at that one request instead of paying for four hundred
+of them.
+
+**A different model id is a different rubric hash**, so the frames already rated
+are re-rated only under `--force`, and frames are never mixed under one hash.
+Moving a shoot from a local 4-bit checkpoint to `@cf/cloudflare/clef-flash`
+therefore costs a re-rate, which is the point: two models' stars are not
+comparable. The one case the hash cannot tell apart is two servers serving the
+same alias — the same `clef-flash-oQ4e` from a machine and from a tunnel is one
+hash.
 
 ## What gets written
 
@@ -315,10 +401,21 @@ no sidecar at all — no zero, no blank file.
 ## Troubleshooting
 
 - **`doctor` says the server is unreachable** — start oMLX and check
-  `--endpoint`. The default is `http://127.0.0.1:8000`.
+  `--endpoint`. The default is `http://127.0.0.1:8000/v1/systemone`; an endpoint
+  with no path is posted to as written, which means `/`.
 - **`doctor` says the model is not a decision model** — the oMLX version is too
   old, or the Clef checkpoint was loaded as a plain vision model. Upgrade to
   oMLX 0.7.1.dev1 or newer and load a Clef decision model.
+- **`doctor` or `models` refuses the config instead of answering** — it says the
+  run posts to a server that is not oMLX. Those two commands read oMLX's own
+  probes and nothing else, so `doctor <FILE>` is refused too; `score` and
+  `groups` still work there. See
+  [A server somewhere else](#a-server-somewhere-else).
+- **A run stops on `http_401` or `http_403`** — the server refused the
+  credential, so every remaining frame would fail the same way. The row names
+  `[server] token_env` (or `[server] token`) and the account the endpoint names;
+  check that the variable is exported in this shell and that its token has
+  Workers AI permission.
 - **Scores look wrong for portrait frames** — run `score --dry-run` and inspect
   `./previews`. Orientation is applied before the model sees the frame;
   `doctor <FILE>` reports the same preview pipeline on one file.

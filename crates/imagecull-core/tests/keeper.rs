@@ -150,6 +150,24 @@ fn a_group_over_one_request_is_split_into_even_batches_in_capture_order() {
 }
 
 #[test]
+fn a_smaller_request_cap_splits_a_group_the_same_way_and_leaves_no_lone_frame() {
+    let places: Vec<usize> = (0..12).collect();
+
+    let chunks = keeper::chunk(&places, 4);
+
+    assert_eq!(
+        chunks,
+        [
+            (0..4).collect::<Vec<_>>(),
+            (4..8).collect::<Vec<_>>(),
+            (8..12).collect::<Vec<_>>()
+        ],
+        "a server that takes four images per request compares twelve frames in three batches of \
+         four, each a real comparison"
+    );
+}
+
+#[test]
 fn a_remainder_that_would_be_one_frame_is_spread_across_the_batches() {
     let places: Vec<usize> = (0..21).collect();
 
@@ -225,6 +243,24 @@ fn the_answer_is_read_as_the_frame_it_names_with_its_confidence() {
         choice.index(),
         1,
         "the second of the frames the request showed"
+    );
+}
+
+#[test]
+fn an_answer_wrapped_the_way_a_workers_ai_host_wraps_it_is_read_the_same() {
+    let mut wrapped = answered("2", 0.71);
+    wrapped.document = json!({
+        "result": answered("2", 0.71).document,
+        "success": true,
+    });
+
+    assert_eq!(
+        keeper::read(&wrapped, 3).expect("a readable answer under `result`"),
+        Choice {
+            position: 2,
+            confidence: 0.71
+        },
+        "a comparison reads the same envelope rule as a rating"
     );
 }
 

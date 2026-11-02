@@ -43,6 +43,17 @@ fn read(document: Value) -> reading::Reading {
     )
 }
 
+/// The same answer document behind a Workers AI-style envelope, for the hosts
+/// that wrap a model's output in `{"result": …}`.
+fn wrapped() -> Value {
+    json!({
+        "result": document(),
+        "success": true,
+        "errors": [],
+        "messages": []
+    })
+}
+
 fn failure(document: Value) -> imagecull_core::Error {
     read(document)
         .answers
@@ -137,6 +148,68 @@ fn a_missing_confidence_or_a_wrongly_shaped_answer_is_a_bad_response() {
     no_answers["answers"] = json!([{"id": "stars"}]);
     let error = failure(no_answers);
     assert_eq!(error.kind(), Some(ErrorKind::BadResponse));
+}
+
+#[test]
+fn a_wrapped_answer_document_reads_the_same_as_a_bare_one() {
+    // Fixture-driven, not recorded from a live call: the envelope rule is what
+    // protects the next Workers AI model whatever Clef itself turns out to do.
+    let reading = read(wrapped());
+    let answers = reading.answers.expect("a readable answer under `result`");
+
+    assert_eq!(answers.stars, 4, "the choice key, as a number");
+    assert_eq!(answers.confidence, 0.63, "the top-option probability");
+    assert_eq!(
+        reading.usage.input_tokens,
+        Some(1327),
+        "usage moves with the answers into the wrapper's `result`"
+    );
+    assert_eq!(
+        reading.document,
+        wrapped(),
+        "unwrapping is a reading, not a rewrite: --json-scores shows the bytes"
+    );
+}
+
+#[test]
+fn a_wrapper_whose_result_has_no_answers_fails_like_no_answers_at_all() {
+    let bare = failure(json!({"model": "clef-flash-oQ4e"}));
+    let shaped = failure(json!({"result": {"model": "clef-flash-oQ4e"}}));
+
+    assert_eq!(bare.kind(), Some(ErrorKind::BadResponse));
+    assert_eq!(shaped.kind(), Some(ErrorKind::BadResponse));
+    assert_eq!(
+        bare.message(),
+        shaped.message(),
+        "one substitution, so a drifted document still fails the same way"
+    );
+    assert!(
+        shaped.message().contains("no `answers` object"),
+        "the failure names the same missing object"
+    );
+
+    let mut both = wrapped();
+    both["answers"] = json!([{"id": "stars"}]);
+    let error = failure(both);
+    assert_eq!(
+        error.kind(),
+        Some(ErrorKind::BadResponse),
+        "a top-level `answers` wins on presence, so a malformed one is not rescued by a \
+         well-formed `result` below it: {}",
+        error.message()
+    );
+}
+
+#[test]
+fn the_wrappers_own_usage_is_not_preferred_over_the_answers_own() {
+    let mut lifted = wrapped();
+    lifted["usage"] = json!({"input_tokens": 999});
+
+    assert_eq!(
+        read(lifted).usage.input_tokens,
+        Some(1327),
+        "usage is read from wherever the answers were read"
+    );
 }
 
 #[test]

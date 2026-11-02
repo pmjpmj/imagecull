@@ -23,10 +23,11 @@ use crate::error::{Error, Result};
 use crate::group::{self, Thresholds};
 use crate::ingest::ScanOptions;
 use crate::keeper;
-use crate::omlx;
 use crate::preprocess::Params;
 use crate::rubric::RubricSource;
+use crate::secret::Secret;
 use crate::sidecar::Outputs;
+use crate::systemone;
 
 /// The config file that travels with a shoot folder.
 pub const SHOOT_CONFIG: &str = "imagecull.toml";
@@ -206,6 +207,9 @@ impl ConfigFile {
         Resolved {
             endpoint: self.server.endpoint.clone(),
             model: self.server.model.clone(),
+            token_env: self.server.token_env.clone(),
+            token: self.server.token.clone().map(Secret::new),
+            truncate: self.server.truncate,
             timeout: self.server.timeout,
             score_max_edge: self.score.max_edge,
             score_jpeg_quality: self.score.jpeg_quality,
@@ -224,7 +228,32 @@ impl ConfigFile {
             group_max_edge: self.group.max_edge,
             group_jpeg_quality: self.group.jpeg_quality,
             group_cull_jobs: self.group.cull_jobs,
+            group_max_images: self.group.max_images,
         }
+    }
+
+    /// Refuse the two `[server]` keys ADR 0019 folded into `endpoint` and `model`,
+    /// by name and with the value that replaces them.
+    ///
+    /// Both are legal TOML and would otherwise be "unknown field" errors, which
+    /// name nothing a photographer can act on.
+    fn refuse_the_retired_wire_keys(&self) -> Result<()> {
+        if self.server.path.is_some() {
+            return Err(Error::fatal(
+                "server.path is part of server.endpoint now: the endpoint is the whole address, \
+                 `{model}` and all — fold the path into it and delete the key, e.g. \
+                 endpoint = \"http://127.0.0.1:8000/v1/systemone\"",
+            ));
+        }
+        if self.server.selector.is_some() {
+            return Err(Error::fatal(
+                "server.selector is gone: the body's `model` is server.model, and the endpoint \
+                 spells the rest — put the short name in model and the id's own prefix in the \
+                 address, e.g. endpoint = \"https://…/ai/run/@cf/cloudflare/{model}\", \
+                 model = \"clef-flash\"",
+            ));
+        }
+        Ok(())
     }
 
     /// Reject what the flags would reject, with the key that has to change
@@ -272,6 +301,16 @@ impl ConfigFile {
                 "group.cull_jobs must be at least 1, or no group would be culled",
             ));
         }
+        if let Some(max) = self.group.max_images
+            && !(2..=keeper::MAX).contains(&max)
+        {
+            return Err(Error::fatal(format!(
+                "group.max_images must be between 2 and {}, not {max} — one image is not a \
+                 comparison, and {} is the batch a comparison's token budget was measured at",
+                keeper::MAX,
+                keeper::MAX
+            )));
+        }
         if let Some(gap) = self.group.gap
             && !(gap > 0.0 && gap.is_finite())
         {
@@ -294,13 +333,28 @@ impl ConfigFile {
                 "group.exposure_stops must be zero or more stops, not {stops}"
             )));
         }
-        for (key, value) in [
-            ("server.endpoint", self.server.endpoint.as_deref()),
-            ("server.model", self.server.model.as_deref()),
+        for (key, value, remedy) in [
+            ("server.endpoint", self.server.endpoint.as_deref(), None),
+            ("server.model", self.server.model.as_deref(), None),
+            (
+                "server.token",
+                self.server.token.as_deref(),
+                Some("delete the key or put the secret there"),
+            ),
         ] {
-            if value.is_some_and(|text| text.trim().is_empty()) {
-                return Err(Error::fatal(format!("{key} cannot be empty")));
-            }
+            refuse_empty(key, value, remedy)?;
+        }
+        // The wire's two facts: the address a request goes to, with `{model}`
+        // where the model name goes, and the credential it carries. Each refusal
+        // names the key and the remedy, because none of them has a shape a
+        // photographer could guess.
+        self.refuse_the_retired_wire_keys()?;
+        if let Some(name) = &self.server.token_env
+            && !names_a_variable(name)
+        {
+            return Err(Error::fatal(format!(
+                "server.token_env names an environment variable, not '{name}'"
+            )));
         }
         Ok(())
     }
@@ -361,12 +415,29 @@ impl ConfigFile {
     }
 }
 
-/// `[server]`: the three values every command shares.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// `[server]`: what every command shares. Six keys are the wire — where a request
+/// goes, what it says it is, and what credential it carries — and `timeout` is
+/// how long a run waits for the answer.
+///
+/// `path` and `selector` are retired (ADR 0019): the address carries its own path,
+/// `{model}` and all, and the model name is what the body says. Both are kept as
+/// fields for one reason — so a file that still writes one is refused by name
+/// with the fold-in remedy, rather than by a bare "unknown field".
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerSection {
     endpoint: Option<String>,
     model: Option<String>,
+    /// Retired by ADR 0019: the path is part of `endpoint` now.
+    path: Option<toml::Value>,
+    /// Retired by ADR 0019: the body's `model` is `model`, always.
+    selector: Option<toml::Value>,
+    /// The environment variable a bearer token is read from.
+    token_env: Option<String>,
+    /// A literal bearer token, for a machine whose environment cannot hold one.
+    token: Option<String>,
+    /// Whether the body carries oMLX's `truncate: true`.
+    truncate: Option<bool>,
     timeout: Option<u64>,
 }
 
@@ -452,6 +523,27 @@ struct GroupSection {
     jpeg_quality: Option<u8>,
     /// How many groups the cull judges at once.
     cull_jobs: Option<usize>,
+    /// The most previews one comparative request carries.
+    max_images: Option<usize>,
+}
+
+/// Refuse a key that was set to nothing, naming it and — when the key has one —
+/// the remedy. A blank value is always a mistake rather than a preference: an
+/// empty endpoint posts nowhere, and an empty token is a request made anonymous.
+fn refuse_empty(key: &str, value: Option<&str>, remedy: Option<&str>) -> Result<()> {
+    if value.is_some_and(|text| text.trim().is_empty()) {
+        let remedy = remedy
+            .map(|remedy| format!(" — {remedy}"))
+            .unwrap_or_default();
+        return Err(Error::fatal(format!("{key} cannot be empty{remedy}")));
+    }
+    Ok(())
+}
+
+/// Whether `name` could be an environment variable: non-empty, and free of the
+/// separators that would make it a shell assignment or two words.
+fn names_a_variable(name: &str) -> bool {
+    !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_whitespace)
 }
 
 /// `[score] rubric` as the text a photographer wrote, read the way `--rubric`
@@ -475,6 +567,12 @@ where
 pub struct Resolved {
     pub endpoint: Option<String>,
     pub model: Option<String>,
+    /// The environment variable a bearer token is read from.
+    pub token_env: Option<String>,
+    /// A literal bearer token, wrapped so no `Debug` of this struct prints it.
+    pub token: Option<Secret>,
+    /// Whether the body carries `truncate: true`.
+    pub truncate: Option<bool>,
     pub timeout: Option<u64>,
     /// The longest edge of a rating's preview, in pixels.
     pub score_max_edge: Option<u32>,
@@ -498,6 +596,8 @@ pub struct Resolved {
     pub group_jpeg_quality: Option<u8>,
     /// How many groups the cull judges at once.
     pub group_cull_jobs: Option<usize>,
+    /// The most previews one comparative request carries.
+    pub group_max_images: Option<usize>,
 }
 
 impl Resolved {
@@ -509,6 +609,9 @@ impl Resolved {
         Resolved {
             endpoint: flags.endpoint.or(self.endpoint),
             model: flags.model.or(self.model),
+            token_env: flags.token_env.or(self.token_env),
+            token: flags.token.or(self.token),
+            truncate: flags.truncate.or(self.truncate),
             timeout: flags.timeout.or(self.timeout),
             score_max_edge: flags.score_max_edge.or(self.score_max_edge),
             score_jpeg_quality: flags.score_jpeg_quality.or(self.score_jpeg_quality),
@@ -523,6 +626,7 @@ impl Resolved {
             group_max_edge: flags.group_max_edge.or(self.group_max_edge),
             group_jpeg_quality: flags.group_jpeg_quality.or(self.group_jpeg_quality),
             group_cull_jobs: flags.group_cull_jobs.or(self.group_cull_jobs),
+            group_max_images: flags.group_max_images.or(self.group_max_images),
         }
     }
 
@@ -536,10 +640,15 @@ impl Resolved {
             source,
             endpoint: self
                 .endpoint
-                .unwrap_or_else(|| omlx::DEFAULT_ENDPOINT.to_string()),
+                .unwrap_or_else(|| systemone::DEFAULT_ENDPOINT.to_string()),
             // Still optional: an absent alias defers to the rubric's own, which
             // is part of the rubric hash (spec §8.3).
             model: self.model,
+            // Carried, not resolved: `settle` stays pure, so the environment is
+            // read once, at the boundary, by whoever builds the client.
+            token_env: self.token_env,
+            token: self.token,
+            truncate: self.truncate.unwrap_or(true),
             timeout: self.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
             score_params: Params {
                 max_edge: self.score_max_edge.unwrap_or(Params::DEFAULT_MAX_EDGE),
@@ -572,6 +681,7 @@ impl Resolved {
                     .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
             },
             cull_jobs: self.group_cull_jobs.unwrap_or(cull::DEFAULT_JOBS),
+            max_images: self.group_max_images.unwrap_or(keeper::MAX),
         }
     }
 }
@@ -581,10 +691,18 @@ impl Resolved {
 pub struct Effective {
     /// The config file that contributed, when one did. Provenance only.
     pub source: Option<PathBuf>,
-    /// The server to talk to.
+    /// The server to talk to: the whole address a request is posted to, with
+    /// `{model}` where the model name goes when the server's addressing needs it.
     pub endpoint: String,
     /// The alias the photographer named, if any: `None` defers to the rubric's.
+    /// It fills the address's `{model}` and is the body's `model`.
     pub model: Option<String>,
+    /// The environment variable a bearer token is read from, as written.
+    pub token_env: Option<String>,
+    /// A literal bearer token, as written, wrapped so it cannot be printed.
+    pub token: Option<Secret>,
+    /// Whether the request body carries oMLX's `truncate: true`.
+    pub truncate: bool,
     /// The read timeout, in seconds.
     pub timeout: u64,
     /// How much picture to send for one frame's rating.
@@ -612,14 +730,68 @@ pub struct Effective {
     /// in flight, whose default is [`cull::DEFAULT_JOBS`]. It is scheduling, not
     /// algorithm, so the grouping hash does not cover it.
     pub cull_jobs: usize,
+    /// The most previews one comparative request may carry, whose default is
+    /// [`keeper::MAX`]. It fills [`keeper::Budget::max`]: a server that refuses
+    /// more than four images per request is a scheduling fact about that server,
+    /// not a change to how a group is judged, so the grouping hash does not
+    /// cover it either.
+    pub max_images: usize,
 }
 
 impl Effective {
+    /// Whether this run addresses oMLX's own decision path, the one whose probes
+    /// `doctor` and `models` read. An address with `{model}` in it is some other
+    /// server's addressing, and neither command can say anything about it.
+    ///
+    /// The comparison itself is [`systemone::is_omlx`], which
+    /// [`systemone::Adapter::preflight`] also asks. So the two commands that
+    /// refuse a non-oMLX address and the preflight that skips oMLX's diagnosis
+    /// cannot come to different conclusions about the same config.
+    pub fn asks_omlx(&self) -> bool {
+        systemone::is_omlx(&self.endpoint)
+    }
+
     /// How the folder should be scanned: this config's breadth, the flag's limit.
     pub fn scan(&self, limit: Option<usize>) -> ScanOptions {
         ScanOptions {
             recursive: self.recursive,
             limit,
+        }
+    }
+
+    /// The bearer token this config asks for, if any: the environment variable
+    /// it names when that variable is set and non-empty, else the literal
+    /// fallback.
+    ///
+    /// The environment arrives as a lookup rather than from `std::env` here,
+    /// for the same reason [`Env`] takes its paths as arguments: the tests run
+    /// in threads, and a test that set a process variable would race every
+    /// other test in the binary. The front end passes
+    /// `|name| std::env::var(name).ok()`; a test passes a closure over a map.
+    ///
+    /// A `token_env` that names a variable with nothing behind it, and no
+    /// literal beside it, is fatal and names the variable: a typo'd name must
+    /// not become an anonymous request the server then rejects 401 frames in a
+    /// row for. The message names the variable, never a value.
+    ///
+    /// The variable's value is trimmed; the literal is not. Stray whitespace in
+    /// an exported variable is a shell quoting accident nobody can see, and
+    /// `Bearer  abc ` is a 401 per frame, while a literal is a value the
+    /// photographer wrote out and can read — `token = " abc "` is theirs to
+    /// keep.
+    pub fn resolve_token(&self, lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Secret>> {
+        let Some(name) = &self.token_env else {
+            return Ok(self.token.clone());
+        };
+        if let Some(value) = lookup(name).filter(|value| !value.trim().is_empty()) {
+            return Ok(Some(Secret::new(value.trim())));
+        }
+        match &self.token {
+            Some(token) => Ok(Some(token.clone())),
+            None => Err(Error::fatal(format!(
+                "{name} is not set and [server] token is empty — export the variable or write \
+                 the key"
+            ))),
         }
     }
 }

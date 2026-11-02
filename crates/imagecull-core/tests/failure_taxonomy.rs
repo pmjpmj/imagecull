@@ -1,4 +1,4 @@
-//! How a run fails, at the scale it fails: the taxonomy's ten statuses, the
+//! How a run fails, at the scale it fails: the taxonomy's statuses, the
 //! retries that keep a hiccup from costing the shoot, the failures that stop the
 //! run instead, and the code the process exits with.
 //!
@@ -325,6 +325,47 @@ fn a_rejected_rubric_stops_the_run_at_the_first_frame() {
     let csv = Rows::of(&run);
     assert_eq!(csv.len(), 1, "the frame that stopped the run is a row");
     assert_eq!(csv.cell(0, "status"), "http_400");
+}
+
+#[test]
+fn a_refused_credential_stops_the_run_at_the_first_frame() {
+    // Against a hosted server an expired token is the likeliest failure there
+    // is, and it fails identically for every frame: one request, one row, and a
+    // message that names the variable to check.
+    let shoot = shoot(3);
+    let csv = shoot.path().join("scores.csv");
+    let decider = Scripted::answering(vec![Err(failure(
+        ErrorKind::Http401,
+        "POST /v1/systemone returned HTTP 401: Authentication error",
+    ))]);
+
+    let run = scoring::run(
+        shoot.path(),
+        &config(csv.clone()),
+        &decider,
+        &imagecull_core::sidecar::Filesystem,
+        &Silent,
+        &Cancel::new(),
+    )
+    .expect("a run");
+
+    assert_eq!(
+        decider.seen().len(),
+        1,
+        "a refused credential costs one request, not one per frame"
+    );
+    assert_eq!(run.frames.len(), 1);
+    match &run.ending {
+        Ending::Aborted { reason } => assert!(
+            reason.contains("HTTP 401"),
+            "the run says why it stopped: {reason}"
+        ),
+        other => panic!("a refused credential aborts the run, got {other:?}"),
+    }
+    assert_eq!(run.exit_code(), ExitCode::Fatal);
+    let csv = Rows::of(&run);
+    assert_eq!(csv.len(), 1, "the frame that stopped the run is a row");
+    assert_eq!(csv.cell(0, "status"), "http_401");
 }
 
 #[test]
