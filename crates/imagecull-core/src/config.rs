@@ -1,6 +1,6 @@
 //! The config file: the values that stay true across runs, where a run looks
 //! for them, and how they merge with the flags (spec §11.1, ADR 0003, ADR 0010,
-//! ADR 0014).
+//! ADR 0014, ADR 0016).
 //!
 //! A config file is a *source* of config, never the effective config itself:
 //! [`Resolved`] holds only the keys a file actually set, so "the file did not
@@ -170,15 +170,25 @@ fn read(path: &Path) -> Result<ConfigFile> {
 /// Every section and every key is optional, and an unknown one is an error
 /// rather than a warning: a typo'd `max_edeg` would otherwise cost a whole run
 /// at the wrong resolution.
+///
+/// The four live sections split by who reads them: the two command sections,
+/// `[score]` and `[group]`, own what one command needs; `[server]` and `[scan]`
+/// hold what every command shares (ADR 0016). The three after them are retired
+/// sections kept only so a file that still writes one is refused by name.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigFile {
     server: ServerSection,
-    preview: PreviewSection,
     scan: ScanSection,
-    outputs: OutputsSection,
-    run: RunSection,
+    score: ScoreSection,
     group: GroupSection,
+    /// Retired by ADR 0016: every key moved to `[score]`.
+    preview: RetiredPreview,
+    /// Retired by ADR 0016: `json_scores` moved to `[score]`; `csv` and
+    /// `absolute` died with the report.
+    outputs: RetiredOutputs,
+    /// Retired by ADR 0016: every key moved to `[score]`.
+    run: RetiredRun,
 }
 
 impl ConfigFile {
@@ -196,13 +206,17 @@ impl ConfigFile {
             endpoint: self.server.endpoint.clone(),
             model: self.server.model.clone(),
             timeout: self.server.timeout,
-            max_edge: self.preview.max_edge,
-            jpeg_quality: self.preview.jpeg_quality,
+            score_max_edge: self.score.max_edge,
+            score_jpeg_quality: self.score.jpeg_quality,
             recursive: self.scan.recursive,
-            json_scores: anchor(&self.outputs.json_scores, base),
-            rubric: self.run.rubric.clone().map(|source| source.anchored(base)),
-            shoot_context: self.run.shoot_context.clone(),
-            dedupe: self.run.dedupe,
+            json_scores: anchor(&self.score.json_scores, base),
+            rubric: self
+                .score
+                .rubric
+                .clone()
+                .map(|source| source.anchored(base)),
+            shoot_context: self.score.shoot_context.clone(),
+            dedupe: self.score.dedupe,
             group_gap: self.group.gap,
             group_similarity: self.group.similarity,
             group_exposure_stops: self.group.exposure_stops,
@@ -215,31 +229,22 @@ impl ConfigFile {
     /// named in the message. Nothing is clamped: a quality of 0 is a mistake,
     /// not a preference.
     fn validate(&self) -> Result<()> {
-        if let Some(edge) = self.preview.max_edge
+        // The retired sections first: a file built for the old shape is told to
+        // move a key, not told that a number it is about to move is out of range.
+        self.refuse_the_retired_sections()?;
+        if let Some(edge) = self.score.max_edge
             && edge == 0
         {
             return Err(Error::fatal(
-                "preview.max_edge must be at least 1 px, or nothing would be sent",
+                "score.max_edge must be at least 1 px, or nothing would be sent",
             ));
         }
-        if let Some(quality) = self.preview.jpeg_quality
+        if let Some(quality) = self.score.jpeg_quality
             && !(1..=100).contains(&quality)
         {
             return Err(Error::fatal(format!(
-                "preview.jpeg_quality must be between 1 and 100, not {quality}"
+                "score.jpeg_quality must be between 1 and 100, not {quality}"
             )));
-        }
-        if self.outputs.csv.is_some() {
-            return Err(Error::fatal(
-                "outputs.csv is gone: a run writes each rating into an XMP sidecar beside its \
-                 frame, so there is no report path to set — delete the key",
-            ));
-        }
-        if self.outputs.absolute.is_some() {
-            return Err(Error::fatal(
-                "outputs.absolute is gone with the report: there is no file column to spell \
-                 absolutely — delete the key",
-            ));
         }
         if let Some(0) = self.server.timeout {
             return Err(Error::fatal(
@@ -292,6 +297,61 @@ impl ConfigFile {
         }
         Ok(())
     }
+
+    /// Refuse a config file written for the three-section shape, naming the key
+    /// that replaced the one it set.
+    ///
+    /// The move is reported per key rather than per section: a file with three
+    /// keys under `[preview]` is three lines to edit, and a message that only
+    /// said "`[preview]` is gone" would leave the photographer to work out
+    /// where. `outputs.csv` and `outputs.absolute` are the exceptions, because
+    /// they did not move — they died with the CSV report and say so.
+    fn refuse_the_retired_sections(&self) -> Result<()> {
+        for (old, set, new) in [
+            (
+                "preview.max_edge",
+                self.preview.max_edge.is_some(),
+                "score.max_edge",
+            ),
+            (
+                "preview.jpeg_quality",
+                self.preview.jpeg_quality.is_some(),
+                "score.jpeg_quality",
+            ),
+            (
+                "outputs.json_scores",
+                self.outputs.json_scores.is_some(),
+                "score.json_scores",
+            ),
+            ("run.rubric", self.run.rubric.is_some(), "score.rubric"),
+            (
+                "run.shoot_context",
+                self.run.shoot_context.is_some(),
+                "score.shoot_context",
+            ),
+            ("run.dedupe", self.run.dedupe.is_some(), "score.dedupe"),
+        ] {
+            if set {
+                return Err(Error::fatal(format!(
+                    "{old} has moved to {new}: [score] holds what a rating needs, the way \
+                     [group] holds what a cull needs — move the key"
+                )));
+            }
+        }
+        if self.outputs.csv.is_some() {
+            return Err(Error::fatal(
+                "outputs.csv is gone: a run writes each rating into an XMP sidecar beside its \
+                 frame, so there is no report path to set — delete the key",
+            ));
+        }
+        if self.outputs.absolute.is_some() {
+            return Err(Error::fatal(
+                "outputs.absolute is gone with the report: there is no file column to spell \
+                 absolutely — delete the key",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `[server]`: the three values every command shares.
@@ -303,16 +363,32 @@ struct ServerSection {
     timeout: Option<u64>,
 }
 
-/// `[preview]`: what gets sent for one frame's rating, as [`Params`].
+/// `[score]`: what a rating needs — the payload shape it sends, where its raw
+/// answers go, and how it judges.
 ///
-/// `score` and `doctor` read this; a comparison has its own pair under
-/// [`GroupSection`], because a request carrying twenty frames of one moment is a
-/// different payload problem from a request carrying one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// `score` reads all of it, and `doctor` reads the preview pair because its file
+/// check renders the preview a rating would send. A comparison has its own pair
+/// under [`GroupSection`], because a request carrying twenty frames of one moment
+/// is a different payload problem from a request carrying one; the one key
+/// `groups` borrows from here is `shoot_context`, since a shoot's framing is a
+/// property of the shoot rather than of the pass (ADR 0016).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct PreviewSection {
+struct ScoreSection {
+    /// Cap on the longest edge of the preview sent for one frame's rating.
     max_edge: Option<u32>,
+    /// JPEG quality of that preview, 1–100.
     jpeg_quality: Option<u8>,
+    /// Where every raw model answer is written, when it is asked for.
+    json_scores: Option<PathBuf>,
+    /// A built-in rubric's name or a path to a rubric file: the same value
+    /// `--rubric` takes, so the two can never disagree about what a name is.
+    #[serde(deserialize_with = "rubric_source")]
+    rubric: Option<RubricSource>,
+    /// The photographer's framing of the shoot.
+    shoot_context: Option<String>,
+    /// Whether an identical preview may reuse an earlier frame's outcome.
+    dedupe: Option<bool>,
 }
 
 /// `[scan]`: which files a run covers, as far as a file may decide it.
@@ -325,20 +401,35 @@ struct ScanSection {
     recursive: Option<bool>,
 }
 
-/// `[outputs]`: what a run still writes to a file, as [`Outputs`].
-///
-/// Ratings go into sidecars beside the frames, so there is no report path here.
-/// `csv` and `absolute` are gone with the report: an old file that still sets
-/// them is a fatal error naming the change, never a silent shrug.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// `[preview]`, retired by ADR 0016: named only so the refusal can point at
+/// `[score] max_edge` / `[score] jpeg_quality` instead of leaving a photographer
+/// guessing at an unknown field.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct OutputsSection {
-    /// Gone: named only so the refusal can say where ratings go instead of
-    /// leaving a photographer guessing at an unknown field.
-    csv: Option<PathBuf>,
-    /// Gone with it: there is no `file` column to spell absolutely.
-    absolute: Option<bool>,
-    json_scores: Option<PathBuf>,
+struct RetiredPreview {
+    max_edge: Option<toml::Value>,
+    jpeg_quality: Option<toml::Value>,
+}
+
+/// `[outputs]`, retired by ADR 0016: `json_scores` moved to `[score]`, and `csv`
+/// and `absolute` are gone with the CSV report.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RetiredOutputs {
+    /// Gone with the report: there is no `file` column to spell absolutely.
+    absolute: Option<toml::Value>,
+    /// Gone: named only so the refusal can say where ratings go instead.
+    csv: Option<toml::Value>,
+    json_scores: Option<toml::Value>,
+}
+
+/// `[run]`, retired by ADR 0016: every key moved to `[score]`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RetiredRun {
+    rubric: Option<toml::Value>,
+    shoot_context: Option<toml::Value>,
+    dedupe: Option<toml::Value>,
 }
 
 /// `[group]`: how close two frames have to be to be one moment, as
@@ -354,19 +445,7 @@ struct GroupSection {
     jpeg_quality: Option<u8>,
 }
 
-/// `[run]`: the rest of what a run needs to know.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RunSection {
-    /// A built-in rubric's name or a path to a rubric file: the same value
-    /// `--rubric` takes, so the two can never disagree about what a name is.
-    #[serde(deserialize_with = "rubric_source")]
-    rubric: Option<RubricSource>,
-    shoot_context: Option<String>,
-    dedupe: Option<bool>,
-}
-
-/// `[run] rubric` as the text a photographer wrote, read the way `--rubric`
+/// `[score] rubric` as the text a photographer wrote, read the way `--rubric`
 /// reads it.
 fn rubric_source<'de, D>(deserializer: D) -> std::result::Result<Option<RubricSource>, D::Error>
 where
@@ -388,8 +467,10 @@ pub struct Resolved {
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub timeout: Option<u64>,
-    pub max_edge: Option<u32>,
-    pub jpeg_quality: Option<u8>,
+    /// The longest edge of a rating's preview, in pixels.
+    pub score_max_edge: Option<u32>,
+    /// The JPEG quality of a rating's preview, 1–100.
+    pub score_jpeg_quality: Option<u8>,
     pub recursive: Option<bool>,
     pub json_scores: Option<PathBuf>,
     /// Which rubric to judge by: a built-in's name, or a path to a file.
@@ -418,8 +499,8 @@ impl Resolved {
             endpoint: flags.endpoint.or(self.endpoint),
             model: flags.model.or(self.model),
             timeout: flags.timeout.or(self.timeout),
-            max_edge: flags.max_edge.or(self.max_edge),
-            jpeg_quality: flags.jpeg_quality.or(self.jpeg_quality),
+            score_max_edge: flags.score_max_edge.or(self.score_max_edge),
+            score_jpeg_quality: flags.score_jpeg_quality.or(self.score_jpeg_quality),
             recursive: flags.recursive.or(self.recursive),
             json_scores: flags.json_scores.or(self.json_scores),
             rubric: flags.rubric.or(self.rubric),
@@ -448,9 +529,11 @@ impl Resolved {
             // is part of the rubric hash (spec §8.3).
             model: self.model,
             timeout: self.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
-            params: Params {
-                max_edge: self.max_edge.unwrap_or(Params::DEFAULT_MAX_EDGE),
-                jpeg_quality: self.jpeg_quality.unwrap_or(Params::DEFAULT_JPEG_QUALITY),
+            score_params: Params {
+                max_edge: self.score_max_edge.unwrap_or(Params::DEFAULT_MAX_EDGE),
+                jpeg_quality: self
+                    .score_jpeg_quality
+                    .unwrap_or(Params::DEFAULT_JPEG_QUALITY),
             },
             group_params: Params {
                 max_edge: self
@@ -491,8 +574,8 @@ pub struct Effective {
     pub model: Option<String>,
     /// The read timeout, in seconds.
     pub timeout: u64,
-    /// How much picture to send, one frame at a time.
-    pub params: Params,
+    /// How much picture to send for one frame's rating.
+    pub score_params: Params,
     /// How much picture to send, one image of a comparison at a time. Its
     /// default is the measured comparison edge ([`keeper::EDGE`]), not `score`'s
     /// cap: a comparison carries up to twenty frames of one moment.

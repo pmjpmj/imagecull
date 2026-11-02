@@ -41,7 +41,7 @@ pub fn run(args: &DoctorArgs) -> u8 {
     // The file check is a separate proof and runs either way: a photographer
     // whose server is down still wants to know their camera's output works.
     if let Some(file) = &args.file {
-        let check = doctor::check_file(file, &effective.params);
+        let check = doctor::check_file(file, &effective.score_params);
         if check.is_ok() {
             println!("ok: {}", check.message());
         } else {

@@ -160,6 +160,15 @@ pub enum Event {
         /// so the total is not known when the pass begins.
         groups: Option<usize>,
     },
+    /// A group is about to be sent for comparison.
+    GroupStarted {
+        /// The group's place in the shoot.
+        number: usize,
+        /// The first frame in the group.
+        start: String,
+        /// Number of frames being compared.
+        size: usize,
+    },
     /// One group judged, or reported undecided.
     Group(Verdict),
     /// A verdict that could not reach its sidecar, and why: silence would make
@@ -476,6 +485,11 @@ fn judge_group(
     watcher: &dyn Watcher,
     culled: &mut Culled,
 ) {
+    watcher.event(&Event::GroupStarted {
+        number: row.number,
+        start: name(&row.frames[0]),
+        size: row.frames.len(),
+    });
     let mut verdict = Verdict {
         number: row.number,
         start: name(&row.frames[0]),
