@@ -1,5 +1,6 @@
 //! The config file: the values that stay true across runs, where a run looks
-//! for them, and how they merge with the flags (spec §11.1, ADR 0003, ADR 0010).
+//! for them, and how they merge with the flags (spec §11.1, ADR 0003, ADR 0010,
+//! ADR 0014).
 //!
 //! A config file is a *source* of config, never the effective config itself:
 //! [`Resolved`] holds only the keys a file actually set, so "the file did not
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::group::{self, Thresholds};
 use crate::ingest::ScanOptions;
+use crate::keeper;
 use crate::omlx;
 use crate::preprocess::Params;
 use crate::rubric::RubricSource;
@@ -204,6 +206,8 @@ impl ConfigFile {
             group_gap: self.group.gap,
             group_similarity: self.group.similarity,
             group_exposure_stops: self.group.exposure_stops,
+            group_max_edge: self.group.max_edge,
+            group_jpeg_quality: self.group.jpeg_quality,
         }
     }
 
@@ -241,6 +245,20 @@ impl ConfigFile {
             return Err(Error::fatal(
                 "server.timeout must be at least 1 second, or no request could be waited for",
             ));
+        }
+        if let Some(edge) = self.group.max_edge
+            && edge == 0
+        {
+            return Err(Error::fatal(
+                "group.max_edge must be at least 1 px, or nothing would be sent",
+            ));
+        }
+        if let Some(quality) = self.group.jpeg_quality
+            && !(1..=100).contains(&quality)
+        {
+            return Err(Error::fatal(format!(
+                "group.jpeg_quality must be between 1 and 100, not {quality}"
+            )));
         }
         if let Some(gap) = self.group.gap
             && !(gap > 0.0 && gap.is_finite())
@@ -285,7 +303,11 @@ struct ServerSection {
     timeout: Option<u64>,
 }
 
-/// `[preview]`: what gets sent, as [`Params`].
+/// `[preview]`: what gets sent for one frame's rating, as [`Params`].
+///
+/// `score` and `doctor` read this; a comparison has its own pair under
+/// [`GroupSection`], because a request carrying twenty frames of one moment is a
+/// different payload problem from a request carrying one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct PreviewSection {
@@ -320,13 +342,16 @@ struct OutputsSection {
 }
 
 /// `[group]`: how close two frames have to be to be one moment, as
-/// [`Thresholds`]. Read by `groups`, which is the only command that groups.
+/// [`Thresholds`], and how much picture one image of a comparison carries, as
+/// [`Params`]. Read by `groups`, which is the only command that groups.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GroupSection {
     gap: Option<f64>,
     similarity: Option<f64>,
     exposure_stops: Option<f64>,
+    max_edge: Option<u32>,
+    jpeg_quality: Option<u8>,
 }
 
 /// `[run]`: the rest of what a run needs to know.
@@ -377,6 +402,10 @@ pub struct Resolved {
     pub group_similarity: Option<f64>,
     /// The most brightness drift, in stops, between two frames of one group.
     pub group_exposure_stops: Option<f64>,
+    /// The longest edge of one image in a comparison, in pixels.
+    pub group_max_edge: Option<u32>,
+    /// The JPEG quality of one image in a comparison, 1–100.
+    pub group_jpeg_quality: Option<u8>,
 }
 
 impl Resolved {
@@ -399,6 +428,8 @@ impl Resolved {
             group_gap: flags.group_gap.or(self.group_gap),
             group_similarity: flags.group_similarity.or(self.group_similarity),
             group_exposure_stops: flags.group_exposure_stops.or(self.group_exposure_stops),
+            group_max_edge: flags.group_max_edge.or(self.group_max_edge),
+            group_jpeg_quality: flags.group_jpeg_quality.or(self.group_jpeg_quality),
         }
     }
 
@@ -420,6 +451,14 @@ impl Resolved {
             params: Params {
                 max_edge: self.max_edge.unwrap_or(Params::DEFAULT_MAX_EDGE),
                 jpeg_quality: self.jpeg_quality.unwrap_or(Params::DEFAULT_JPEG_QUALITY),
+            },
+            group_params: Params {
+                max_edge: self
+                    .group_max_edge
+                    .unwrap_or(keeper::default_preview().max_edge),
+                jpeg_quality: self
+                    .group_jpeg_quality
+                    .unwrap_or(keeper::default_preview().jpeg_quality),
             },
             recursive: self.recursive.unwrap_or(false),
             outputs: Outputs {
@@ -452,8 +491,12 @@ pub struct Effective {
     pub model: Option<String>,
     /// The read timeout, in seconds.
     pub timeout: u64,
-    /// How much picture to send.
+    /// How much picture to send, one frame at a time.
     pub params: Params,
+    /// How much picture to send, one image of a comparison at a time. Its
+    /// default is the measured comparison edge ([`keeper::EDGE`]), not `score`'s
+    /// cap: a comparison carries up to twenty frames of one moment.
+    pub group_params: Params,
     /// Whether a run descends into subdirectories. The scan's `limit` stays a
     /// flag, because it describes the invocation.
     pub recursive: bool,

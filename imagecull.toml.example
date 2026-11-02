@@ -32,14 +32,12 @@ endpoint = "http://127.0.0.1:8000"
 # timeout = 120
 
 [preview]
-# Cap on the longest edge of the preview sent to the model, in pixels.
+# Cap on the longest edge of the preview sent for one frame's rating, in pixels.
 # Smaller is faster and cheaper in context; below ~1000 px fine detail stops
-# being judgeable. `score` and `doctor` only: `groups` renders each comparison
-# at its own measured budget edge, so this key does not change a cull.
-# Default: 1568
+# being judgeable. `score` and `doctor` read this pair: a comparison has its own
+# under `[group]`. Default: 1568
 # max_edge = 1568
-# JPEG quality of the preview, 1-100: the one `score` sends, and the one
-# `groups` encodes each comparison image at. Default: 88
+# JPEG quality of that preview, 1-100. Default: 88
 # jpeg_quality = 88
 
 [scan]
@@ -48,9 +46,9 @@ endpoint = "http://127.0.0.1:8000"
 # recursive = false
 
 [group]
-# What counts as one moment. `groups` reads these and `score` ignores them;
-# changing one changes the grouping hash, so verdicts computed under another
-# value are not comparable.
+# What counts as one moment, and how much picture a comparison sends. `groups`
+# reads this section and `score` ignores it; changing a threshold changes the
+# grouping hash, so verdicts computed under another value are not comparable.
 #
 # The most seconds between two frames of one group, measured from the previous
 # frame rather than from the group's first. Default: 2.0
@@ -63,6 +61,17 @@ endpoint = "http://127.0.0.1:8000"
 # The most brightness drift, in stops, between two frames of one group; `0`
 # asks for one exposure exactly. Default: 2.0
 # exposure_stops = 2.0
+
+# What one image of a comparison carries. `groups` sends every frame of a group
+# in one request, so this is per image and the measured default is small: a
+# group's verdict was shown to be decisive at 512 px on a real sharp-against-soft
+# difference, and twenty of them is a quarter of the model's token budget.
+# Raising it sees more detail and costs more tokens per frame; a group that no
+# longer fits is reported undecided (HTTP 413), never quietly shrunk.
+# Default: 512
+# max_edge = 512
+# JPEG quality of one image in a comparison, 1-100. Default: 88
+# jpeg_quality = 88
 
 [outputs]
 # Ratings do not come out of a report: a run writes each one into an XMP sidecar

@@ -150,6 +150,7 @@ fn cull(dir: &Path, decider: &Scripted, writer: &dyn Writer, recorded: &Recorded
         writer,
         recorded,
         keeper::Budget::default(),
+        keeper::default_preview(),
         false,
     )
 }
@@ -161,7 +162,15 @@ fn cull_through(
     recorded: &Recorded,
     budget: keeper::Budget,
 ) -> Culled {
-    cull_with(dir, decider, &sidecar::Filesystem, recorded, budget, false)
+    cull_with(
+        dir,
+        decider,
+        &sidecar::Filesystem,
+        recorded,
+        budget,
+        keeper::default_preview(),
+        false,
+    )
 }
 
 fn cull_with(
@@ -170,6 +179,7 @@ fn cull_with(
     writer: &dyn Writer,
     recorded: &Recorded,
     budget: keeper::Budget,
+    preview: Params,
     allow_foreign: bool,
 ) -> Culled {
     let plan = plan(dir);
@@ -177,7 +187,7 @@ fn cull_with(
         model: "clef-flash-oQ4e",
         shoot_context: None,
         budget,
-        jpeg_quality: Params::default().jpeg_quality,
+        preview,
         grouping_hash: &plan.hash,
         allow_foreign,
         retry: RetryPolicy::without_waiting(),
@@ -267,6 +277,37 @@ fn two_frames() -> tempfile::TempDir {
         frame("DSC_0001.NEF", 0.0, 0, "10"),
         frame("DSC_0002.NEF", 0.2, 0, "20"),
     ])
+}
+
+#[test]
+fn the_comparisons_preview_size_is_the_runs_to_set() {
+    let shoot = two_frames();
+    let decider = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.88))]);
+    let recorded = quiet();
+
+    let culled = cull_with(
+        shoot.path(),
+        &decider,
+        &sidecar::Filesystem,
+        &recorded,
+        keeper::Budget::default(),
+        Params {
+            max_edge: 256,
+            jpeg_quality: 40,
+        },
+        false,
+    );
+
+    let compared = decider.compared();
+    assert_eq!(
+        compared[0].previews[0].width, 256,
+        "a comparison is rendered at the edge the run asked for, not at the measured 512"
+    );
+    assert_eq!(compared[0].previews[0].height, 171, "and keeps the shape");
+    assert_eq!(
+        culled.green, 1,
+        "the chosen frame is marked and the other is not"
+    );
 }
 
 #[test]
@@ -896,7 +937,7 @@ fn a_server_that_fails_the_preflight_marks_nothing() {
             model: "clef-flash-oQ4e",
             shoot_context: None,
             budget: keeper::Budget::default(),
-            jpeg_quality: Params::default().jpeg_quality,
+            preview: Params::default(),
             grouping_hash: "hash",
             allow_foreign: false,
             retry: RetryPolicy::without_waiting(),
@@ -920,7 +961,7 @@ fn stream_config(hash: &str) -> cull::Config<'_> {
         model: "clef-flash-oQ4e",
         shoot_context: None,
         budget: keeper::Budget::default(),
-        jpeg_quality: Params::default().jpeg_quality,
+        preview: Params::default(),
         grouping_hash: hash,
         allow_foreign: false,
         retry: RetryPolicy::without_waiting(),

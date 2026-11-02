@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use imagecull_core::config::{self, ConfigFile, Env, Resolved};
 use imagecull_core::group::Thresholds;
 use imagecull_core::ingest::ScanOptions;
+use imagecull_core::keeper;
 use imagecull_core::preprocess::Params;
 use imagecull_core::rubric::{Builtin, RubricSource};
 
@@ -39,6 +40,8 @@ dedupe = false
 gap = 0.75
 similarity = 0.96
 exposure_stops = 1.5
+max_edge = 700
+jpeg_quality = 60
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -104,6 +107,12 @@ fn every_key_reaches_the_resolved_values() {
     assert_eq!(resolved.group_gap, Some(0.75));
     assert_eq!(resolved.group_similarity, Some(0.96));
     assert_eq!(resolved.group_exposure_stops, Some(1.5));
+    assert_eq!(
+        resolved.group_max_edge,
+        Some(700),
+        "a comparison's edge is its own key, not [preview]'s"
+    );
+    assert_eq!(resolved.group_jpeg_quality, Some(60));
 }
 
 #[test]
@@ -139,6 +148,9 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[preview]\nmax_edge = 0\n", "max_edge"),
         ("[preview]\njpeg_quality = 0\n", "jpeg_quality"),
         ("[preview]\njpeg_quality = 101\n", "jpeg_quality"),
+        ("[group]\nmax_edge = 0\n", "group.max_edge"),
+        ("[group]\njpeg_quality = 0\n", "group.jpeg_quality"),
+        ("[group]\njpeg_quality = 101\n", "group.jpeg_quality"),
         ("[server]\ntimeout = 0\n", "timeout"),
         ("[server]\nmodel = \"  \"\n", "model"),
         ("[server]\nendpoint = \"\"\n", "endpoint"),
@@ -164,11 +176,16 @@ fn a_value_the_flags_would_reject_is_fatal() {
 
 #[test]
 fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
-    let message = error("[preview]\njpeg_quality = 101\n");
-    assert!(
-        message.contains("1") && message.contains("100"),
-        "a range mistake must say what the range is: {message}"
-    );
+    for text in [
+        "[preview]\njpeg_quality = 101\n",
+        "[group]\njpeg_quality = 101\n",
+    ] {
+        let message = error(text);
+        assert!(
+            message.contains("1") && message.contains("100"),
+            "a range mistake must say what the range is: {message}"
+        );
+    }
 }
 
 #[test]
@@ -262,6 +279,80 @@ fn a_groups_flag_wins_over_the_file() {
 }
 
 #[test]
+fn the_comparison_has_its_own_preview_pair() {
+    let effective = resolved(EVERY_KEY).settle(None);
+    assert_eq!(
+        effective.params,
+        Params {
+            max_edge: 1024,
+            jpeg_quality: 72,
+        },
+        "[preview] is the pair a rating sends"
+    );
+    assert_eq!(
+        effective.group_params,
+        Params {
+            max_edge: 700,
+            jpeg_quality: 60,
+        },
+        "[group]'s pair is the pair a comparison sends, and the two never merge"
+    );
+}
+
+#[test]
+fn a_scores_preview_flag_leaves_the_comparisons_pair_alone() {
+    let file = resolved(EVERY_KEY);
+    let flags = Resolved {
+        max_edge: Some(1568),
+        jpeg_quality: Some(88),
+        ..Resolved::default()
+    };
+    let effective = file.override_with(flags).settle(None);
+    assert_eq!(
+        effective.params,
+        Params {
+            max_edge: 1568,
+            jpeg_quality: 88,
+        }
+    );
+    assert_eq!(
+        effective.group_params,
+        Params {
+            max_edge: 700,
+            jpeg_quality: 60,
+        },
+        "--max-edge is a rating's cap and never reaches the cull"
+    );
+}
+
+#[test]
+fn a_culls_preview_flag_leaves_the_scores_pair_alone() {
+    let file = resolved(EVERY_KEY);
+    let flags = Resolved {
+        group_max_edge: Some(640),
+        group_jpeg_quality: Some(50),
+        ..Resolved::default()
+    };
+    let effective = file.override_with(flags).settle(None);
+    assert_eq!(
+        effective.group_params,
+        Params {
+            max_edge: 640,
+            jpeg_quality: 50,
+        },
+        "groups --max-edge beat the file's comparison edge"
+    );
+    assert_eq!(
+        effective.params,
+        Params {
+            max_edge: 1024,
+            jpeg_quality: 72,
+        },
+        "and a rating's pair is untouched by a cull's flag"
+    );
+}
+
+#[test]
 fn a_whole_number_is_a_threshold_like_any_other() {
     let resolved = resolved("[group]\ngap = 2\nexposure_stops = 1\n");
     assert_eq!(resolved.group_gap, Some(2.0), "`gap = 2` is two seconds");
@@ -305,6 +396,14 @@ fn an_empty_source_settles_to_the_specs_defaults() {
     );
     assert_eq!(effective.timeout, 120);
     assert_eq!(effective.params, Params::default());
+    assert_eq!(
+        effective.group_params,
+        Params {
+            max_edge: keeper::EDGE,
+            jpeg_quality: Params::DEFAULT_JPEG_QUALITY,
+        },
+        "a comparison's default edge is the measured 512, not a rating's 1568"
+    );
     assert!(!effective.recursive);
     assert_eq!(effective.outputs.json_scores, None, "no report path at all");
     assert_eq!(effective.rubric, None);

@@ -18,7 +18,9 @@ _Avoid_: photo, image, file, shot
 
 **Preview**:
 The downscaled JPEG rendered from a frame and sent to the model, after
-orientation.
+orientation. A comparison renders its own, at its own edge: one request carries
+many frames of one moment, so a rating's 1568 px and a comparison's 512 px are
+separate numbers with separate keys.
 _Avoid_: thumbnail, resized image, payload
 
 **Run**:

@@ -152,6 +152,13 @@ Assets: `image` (JPEG decode/encode, `apply_orientation`), `fast_image_resize` (
 
 Typical payload: 1568 px JPEG ≈ 250–400 KB → ≈ 340–540 KB base64. Irrelevant over loopback.
 
+A comparison carries several images in one request, so `groups` has its own
+pair — `[group] max_edge` / `[group] jpeg_quality`, `groups --max-edge` /
+`--jpeg-quality`, defaulting to 512 px / 88 — and `[preview]` never reaches a
+cull (ADR 0014). Twenty previews at 512 px are 4,154 of the 16,384 image
+tokens; the same twenty at 1568 px do not fit, which is why the two numbers are
+separate.
+
 `--dry-run` renders the exact bytes that would be sent into `./imagecull-previews/<name>.jpg`, so the user can eyeball orientation, crop, and detail loss before burning a 400-file run.
 
 ---
@@ -463,6 +470,8 @@ imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef,
         --group-gap <SECS>      default 2.0
         --group-similarity <COSINE>   default 0.90
         --group-exposure-stops <STOPS>  default 2.0; 0 asks for one exposure exactly
+        --max-edge <PX>         one image in a comparison, default 512
+        --jpeg-quality <1-100>  one image in a comparison, default 88
     -j, --jobs <N>              frames read at once, default one per core
         --cull-jobs <N>         groups culled at once, default 4
         --recursive [BOOL]      also scan subdirectories
@@ -496,22 +505,24 @@ failure's message.
 ### 11.1 Config files
 
 Values that stay true across runs can come from a TOML file instead of being
-retyped as flags. Keys are grouped into six sections that map one-for-one onto
-the core types they fill: `[server]` (`endpoint`, `model`, `timeout`),
+retyped as flags. Keys are grouped into six sections, each owning what one
+command needs: `[server]` (`endpoint`, `model`, `timeout`),
 `[preview]` (`max_edge`, `jpeg_quality`), `[scan]` (`recursive`), `[outputs]`
 (`json_scores`), `[run]` (`rubric`, `shoot_context`, `dedupe`), and `[group]`
-(`gap`, `similarity`, `exposure_stops`). `[run] rubric` holds exactly what
-`--rubric` holds: a built-in's name or a path. `imagecull.toml.example` is the
-commented reference; ADR 0003 records why this shape, ADR 0004 the three
-built-ins, ADR 0010 the `[group]` section.
+(`gap`, `similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`).
+`[run] rubric` holds exactly what `--rubric` holds: a built-in's name or a path.
+`imagecull.toml.example` is the commented reference; ADR 0003 records why this
+shape, ADR 0004 the three built-ins, ADR 0010 the `[group]` section, and ADR 0014
+why a comparison has a preview pair of its own.
 
 **Which command reads which key.** `score` resolves every key. `groups` resolves
-`[server]` (the alias and endpoint a cull asks), `[preview] jpeg_quality`,
-`[scan] recursive`, `[run] shoot_context` and all of `[group]`; it renders its
-comparisons at its own measured budget edge, so `[preview] max_edge` does not
-reach a cull, and it scores nothing, so `[run] rubric`, `[run] dedupe` and
-`[outputs] json_scores` are not its business. Key names are always accepted; a
-key another command reads is simply not consulted by this one.
+`[server]` (the alias and endpoint a cull asks), all of `[group]` — including
+`max_edge` and `jpeg_quality`, the pair every image in a comparison is rendered
+at — `[scan] recursive` and `[run] shoot_context`. It rates nothing and compares
+nothing one frame at a time, so `[preview]`, `[run] rubric`, `[run] dedupe` and
+`[outputs] json_scores` are not its business: a rating's preview size and a
+comparison's are different payloads, and one key cannot be both. Key names are
+always accepted; a key another command reads is simply not consulted by this one.
 
 **Discovery.** Exactly one file is read. The first of these that exists wins
 whole: `--config <FILE>`, `./imagecull.toml`,
@@ -524,10 +535,12 @@ entirely.
 
 **What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
 `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`, `--quiet`,
-`--verbose` — those describe the invocation, not the shoot. `--recursive` and the
-three `--group-*` thresholds do have keys, and the `--recursive` flag takes an
-explicit `true`/`false` so a file that turned recursion on can be turned off for
-one run.
+`--verbose` — those describe the invocation, not the shoot. `--recursive`, the
+three `--group-*` thresholds, `--max-edge` and `--jpeg-quality` do have keys,
+and the `--recursive` flag takes an explicit `true`/`false` so a file that turned
+recursion on can be turned off for one run. `--max-edge` and `--jpeg-quality`
+name the preview of the command that was typed: `[preview]` for `score` and
+`doctor`, `[group]` for `groups`.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are
 validated to the same ranges the flags enforce, an unreadable `--config` target

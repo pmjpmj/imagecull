@@ -33,8 +33,9 @@ fn the_budget_is_the_measured_configuration_and_not_a_guess() {
     let budget = Budget::default();
 
     assert_eq!(
-        budget.edge, 512,
-        "512 px is decisive and a third of the cost"
+        keeper::EDGE,
+        512,
+        "512 px is the default comparison edge: decisive, and a third of the cost of 1024"
     );
     assert_eq!(
         budget.max, 20,

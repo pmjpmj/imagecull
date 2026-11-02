@@ -874,7 +874,7 @@ fn a_group_that_413s_is_undecided_and_marks_nothing() {
         model: "clef-flash-oQ4e",
         shoot_context: None,
         budget: keeper::Budget::default(),
-        jpeg_quality: Params::default().jpeg_quality,
+        preview: Params::default(),
         grouping_hash: &plan.hash,
         allow_foreign: false,
         retry: scoring::RetryPolicy::without_waiting(),

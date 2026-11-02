@@ -4,6 +4,8 @@ Status: accepted · 2026-11-27 · Feature `groups-config` ·
 amends [ADR 0003](0003-toml-config-file-one-source-at-a-time.md)'s "five
 sections" · supersedes [ADR 0009](0009-the-settings-gate-tolerates-exposure-drift.md)'s
 "`--group-exposure-stops` is a command-line flag and not a config key" ·
+superseded in part by [ADR 0014](0014-the-comparison-has-its-own-preview-config.md),
+which gives a comparison its own `[group] max_edge` / `jpeg_quality` pair ·
 amends `SPEC.md` §11.1
 
 ## Context
@@ -41,9 +43,11 @@ fatal, a value outside the range its flag enforces fatal with the key named.
 
 **`groups` becomes a reader of the file, on the keys that describe its run:**
 `[server]` (the endpoint and the alias a cull asks — an alias already reached it,
-so this is the half that was working), `[preview] jpeg_quality`, `[scan]
+so this is the half that was working), `[preview] jpeg_quality` (superseded by
+ADR 0014), `[scan]
 recursive`, `[run] shoot_context`, and all of `[group]`. It scores nothing and
-renders its comparisons at its own measured budget edge, so `[run] rubric`,
+renders its comparisons at its own measured budget edge (ADR 0014 makes that edge
+`[group] max_edge`), so `[run] rubric`,
 `[run] dedupe`, `[outputs] json_scores` and `[preview] max_edge` remain keys it
 does not consult.
 
@@ -98,10 +102,10 @@ about where the numbers came from needs to be written down for the hash to work.
   hash is what keeps that from being silent in the sidecars: a different
   `exposure_stops` produces a different `groupingHash`, so a verdict computed
   under another number is refused as incomparable rather than believed.
-- `[preview] max_edge` still does not reach a cull, and now the docs say so
-  instead of leaving a photographer to discover it. If a real shoot shows the
-  comparison budget needs the same knob, that is a separate decision about the
-  budget, not a missing config key.
+- `[preview] max_edge` still does not reach a cull (ADR 0014 gives a comparison
+  its own `[group] max_edge` instead, and moves `[preview] jpeg_quality` out of a
+  cull with it), and now the docs say so instead of leaving a photographer to
+  discover it.
 - `Resolved` and `Effective` lose `Eq` (they now carry `f64`). `PartialEq` is
   what the tests and the merge need; nothing compared an effective config for
   total equality.

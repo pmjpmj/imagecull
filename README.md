@@ -209,6 +209,8 @@ The defaults suit a typical burst. Tune them when they do not:
 | `--group-gap <SECS>` | `2.0` | Most time between consecutive frames of one group. |
 | `--group-similarity <0..1>` | `0.90` | Least scene similarity to the group's first frame. Lower it to group a subject who moved; raise it to keep a pan as separate compositions. |
 | `--group-exposure-stops <STOPS>` | `2.0` | Most brightness drift inside a group. `0` asks for one exposure exactly. |
+| `--max-edge <PX>` | `512` | Longest edge of one image in a comparison. A rating's preview is `score --max-edge`, default `1568`. |
+| `--jpeg-quality <1-100>` | `88` | JPEG quality of one image in a comparison. |
 | `--cull-jobs <N>` | `4` | Groups compared at once. |
 | `-j, --jobs <N>` | one per core | Frames read at once. |
 | `--no-cull` | — | Group and measure only. No request, no label. |
@@ -263,6 +265,8 @@ endpoint = "http://127.0.0.1:8000"
 # gap = 2.0
 # similarity = 0.90
 # exposure_stops = 2.0
+# max_edge = 512
+# jpeg_quality = 88
 
 [run]
 # rubric = "holiday"

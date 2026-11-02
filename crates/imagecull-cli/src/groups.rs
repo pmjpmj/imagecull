@@ -138,9 +138,10 @@ fn cull_streamed(
         model: &alias,
         shoot_context: effective.shoot_context.clone(),
         budget,
-        // The comparison renders its own previews at the budget's edge, and
-        // encodes them at the quality this run would send.
-        jpeg_quality: effective.params.jpeg_quality,
+        // The comparison renders its own previews, at the comparison's own
+        // payload shape: `[group] max_edge` / `jpeg_quality`, or the flags that
+        // beat them. A rating's `[preview]` pair never reaches a cull.
+        preview: effective.group_params,
         grouping_hash,
         allow_foreign: args.allow_foreign,
         retry: RetryPolicy::default(),
