@@ -254,6 +254,9 @@ fn verdict_text(verdict: &Verdict) -> String {
     if verdict.red > 0 {
         line.push_str(&format!("  {} red", verdict.red));
     }
+    if verdict.yellow > 0 {
+        line.push_str(&format!("  {} yellow", verdict.yellow));
+    }
     if verdict.unmarked > 0 {
         line.push_str(&format!("  {} unmarked", verdict.unmarked));
     }
@@ -343,7 +346,7 @@ pub fn render(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
 }
 
 /// One group: its number, its size, the frames it spans, and — when the group
-/// was judged — who kept it and how many frames wear the red.
+/// was judged — who kept it and which colour the rest wear.
 ///
 /// The span rather than every name: a photographer reading a 34-frame group
 /// wants to know where it starts and ends, and the CSV has the rest.
@@ -376,6 +379,9 @@ fn group_line(row: &group::GroupRow<'_>, verdict: Option<&Verdict>) -> String {
                 line.push_str(&format!("  keeper {keeper}"));
                 if verdict.red > 0 {
                     line.push_str(&format!(" · {} red", verdict.red));
+                }
+                if verdict.yellow > 0 {
+                    line.push_str(&format!(" · {} yellow", verdict.yellow));
                 }
                 if verdict.unmarked > 0 {
                     line.push_str(&format!(" · {} unmarked", verdict.unmarked));
@@ -436,11 +442,23 @@ fn summary(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
         if culled.red > 0 {
             parts.push(format!("{} red", culled.red));
         }
+        if culled.yellow > 0 {
+            parts.push(format!("{} yellow", culled.yellow));
+        }
+        if culled.green > 0 {
+            parts.push(format!("{} green", culled.green));
+        }
         if culled.unmarked > 0 {
             parts.push(format!("{} unmarked (label not ours)", culled.unmarked));
         }
+        if culled.keeper_unmarked > 0 {
+            parts.push(format!(
+                "{} keepers unmarked (label not ours)",
+                culled.keeper_unmarked
+            ));
+        }
         if culled.retired > 0 {
-            parts.push(format!("{} red retired", culled.retired));
+            parts.push(format!("{} marks retired", culled.retired));
         }
         if culled.stale_reds > 0 {
             parts.push(format!(
@@ -456,7 +474,7 @@ fn summary(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
         }
         if culled.low_confidence > 0 {
             parts.push(format!(
-                "{} low confidence {}",
+                "{} low confidence {} (marked yellow)",
                 culled.low_confidence,
                 plural(culled.low_confidence, "group", "groups")
             ));
@@ -561,7 +579,10 @@ mod tests {
             size,
             keeper: Some(keeper.to_string()),
             red,
+            yellow: 0,
+            green: 1,
             unmarked: 0,
+            keeper_unmarked: 0,
             confidence: 0.83,
             rounds: 1,
             failure: None,
@@ -575,6 +596,7 @@ mod tests {
             groups,
             non_keepers: red,
             red,
+            green: groups,
             rounds: groups,
             undecided: verdicts
                 .iter()
@@ -661,7 +683,7 @@ mod tests {
         assert!(
             rendered.contains(
                 "groups: 1 group in 2 frames (mean 2.0, largest 2) · 1 group judged · \
-                 1 non-keeper · 1 red · 1 comparative request · 2s measured, 1000 ms/frame · \
+                 1 non-keeper · 1 red · 1 green · 1 comparative request · 2s measured, 1000 ms/frame · \
                  grouping hash 01234567 · wrote out/groups.csv\n"
             ),
             "{rendered}"

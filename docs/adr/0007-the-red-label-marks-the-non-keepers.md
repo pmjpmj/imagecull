@@ -3,7 +3,10 @@
 Status: accepted · 2026-11-19 · superseded in part by
 [ADR 0008](0008-the-group-command-culls.md), which moves the mark to
 `imagecull groups`, drops the rating shortlist and lets our own red be removed on
-a promotion · Feature `burst-grouping-v1` (ticket 02) ·
+a promotion · superseded in part by
+[ADR 0012](0012-green-marks-the-keeper-and-yellow-the-unsure.md), which writes
+Green on the keeper and Yellow on a low-confidence group's non-keepers · Feature
+`burst-grouping-v1` (ticket 02) ·
 amends [ADR 0006](0006-the-rating-lives-in-the-sidecar.md)'s "never write
 `xmp:Label`" · amends the ranking rule of
 `.scratch/burst-grouping-v1/spec.md` · supersedes `SPEC.md` §9's label paragraph

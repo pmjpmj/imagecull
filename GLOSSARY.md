@@ -83,12 +83,27 @@ enters a request.
 _Avoid_: pass, stage, heat
 
 **Red mark**:
-The `xmp:Label` value `Red`, written to a group's non-keepers so the cull can
-filter for them. A statement about the group, not a rating and not a reject:
-written only where the label is ours to write, and removed only when our own
-later verdict promotes that frame to keeper — a red this tool did not write is
-never touched.
+The `xmp:Label` value `Red`, written to a group's non-keepers when the comparison
+was at or above the confidence floor, so the cull can filter for them. A
+statement about the group, not a rating and not a reject: written only where the
+label is ours to write, and rewritten only when our own later verdict says
+something else — a red this tool did not write is never touched.
 _Avoid_: flag, reject, colour label, label (unqualified)
+
+**Yellow mark**:
+The `xmp:Label` value `Yellow`, written to a group's non-keepers when the
+comparison was below the confidence floor. It says what Red says — not this
+group's keeper — and adds that the comparison was a near-tie, so the photographer
+should look before deleting. Written and rewritten on the same terms as a red
+mark; a photographer's Yellow is never touched.
+_Avoid_: warn flag, soft red, tentative reject
+
+**Green mark**:
+The `xmp:Label` value `Green`, written to a group's keeper. It is the
+comparison's answer made visible in a grid, not a second opinion on the picture:
+written and rewritten on the same terms as a red mark, and never over a
+photographer's own colour.
+_Avoid_: keep flag, pick, best, hero
 
 ### What a run reads
 
@@ -143,7 +158,7 @@ _Avoid_: global config, default config
 **Sidecar**:
 The `.xmp` file beside a frame, carrying its rating, the provenance of that
 rating, and — when a group decided one — whether the frame is its keeper and the
-red mark that follows from that. The run's only lasting record of a frame.
+mark that follows from that. The run's only lasting record of a frame.
 _Avoid_: metadata file, XMP file, report, output
 
 **Skip**:
@@ -166,5 +181,5 @@ in the run, its answer, what the request cost, and when the run will finish.
 One per frame and ended by a newline, so a redirected log reads the same as a
 terminal. A `groups` run prints one as each frame is measured, and `--verbose`
 adds one per group as each group is compared: `group 3 · 12 frames · keeper
-DSC_0104.NEF · 11 red`.
+DSC_0104.NEF · 11 red` — or `11 yellow` when the comparison was a near-tie.
 _Avoid_: progress line, status line, log line, spinner
