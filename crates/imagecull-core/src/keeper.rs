@@ -100,73 +100,68 @@ pub const BY_COMPARISON: &str = "comparison";
 
 /// What the model is asked.
 ///
-/// A ranked list of gates, not a conjunction of superlatives: sharpness on the
-/// subject decides on its own, the remaining gates only separate frames that are
-/// already sharp, and general pleasantness is the last tiebreak — so the trade-off
-/// between them is made here rather than left to a `choice` head that has no way to
-/// say which one it weighted.
+/// One stance, not a ranked list: the frame is judged whole — what it is trying
+/// to be, whether it caught anything worth looking at, and whether it is made
+/// well enough to carry that — which is the stance `general` already sends per
+/// frame (ADR 0015). The comparison asks the same stance *relative* to the other
+/// frames of the group; it does not add a rule the ratings never had.
+///
+/// That is a replacement, not a refinement. The wording here used to rank five
+/// gates with technical crispness first and "rule 1 decides by itself": a sharp
+/// frame beat a softer frame with the better expression, and a whole soft burst
+/// was answered by "keep the sharpest and stillest". `groups` therefore named a
+/// different frame of a moment than `score` called the best of it, and the
+/// frames it passed over were the ones the general rubric deliberately keeps —
+/// slightly soft, holding the moment. The two commands describe one judgement;
+/// when they disagree the wording is the thing that is wrong.
 ///
 /// Four clauses are load-bearing and easy to lose in an edit:
 ///
-/// - **"Rule 1 decides alone … however sharp the rest"** — technical crispness is
-///   asked to outrank the moment, the gaze and the composition, which is a real
-///   loss as well as a real gain: the frame with the peak expression that is a
-///   little soft now loses to the sharp frame with the duller one, and a
-///   photographer's own picks routinely trade a few percent of sharpness for the
-///   expression. If `calibrate` (spec §11) shows the model disagreeing with the
-///   ratings already on past shoots, this sentence is the first place to look — not
-///   the thresholds, and not the preview size.
-/// - **"the main subject is in sharp focus … or its principal detail"** — at
-///   [`EDGE`] px a face in a full-body frame is a few pixels wide, so asking for
-///   the eyes alone would ask for something the preview cannot show.
-/// - **"if every frame fails rule 1, keep the sharpest and stillest"** — a whole
-///   burst can be soft (the focus missed every frame, or the light was too low to
-///   hold), and a comparison still has to name one frame: the fallback keeps the
-///   answer a frame of the group rather than a refusal, and keeps `read`'s
-///   position check meaningful.
+/// - **"Read each frame for what it is trying to be … without holding it to
+///   something it never aimed at"** — no genre is assumed. The frames of one
+///   group are one moment, usually one subject, but not always one intent: a
+///   turn, a zoom or a re-frame inside a burst changes what the frame is aiming
+///   at, and a comparison that assumes a portrait punishes the landscape beside
+///   it.
+/// - **"is there something worth looking at, is it caught, and is the frame made
+///   well enough to carry it"** — the three things judged, and the order in which
+///   they decide. Perfection is last on purpose, exactly as `general` has it, so
+///   a soft frame that holds something can win.
+/// - **"cannot carry the picture … is not the one to keep, however good its
+///   moment"** — the floor that keeps the stance from becoming a preference for
+///   anything interesting over anything usable. Without it a smeared frame with
+///   the best expression wins, and the mark sends the photographer to a frame
+///   they cannot deliver.
 /// - **"Do not prefer a frame because it is first"** — the pick was measured
 ///   swapping between orderings at 0.55 against 0.43
 ///   (`.scratch/burst-grouping-v1/evidence/comparison-budget.md`), so position is
 ///   doing work the comparison should not be doing.
 ///
-/// **"Facing the camera"** is the one gate that is a shoot-type preference rather
-/// than a universal one: a candid or reportage burst is often *better* with the
-/// subject ignoring the lens, and SPEC §11 lists the aesthetic target as exactly
-/// the open question that changes a rubric's instructions. It is written as a
-/// preference among already-sharp frames, and `shoot_context` is the only way a
-/// photographer can override it today — a per-shoot target setting is the honest
-/// fix, and that gate is where the bias would be undone.
+/// **"Facing the camera" retired with the ranking.** It was the one gate that was
+/// a shoot-type preference rather than a universal one — a candid or reportage
+/// burst is often *better* with the subject ignoring the lens — and `general`
+/// names no such target, so the comparison names none either. Direct address is
+/// now one cue among several, not a gate that outranks light and composition.
 ///
-/// **Light is last of the gates.** That is a real trade and not an oversight:
-/// clipped highlights and blocked shadows cannot be recovered, while a frame's
-/// composition can still be cropped and its expression was never fixable anyway,
-/// so a photographer who would reject a blown-out frame outright is not described
-/// by this wording. It sits where it does because the folder decides — and if
-/// `calibrate` shows the model keeping frames the photographer threw away for the
-/// light, this is the rule to move, ahead of composition rather than after it.
-///
-/// The tiebreak names what *pleasant* means (expression, background, pose,
-/// sharpness) instead of leaving one floating adjective for the model to fill in:
-/// an unoperationalised "most pleasing" is how a choice head ends up deciding on
-/// tone or brightness.
-///
-/// "Burst" stays in this sentence on purpose: it is the register the reference
-/// server was measured in, and the glossary's preference for *group* governs this
-/// codebase's prose, not the question the model answers.
+/// The vocabulary is the glossary's: *moment* for the group, *frame* for what is
+/// shown. "Burst" stayed in the old sentence because it was the register the
+/// reference server was measured in; that measurement belongs to wording this
+/// file no longer sends, so it does not bind the new text.
 ///
 /// **Not yet measured.** The evidence above measured an earlier, shorter
-/// sentence; this wording is a candidate until the same three frames are re-run at
-/// every edge and in every ordering, and the swap rate and the count of groups
-/// under [`FLOOR`] are recorded beside it. Until then, do not describe a run as
-/// sending a measured question.
-pub const INSTRUCTIONS: &str = "Several frames of one burst are shown, in order. They are near-identical, and only one is the one to keep.\n\
-     The rules are ranked: rule 1 decides by itself, and rules 2 to 5 only separate frames that are already sharp.\n\
-     1. Sharp and still, above all else: the main subject in sharp focus — its eyes or face, or its principal detail, crisp — with no motion blur and no camera shake. No frame that fails this is the one to keep, however good its light, moment, gaze or composition, so a sharp frame beats a softer frame with the better expression. If every frame fails this rule, keep the sharpest and stillest of them.\n\
-     2. The moment: eyes open, expression and gesture at their peak — not a blink, a step in transit, or a mouth mid-word.\n\
-     3. Facing the camera: prefer the frame in which the main subject is looking towards the camera with its face turned to it; a subject that has turned away, or is looking down or off frame, loses to one that has not.\n\
-     4. Composition: level horizon, room around the subject, no bystander, hand or flare in this frame alone.\n\
-     5. Light kept, last of the gates: detail in white clothing, skin and the sky, no blown highlights and no blocked-up shadows. Prefer the frame that kept the detail over the brighter one.\n\
-     Where two frames pass all five equally, keep the more pleasant picture: the better expression, the calmer background, the more natural pose, and the sharper of the two. Do not prefer a frame because it is first, brighter or warmer; keep the one that would be delivered as it is. Answer with the key of that frame.";
+/// sentence, and the gates it justified are now retired; this wording is a
+/// candidate until the same three frames are re-run at every edge and in every
+/// ordering, with the swap rate and the count of groups under [`FLOOR`] recorded
+/// beside it. If a real shoot shows the comparison keeping frames the
+/// photographer threw away for focus — or preferring a sharp frame in which
+/// nothing happens — this const is where to look, not the thresholds and not the
+/// preview size. Until then, do not describe a run as sending a measured
+/// question.
+pub const INSTRUCTIONS: &str = "Several frames of one moment are shown, in order. They are close enough that only one is the one to keep.\n\
+     Read each frame for what it is trying to be — a portrait, a landscape, an event, a street frame, a snapshot — and judge it as that, without holding it to something it never aimed at.\n\
+     The standard does not move with the genre: is there something worth looking at, is it caught, and is the frame made well enough to carry it? A distinctive moment, gesture, expression or quality of light counts for more than clinical perfection: a frame that is slightly soft but holds something beats a sharp frame in which nothing happens.\n\
+     A frame that cannot carry the picture — the subject smeared by motion, the focus on the background, the highlights blown to white — is not the one to keep, however good its moment.\n\
+     Do not prefer a frame because it is first, brighter or warmer; keep the one that would be delivered as it is. Answer with the key of that frame.";
 
 /// How much of a group one comparative request may carry, and how sure its
 /// answer has to be before it is not called shaky.
