@@ -211,7 +211,7 @@ The defaults suit a typical burst. Tune them when they do not:
 | `--group-exposure-stops <STOPS>` | `2.0` | Most brightness drift inside a group. `0` asks for one exposure exactly. |
 | `--max-edge <PX>` | `512` | Longest edge of one image in a comparison. A rating's preview is `score --max-edge`, default `1568`. |
 | `--jpeg-quality <1-100>` | `88` | JPEG quality of one image in a comparison. |
-| `--cull-jobs <N>` | `4` | Groups compared at once. |
+| `--cull-jobs <N>` | `4` | Groups compared at once. `[group] cull_jobs` sets it per shoot. |
 | `-j, --jobs <N>` | one per core | Frames read at once. |
 | `--no-cull` | — | Group and measure only. No request, no label. |
 
@@ -273,11 +273,14 @@ endpoint = "http://127.0.0.1:8000"
 # exposure_stops = 2.0
 # max_edge = 512
 # jpeg_quality = 88
+# cull_jobs = 4
 ```
 
 `[score]` is what a rating needs and `[group]` what a cull needs; `[server]` and
 `[scan]` are shared. `groups` reads one key from `[score]` — `shoot_context`, so a
-burst is framed the way the frame was rated — and nothing else.
+burst is framed the way the frame was rated — and nothing else. `[group]
+cull_jobs` is the one degree a shoot carries in its file: how many groups may be
+compared at once, which `--cull-jobs` overrides for a single run.
 
 ## What gets written
 

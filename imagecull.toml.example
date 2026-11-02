@@ -108,3 +108,10 @@ endpoint = "http://127.0.0.1:8000"
 # max_edge = 512
 # JPEG quality of one image in a comparison, 1-100. Default: 88
 # jpeg_quality = 88
+
+# How many groups the cull judges at once: the most comparative requests in
+# flight together. It is a cap, not a target, and it is scheduling rather than
+# algorithm, so it does not enter the grouping hash. Lower it to 1 when the
+# server is shared and every group should wait its turn. `--cull-jobs` beats
+# this key for one run. Default: 4
+# cull_jobs = 4

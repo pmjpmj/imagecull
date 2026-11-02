@@ -117,7 +117,8 @@ fn drive(
 
 /// Run the cull alongside the grouping pass: the server the effective config
 /// names, the model alias it resolved, the writer the preview flag chose, and the
-/// degree the cull flag asked for.
+/// degree the effective config holds — `[group] cull_jobs`, or the `--cull-jobs`
+/// that beat it.
 fn cull_streamed(
     args: &GroupsArgs,
     effective: &imagecull_core::config::Effective,
@@ -155,7 +156,7 @@ fn cull_streamed(
         &Adapter::new(client, &alias),
         writer,
         console,
-        args.cull_jobs.unwrap_or(cull::DEFAULT_JOBS),
+        effective.cull_jobs,
         |sink| group::stream_with(&args.dir, options, console, sink),
     )
     .map_err(|error| error.to_string())

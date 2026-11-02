@@ -38,6 +38,7 @@ similarity = 0.96
 exposure_stops = 1.5
 max_edge = 700
 jpeg_quality = 60
+cull_jobs = 2
 "#;
 
 fn resolved(text: &str) -> Resolved {
@@ -109,6 +110,11 @@ fn every_key_reaches_the_resolved_values() {
         "a comparison's edge is its own key, not [score]'s"
     );
     assert_eq!(resolved.group_jpeg_quality, Some(60));
+    assert_eq!(
+        resolved.group_cull_jobs,
+        Some(2),
+        "a shoot may carry the degree its comparison runs at"
+    );
 }
 
 #[test]
@@ -209,6 +215,7 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[group]\nexposure_stops = -1.0\n", "group.exposure_stops"),
         ("[group]\nexposure_stops = nan\n", "group.exposure_stops"),
         ("[group]\nexposure_stops = inf\n", "group.exposure_stops"),
+        ("[group]\ncull_jobs = 0\n", "group.cull_jobs"),
     ];
     for (text, key) in cases {
         let message = error(text);
@@ -279,12 +286,17 @@ fn the_flags_win_over_the_file() {
         score_max_edge: Some(1568),
         model: Some("clef-flash-oQ4e".to_string()),
         json_scores: Some(PathBuf::from("elsewhere.json")),
+        group_cull_jobs: Some(1),
         ..Resolved::default()
     };
     let effective = file.override_with(flags).settle(None);
     assert_eq!(
         effective.score_params.max_edge, 1568,
         "--max-edge beat the file"
+    );
+    assert_eq!(
+        effective.cull_jobs, 1,
+        "--cull-jobs 1 beat the file's degree, for one gentler run"
     );
     assert_eq!(effective.model.as_deref(), Some("clef-flash-oQ4e"));
     assert_eq!(
@@ -432,6 +444,10 @@ fn the_file_wins_over_the_built_in_default() {
         effective.shoot_context.as_deref(),
         Some("night street, pushed two stops")
     );
+    assert_eq!(
+        effective.cull_jobs, 2,
+        "the file's degree is what a run with no --cull-jobs uses"
+    );
 }
 
 #[test]
@@ -457,6 +473,11 @@ fn an_empty_source_settles_to_the_specs_defaults() {
     assert_eq!(effective.rubric, None);
     assert!(effective.dedupe);
     assert_eq!(effective.thresholds, Thresholds::default());
+    assert_eq!(
+        effective.cull_jobs,
+        imagecull_core::cull::DEFAULT_JOBS,
+        "an absent degree is the cull's own default, not a second copy of it"
+    );
     assert_eq!(effective.source, None);
     assert_eq!(
         effective.scan(None),

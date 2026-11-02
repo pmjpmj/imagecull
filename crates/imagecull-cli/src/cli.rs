@@ -304,7 +304,7 @@ pub struct GroupsArgs {
     pub jobs: Option<usize>,
 
     /// How many groups to cull at once (default 4); different groups' requests
-    /// may be in flight together
+    /// may be in flight together. `[group] cull_jobs` sets it for a shoot
     #[arg(
         long,
         value_name = "N",
@@ -343,9 +343,12 @@ impl GroupsArgs {
     /// a shoot config that turns recursion on can still be turned off for one
     /// run. `--max-edge` and `--jpeg-quality` are the comparison's own pair, and
     /// land on the `group_` keys: `score`'s `--max-edge` does not reach a cull,
-    /// and a cull's does not reach a rating. `--limit`, `--out`, `--jobs`,
-    /// `--cull-jobs` and the cull/console flags describe the invocation and stay
-    /// out.
+    /// `--limit`, `--out` and the cull/console flags describe the invocation
+    /// and stay out; `--jobs` does too, because it is this machine's read degree
+    /// rather than the shoot's. `--cull-jobs` is the one degree a shoot may carry
+    /// in its file: it says how many of its groups a comparison may overlap, and
+    /// the flag still beats the file for a run that wants to be gentler on the
+    /// server.
     pub fn overrides(&self) -> Resolved {
         Resolved {
             recursive: self.recursive,
@@ -354,6 +357,7 @@ impl GroupsArgs {
             group_exposure_stops: self.group_exposure_stops,
             group_max_edge: self.max_edge,
             group_jpeg_quality: self.jpeg_quality,
+            group_cull_jobs: self.cull_jobs,
             ..self.common.overrides()
         }
     }
@@ -1036,7 +1040,7 @@ mod tests {
         let file = config::ConfigFile::from_toml(
             "[server]\nmodel = \"clef-27b-oQ4e\"\n\
              [scan]\nrecursive = true\n\
-             [group]\ngap = 0.5\nsimilarity = 0.95\nexposure_stops = 1.0\n",
+             [group]\ngap = 0.5\nsimilarity = 0.95\nexposure_stops = 1.0\ncull_jobs = 3\n",
         )
         .expect("a valid config");
         let Command::Groups(args) = parse(&["groups", "shoot"]) else {
@@ -1052,6 +1056,10 @@ mod tests {
         assert_eq!(options.thresholds.gap, Duration::from_secs_f64(0.5));
         assert_eq!(options.thresholds.similarity, 0.95);
         assert_eq!(options.thresholds.exposure_stops, 1.0);
+        assert_eq!(
+            effective.cull_jobs, 3,
+            "[group] cull_jobs is the degree a run with no flag uses"
+        );
         assert!(options.scan.recursive, "[scan] recursive reaches the scan");
         assert_eq!(
             effective.model.as_deref(),
@@ -1063,7 +1071,7 @@ mod tests {
     #[test]
     fn a_groups_flag_beats_the_file_it_overrides() {
         let file = config::ConfigFile::from_toml(
-            "[scan]\nrecursive = true\n[group]\ngap = 5.0\nsimilarity = 0.99\n",
+            "[scan]\nrecursive = true\n[group]\ngap = 5.0\nsimilarity = 0.99\ncull_jobs = 6\n",
         )
         .expect("a valid config");
         let Command::Groups(args) = parse(&[
@@ -1071,6 +1079,8 @@ mod tests {
             "shoot",
             "--group-gap",
             "1.5",
+            "--cull-jobs",
+            "2",
             "--recursive",
             "false",
         ]) else {
@@ -1084,6 +1094,10 @@ mod tests {
         let options = args.options(&effective);
 
         assert_eq!(options.thresholds.gap, Duration::from_secs_f64(1.5));
+        assert_eq!(
+            effective.cull_jobs, 2,
+            "--cull-jobs beats a shoot that set a degree of its own"
+        );
         assert_eq!(
             options.thresholds.similarity, 0.99,
             "a key the flags left alone keeps the file's value"

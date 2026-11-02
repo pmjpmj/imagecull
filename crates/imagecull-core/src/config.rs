@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::cull;
 use crate::error::{Error, Result};
 use crate::group::{self, Thresholds};
 use crate::ingest::ScanOptions;
@@ -222,6 +223,7 @@ impl ConfigFile {
             group_exposure_stops: self.group.exposure_stops,
             group_max_edge: self.group.max_edge,
             group_jpeg_quality: self.group.jpeg_quality,
+            group_cull_jobs: self.group.cull_jobs,
         }
     }
 
@@ -264,6 +266,11 @@ impl ConfigFile {
             return Err(Error::fatal(format!(
                 "group.jpeg_quality must be between 1 and 100, not {quality}"
             )));
+        }
+        if let Some(0) = self.group.cull_jobs {
+            return Err(Error::fatal(
+                "group.cull_jobs must be at least 1, or no group would be culled",
+            ));
         }
         if let Some(gap) = self.group.gap
             && !(gap > 0.0 && gap.is_finite())
@@ -443,6 +450,8 @@ struct GroupSection {
     exposure_stops: Option<f64>,
     max_edge: Option<u32>,
     jpeg_quality: Option<u8>,
+    /// How many groups the cull judges at once.
+    cull_jobs: Option<usize>,
 }
 
 /// `[score] rubric` as the text a photographer wrote, read the way `--rubric`
@@ -487,6 +496,8 @@ pub struct Resolved {
     pub group_max_edge: Option<u32>,
     /// The JPEG quality of one image in a comparison, 1–100.
     pub group_jpeg_quality: Option<u8>,
+    /// How many groups the cull judges at once.
+    pub group_cull_jobs: Option<usize>,
 }
 
 impl Resolved {
@@ -511,6 +522,7 @@ impl Resolved {
             group_exposure_stops: flags.group_exposure_stops.or(self.group_exposure_stops),
             group_max_edge: flags.group_max_edge.or(self.group_max_edge),
             group_jpeg_quality: flags.group_jpeg_quality.or(self.group_jpeg_quality),
+            group_cull_jobs: flags.group_cull_jobs.or(self.group_cull_jobs),
         }
     }
 
@@ -559,6 +571,7 @@ impl Resolved {
                     .group_exposure_stops
                     .unwrap_or(group::DEFAULT_EXPOSURE_STOPS),
             },
+            cull_jobs: self.group_cull_jobs.unwrap_or(cull::DEFAULT_JOBS),
         }
     }
 }
@@ -595,6 +608,10 @@ pub struct Effective {
     /// How close two frames have to be to be one moment. `groups` decides with
     /// them; `score` rates every frame alone and never asks.
     pub thresholds: Thresholds,
+    /// How many groups `groups` culls at once: a cap on the comparative requests
+    /// in flight, whose default is [`cull::DEFAULT_JOBS`]. It is scheduling, not
+    /// algorithm, so the grouping hash does not cover it.
+    pub cull_jobs: usize,
 }
 
 impl Effective {
