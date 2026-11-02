@@ -191,7 +191,7 @@ Content-Type: application/json
 - `state` must not be null. It carries the *task framing* and user context — never the scores.
 - Exactly **one** image per request. Several are supported by the API, but one frame per decision keeps results attributable.
 - `truncate: true` (default). Clef cuts the state to fit 16,384 tokens instead of returning 413. Our prompt is far smaller than that, so truncation should never fire — if it does, the telemetry in §9 will show it via an unexpectedly low `input_tokens` ceiling.
-- A per-frame rating is one request at a time. The group cull may have up to `--cull-jobs` comparative requests in flight at once (default 4); oMLX serialises them server-side, so the degree is bounded by the option and is not a promise of server parallelism.
+- A per-frame rating is one request at a time. The group cull may have up to `--cull-jobs` comparative requests in flight at once (default 4, or `[group] cull_jobs`); oMLX serialises them server-side, so the degree is bounded by the setting and is not a promise of server parallelism.
 
 ### 7.2 Response
 
@@ -473,7 +473,7 @@ imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef,
         --max-edge <PX>         one image in a comparison, default 512
         --jpeg-quality <1-100>  one image in a comparison, default 88
     -j, --jobs <N>              frames read at once, default one per core
-        --cull-jobs <N>         groups culled at once, default 4
+        --cull-jobs <N>         groups culled at once, default 4 (`[group] cull_jobs`)
         --recursive [BOOL]      also scan subdirectories
         --limit <N>             smoke test on the first N files
         --no-cull               group and measure only: no request, no label
@@ -509,7 +509,8 @@ retyped as flags. Keys are grouped into four sections, split by who reads them:
 `[server]` (`endpoint`, `model`, `timeout`) and `[scan]` (`recursive`) are every
 command's, `[score]` (`max_edge`, `jpeg_quality`, `json_scores`, `rubric`,
 `shoot_context`, `dedupe`) is what a rating needs, and `[group]` (`gap`,
-`similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`) is what a cull needs.
+`similarity`, `exposure_stops`, `max_edge`, `jpeg_quality`, `cull_jobs`) is what
+a cull needs.
 `[score] rubric` holds exactly what `--rubric` holds: a built-in's name or a
 path. `imagecull.toml.example` is the commented reference; ADR 0003 records why
 this file at all, ADR 0004 the three built-ins, ADR 0010 the `[group]` section,
@@ -519,7 +520,8 @@ rating's keys share one section too.
 **Which command reads which key.** `score` resolves every key. `groups` resolves
 `[server]` (the alias and endpoint a cull asks), all of `[group]` — including
 `max_edge` and `jpeg_quality`, the pair every image in a comparison is rendered
-at — `[scan] recursive`, and `[score] shoot_context`: a shoot's framing is a
+at, and `cull_jobs`, the degree its workers run at — `[scan] recursive`, and
+`[score] shoot_context`: a shoot's framing is a
 property of the shoot, so the comparison is framed the way the rating was.
 Everything else under `[score]` is a rating's alone — a rating's preview size and
 a comparison's are different payloads, and one key cannot be both. `doctor`
@@ -549,7 +551,10 @@ three `--group-*` thresholds, `--max-edge` and `--jpeg-quality` do have keys,
 and the `--recursive` flag takes an explicit `true`/`false` so a file that turned
 recursion on can be turned off for one run. `--max-edge` and `--jpeg-quality`
 name the preview of the command that was typed: `[score]` for `score` and
-`doctor`, `[group]` for `groups`.
+`doctor`, `[group]` for `groups`. `--cull-jobs` has a key too — `[group]
+cull_jobs` — because how many of a shoot's groups may be compared at once is a
+property of the shoot and the machine it goes home with, not of one invocation;
+`--jobs` stays a flag, because it is this machine's read degree.
 
 **Strictness.** Unknown keys and unknown sections are fatal, values are
 validated to the same ranges the flags enforce, an unreadable `--config` target

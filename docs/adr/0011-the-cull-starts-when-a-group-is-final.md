@@ -114,3 +114,11 @@ finish out of order, and the run does not print it until the last worker is done
 - **The new seam is small.** `group::Sink` receives a `Found` group; `cull`
   exposes one public `judge` for a group and a `run_streaming` that owns the pool.
   The CLI composes them; neither module learns about the other's terminal.
+
+**ADR 0017 gave the degree a config key.** The consequence above — "`--cull-jobs`
+… is not read from a config file: it describes this machine and this server, not
+the shoot" — no longer holds: `[group] cull_jobs` sets it for a shoot and the flag
+still beats the file. The decision this ADR records — a fan-out whose degree is
+bounded by the caller, one preflight before any worker is given a group, a cap
+rather than a target — stands unchanged, and the degree stays out of the grouping
+hash exactly as the "same plan at any degree" rule here requires.
