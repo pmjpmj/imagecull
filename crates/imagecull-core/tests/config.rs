@@ -18,7 +18,12 @@ use tempfile::TempDir;
 const EVERY_KEY: &str = r#"
 [server]
 endpoint = "http://192.168.1.9:8000"
+path = "/{model}"
 model = "clef-27b-oQ4e"
+selector = "clef-27b"
+token_env = "CLOUDFLARE_API_TOKEN"
+token = "a-literal-secret"
+truncate = false
 timeout = 300
 
 [scan]
@@ -87,6 +92,19 @@ fn every_key_reaches_the_resolved_values() {
         Some("http://192.168.1.9:8000")
     );
     assert_eq!(resolved.model.as_deref(), Some("clef-27b-oQ4e"));
+    assert_eq!(
+        resolved.path.as_deref(),
+        Some("/{model}"),
+        "a path template is carried as written, not interpolated here"
+    );
+    assert_eq!(resolved.selector.as_deref(), Some("clef-27b"));
+    assert_eq!(
+        resolved.token_env.as_deref(),
+        Some("CLOUDFLARE_API_TOKEN"),
+        "the variable's name is plumbing: nothing resolves it at settle time"
+    );
+    assert_eq!(resolved.token.as_deref(), Some("a-literal-secret"));
+    assert_eq!(resolved.truncate, Some(false));
     assert_eq!(resolved.timeout, Some(300));
     assert_eq!(resolved.score_max_edge, Some(1024));
     assert_eq!(resolved.score_jpeg_quality, Some(72));
@@ -205,6 +223,24 @@ fn a_value_the_flags_would_reject_is_fatal() {
         ("[server]\ntimeout = 0\n", "timeout"),
         ("[server]\nmodel = \"  \"\n", "model"),
         ("[server]\nendpoint = \"\"\n", "endpoint"),
+        ("[server]\npath = \"\"\n", "server.path"),
+        ("[server]\npath = \"v1/systemone\"\n", "server.path"),
+        ("[server]\npath = \" /v1/systemone\"\n", "server.path"),
+        ("[server]\npath = \"/v1/{frame}\"\n", "server.path"),
+        ("[server]\npath = \"/{model}/{frame}\"\n", "server.path"),
+        ("[server]\nselector = \"\"\n", "server.selector"),
+        ("[server]\nselector = \"  \"\n", "server.selector"),
+        ("[server]\ntoken = \"\"\n", "server.token"),
+        ("[server]\ntoken = \"  \"\n", "server.token"),
+        ("[server]\ntoken_env = \"\"\n", "server.token_env"),
+        (
+            "[server]\ntoken_env = \"CLOUDFLARE TOKEN\"\n",
+            "server.token_env",
+        ),
+        (
+            "[server]\ntoken_env = \"CLOUDFLARE=TOKEN\"\n",
+            "server.token_env",
+        ),
         ("[group]\ngap = 0.0\n", "group.gap"),
         ("[group]\ngap = -1.0\n", "group.gap"),
         ("[group]\ngap = nan\n", "group.gap"),
@@ -238,6 +274,48 @@ fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
             "a range mistake must say what the range is: {message}"
         );
     }
+}
+
+#[test]
+fn a_path_template_says_what_a_placeholder_may_be() {
+    // The message is the only documentation a photographer gets at 2am, so it
+    // has to name the one placeholder a path may interpolate.
+    let message = error("[server]\npath = \"/v1/{frame}\"\n");
+    assert!(
+        message.contains("{model}"),
+        "a rejected placeholder must say what is allowed: {message}"
+    );
+}
+
+#[test]
+fn a_path_template_with_no_model_is_legal_in_a_file() {
+    // `path = "/{model}"` with no model is fatal when the request is built,
+    // not here: `--model` can supply the model for one run, and a file cannot
+    // know that (ticket 04 owns that message).
+    let resolved = resolved("[server]\npath = \"/{model}\"\n");
+    assert_eq!(resolved.path.as_deref(), Some("/{model}"));
+    assert_eq!(
+        resolved.model, None,
+        "the file said nothing about the model, and that is allowed"
+    );
+}
+
+#[test]
+fn a_token_env_says_that_it_names_a_variable() {
+    let message = error("[server]\ntoken_env = \"CLOUDFLARE TOKEN\"\n");
+    assert!(
+        message.contains("environment variable"),
+        "a whitespace-bearing name has to be told what the key is for: {message}"
+    );
+}
+
+#[test]
+fn a_blank_selector_says_how_to_send_the_model_instead() {
+    let message = error("[server]\nselector = \"\"\n");
+    assert!(
+        message.contains("delete the key"),
+        "an empty selector has a remedy, and the message must give it: {message}"
+    );
 }
 
 #[test]
@@ -430,6 +508,17 @@ fn the_file_wins_over_the_built_in_default() {
     assert_eq!(effective.score_params.jpeg_quality, 72);
     assert_eq!(effective.timeout, 300);
     assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
+    assert_eq!(
+        effective.path, "/{model}",
+        "the file's path template is what the run addresses"
+    );
+    assert!(
+        !effective.truncate,
+        "and a file that turns oMLX's field off keeps it off"
+    );
+    assert_eq!(effective.body_model(), Some("clef-27b"));
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert_eq!(effective.token.as_deref(), Some("a-literal-secret"));
     assert!(!effective.dedupe);
     assert!(effective.recursive);
     assert_eq!(
@@ -458,6 +547,17 @@ fn an_empty_source_settles_to_the_specs_defaults() {
         effective.model, None,
         "no alias means the rubric's own alias, which is part of its hash"
     );
+    assert_eq!(
+        effective.path, "/v1/systemone",
+        "an absent path is the one oMLX serves a decision model on"
+    );
+    assert_eq!(
+        effective.selector, None,
+        "no selector: the model goes whole"
+    );
+    assert_eq!(effective.token_env, None, "and no variable is looked up");
+    assert_eq!(effective.token, None, "and no token is sent");
+    assert!(effective.truncate, "an absent truncate is oMLX's field");
     assert_eq!(effective.timeout, 120);
     assert_eq!(effective.score_params, Params::default());
     assert_eq!(
@@ -486,6 +586,76 @@ fn an_empty_source_settles_to_the_specs_defaults() {
             limit: None
         }
     );
+}
+
+#[test]
+fn a_server_nobody_named_still_posts_where_it_always_did() {
+    // The whole point of the five new keys: a file that says nothing about them
+    // addresses exactly the URL it addressed before they existed. The two
+    // halves come from their own constants, so neither can drift alone.
+    let effective = Resolved::default().settle(None);
+    assert_eq!(effective.endpoint, imagecull_core::omlx::DEFAULT_ENDPOINT);
+    assert_eq!(effective.path, imagecull_core::systemone::PATH);
+    assert_eq!(
+        format!("{}{}", effective.endpoint, effective.path),
+        format!(
+            "{}{}",
+            imagecull_core::omlx::DEFAULT_ENDPOINT,
+            imagecull_core::systemone::PATH
+        ),
+        "the default request is the oMLX one, unchanged"
+    );
+    assert_eq!(
+        effective.body_model(),
+        None,
+        "and no selector: no model at all"
+    );
+}
+
+#[test]
+fn a_brace_that_never_closes_is_not_a_placeholder() {
+    // A placeholder is `{…}`. An unclosed brace is a typo the server will 404
+    // on, not a template this validator has anything to say about.
+    let resolved = resolved("[server]\npath = \"/v1/{model\"\n");
+    assert_eq!(resolved.path.as_deref(), Some("/v1/{model"));
+}
+
+#[test]
+fn a_body_selector_falls_back_to_the_model_whole() {
+    // oMLX and most hosts want the alias in `model`; Workers AI wants a
+    // selector. Only a file that named one gets one, and the fallback is what
+    // keeps every other server unchanged.
+    let effective = Resolved {
+        model: Some("clef-flash-oQ4e".to_string()),
+        ..Resolved::default()
+    }
+    .settle(None);
+    assert_eq!(
+        effective.body_model(),
+        Some("clef-flash-oQ4e"),
+        "no selector means the model id goes whole"
+    );
+    assert_eq!(
+        effective.selector, None,
+        "and the settled field stays empty"
+    );
+}
+
+#[test]
+fn a_key_no_flag_sets_survives_the_flags() {
+    // No flag sets these five, so `override_with` must project them: a flag
+    // layer that says nothing may not quietly drop the file's wire.
+    let effective = resolved(EVERY_KEY)
+        .override_with(Resolved {
+            timeout: Some(30),
+            ..Resolved::default()
+        })
+        .settle(None);
+    assert_eq!(effective.path, "/{model}");
+    assert_eq!(effective.body_model(), Some("clef-27b"));
+    assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+    assert_eq!(effective.token.as_deref(), Some("a-literal-secret"));
+    assert!(!effective.truncate);
 }
 
 #[test]

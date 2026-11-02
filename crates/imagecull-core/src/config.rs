@@ -27,6 +27,7 @@ use crate::omlx;
 use crate::preprocess::Params;
 use crate::rubric::RubricSource;
 use crate::sidecar::Outputs;
+use crate::systemone;
 
 /// The config file that travels with a shoot folder.
 pub const SHOOT_CONFIG: &str = "imagecull.toml";
@@ -205,7 +206,12 @@ impl ConfigFile {
     pub fn resolve(&self, base: Option<&Path>) -> Resolved {
         Resolved {
             endpoint: self.server.endpoint.clone(),
+            path: self.server.path.clone(),
             model: self.server.model.clone(),
+            selector: self.server.selector.clone(),
+            token_env: self.server.token_env.clone(),
+            token: self.server.token.clone(),
+            truncate: self.server.truncate,
             timeout: self.server.timeout,
             score_max_edge: self.score.max_edge,
             score_jpeg_quality: self.score.jpeg_quality,
@@ -294,13 +300,43 @@ impl ConfigFile {
                 "group.exposure_stops must be zero or more stops, not {stops}"
             )));
         }
-        for (key, value) in [
-            ("server.endpoint", self.server.endpoint.as_deref()),
-            ("server.model", self.server.model.as_deref()),
+        for (key, value, remedy) in [
+            ("server.endpoint", self.server.endpoint.as_deref(), None),
+            ("server.model", self.server.model.as_deref(), None),
+            (
+                "server.selector",
+                self.server.selector.as_deref(),
+                Some("delete the key to send the model instead"),
+            ),
+            (
+                "server.token",
+                self.server.token.as_deref(),
+                Some("delete the key or put the secret there"),
+            ),
         ] {
-            if value.is_some_and(|text| text.trim().is_empty()) {
-                return Err(Error::fatal(format!("{key} cannot be empty")));
+            refuse_empty(key, value, remedy)?;
+        }
+        // The wire's four facts: what a request addresses, what it says it is,
+        // and what it carries to be let in. Each refusal names the key and the
+        // remedy, because none of them has a range a photographer could guess.
+        if let Some(path) = &self.server.path {
+            if !path.starts_with('/') {
+                return Err(Error::fatal(format!(
+                    "server.path must be a request path beginning with '/', not {path}"
+                )));
             }
+            if has_a_bad_placeholder(path) {
+                return Err(Error::fatal(format!(
+                    "server.path '{path}' has a placeholder that is not {{model}}"
+                )));
+            }
+        }
+        if let Some(name) = &self.server.token_env
+            && !names_a_variable(name)
+        {
+            return Err(Error::fatal(format!(
+                "server.token_env names an environment variable, not '{name}'"
+            )));
         }
         Ok(())
     }
@@ -361,12 +397,24 @@ impl ConfigFile {
     }
 }
 
-/// `[server]`: the three values every command shares.
+/// `[server]`: what every command shares. Seven keys are the wire — where a
+/// request goes, what it says it is, and what credential it carries — and
+/// `timeout` is how long a run waits for the answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerSection {
     endpoint: Option<String>,
+    /// The request path, as a template: `{model}` becomes the run's model id.
+    path: Option<String>,
     model: Option<String>,
+    /// The body's `model` value, when it differs from the model id.
+    selector: Option<String>,
+    /// The environment variable a bearer token is read from.
+    token_env: Option<String>,
+    /// A literal bearer token, for a machine whose environment cannot hold one.
+    token: Option<String>,
+    /// Whether the body carries oMLX's `truncate: true`.
+    truncate: Option<bool>,
     timeout: Option<u64>,
 }
 
@@ -454,6 +502,48 @@ struct GroupSection {
     cull_jobs: Option<usize>,
 }
 
+/// Refuse a key that was set to nothing, naming it and — when the key has one —
+/// the remedy. A blank value is always a mistake rather than a preference: an
+/// empty endpoint posts nowhere, and an empty token is a request made anonymous.
+fn refuse_empty(key: &str, value: Option<&str>, remedy: Option<&str>) -> Result<()> {
+    if value.is_some_and(|text| text.trim().is_empty()) {
+        let remedy = remedy
+            .map(|remedy| format!(" — {remedy}"))
+            .unwrap_or_default();
+        return Err(Error::fatal(format!("{key} cannot be empty{remedy}")));
+    }
+    Ok(())
+}
+
+/// Whether `path` carries a `{…}` placeholder that is not `{model}`.
+///
+/// A path is a template with exactly one thing to interpolate, so anything else
+/// between braces is a typo that would sail onto the wire and 404, rather than a
+/// value to pass through. The delimiter has to be the brace rather than a
+/// separator, because a Workers AI model id contains `/` and `@` itself. A brace
+/// that never closes is not a placeholder at all, so it is left alone: the path
+/// validator judges placeholders, not braces.
+fn has_a_bad_placeholder(path: &str) -> bool {
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        let from_open = &rest[open..];
+        let Some(close) = from_open.find('}') else {
+            return false;
+        };
+        if &from_open[..=close] != "{model}" {
+            return true;
+        }
+        rest = &from_open[close + 1..];
+    }
+    false
+}
+
+/// Whether `name` could be an environment variable: non-empty, and free of the
+/// separators that would make it a shell assignment or two words.
+fn names_a_variable(name: &str) -> bool {
+    !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_whitespace)
+}
+
 /// `[score] rubric` as the text a photographer wrote, read the way `--rubric`
 /// reads it.
 fn rubric_source<'de, D>(deserializer: D) -> std::result::Result<Option<RubricSource>, D::Error>
@@ -474,7 +564,18 @@ where
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Resolved {
     pub endpoint: Option<String>,
+    /// The request path template, `{model}` and all.
+    pub path: Option<String>,
     pub model: Option<String>,
+    /// The body's `model` value, when the server wants a selector rather than
+    /// the id.
+    pub selector: Option<String>,
+    /// The environment variable a bearer token is read from.
+    pub token_env: Option<String>,
+    /// A literal bearer token.
+    pub token: Option<String>,
+    /// Whether the body carries `truncate: true`.
+    pub truncate: Option<bool>,
     pub timeout: Option<u64>,
     /// The longest edge of a rating's preview, in pixels.
     pub score_max_edge: Option<u32>,
@@ -508,7 +609,12 @@ impl Resolved {
     pub fn override_with(self, flags: Resolved) -> Resolved {
         Resolved {
             endpoint: flags.endpoint.or(self.endpoint),
+            path: flags.path.or(self.path),
             model: flags.model.or(self.model),
+            selector: flags.selector.or(self.selector),
+            token_env: flags.token_env.or(self.token_env),
+            token: flags.token.or(self.token),
+            truncate: flags.truncate.or(self.truncate),
             timeout: flags.timeout.or(self.timeout),
             score_max_edge: flags.score_max_edge.or(self.score_max_edge),
             score_jpeg_quality: flags.score_jpeg_quality.or(self.score_jpeg_quality),
@@ -537,9 +643,20 @@ impl Resolved {
             endpoint: self
                 .endpoint
                 .unwrap_or_else(|| omlx::DEFAULT_ENDPOINT.to_string()),
+            // The template is kept whole: interpolating it is the client's job,
+            // and it cannot be done until the model is known.
+            path: self.path.unwrap_or_else(|| systemone::PATH.to_string()),
             // Still optional: an absent alias defers to the rubric's own, which
             // is part of the rubric hash (spec §8.3).
             model: self.model,
+            // Left as written: a selector is spread across two settled values,
+            // and [`Effective::selector`] is where the fallback lives.
+            selector: self.selector,
+            // Carried, not resolved: `settle` stays pure, so the environment is
+            // read once, at the boundary, by whoever builds the client.
+            token_env: self.token_env,
+            token: self.token,
+            truncate: self.truncate.unwrap_or(true),
             timeout: self.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
             score_params: Params {
                 max_edge: self.score_max_edge.unwrap_or(Params::DEFAULT_MAX_EDGE),
@@ -583,8 +700,22 @@ pub struct Effective {
     pub source: Option<PathBuf>,
     /// The server to talk to.
     pub endpoint: String,
+    /// The request path template this run addresses: `{model}` becomes the
+    /// model id, and the default is oMLX's fixed path.
+    pub path: String,
     /// The alias the photographer named, if any: `None` defers to the rubric's.
     pub model: Option<String>,
+    /// The body's `model` value when the server wants a selector: `None` sends
+    /// [`Effective::model`] whole.
+    pub selector: Option<String>,
+    /// The environment variable a bearer token is read from, as written.
+    pub token_env: Option<String>,
+    /// A literal bearer token, as written. A plain string here rather than a
+    /// redacting `Secret`, which is ticket 03: `Effective`'s derived `Debug`
+    /// would print it, so until that ticket lands nothing may debug-print one.
+    pub token: Option<String>,
+    /// Whether the request body carries oMLX's `truncate: true`.
+    pub truncate: bool,
     /// The read timeout, in seconds.
     pub timeout: u64,
     /// How much picture to send for one frame's rating.
@@ -615,6 +746,21 @@ pub struct Effective {
 }
 
 impl Effective {
+    /// What the request body's `model` field should say: the selector when the
+    /// file named one, and the model id whole otherwise.
+    ///
+    /// Named for the field it fills rather than `selector()`, because the two
+    /// differ: [`Effective::selector`] is only what a file wrote. The fallback
+    /// lives here rather than in [`Resolved::settle`], so "the file said
+    /// nothing" and "the file said the model" stay distinguishable — the first
+    /// defers to `--model`, the second does not.
+    ///
+    /// `None` means no model is settled at all: the rubric's own alias fills the
+    /// field later (spec §8.3), so a caller must not read it as "send none".
+    pub fn body_model(&self) -> Option<&str> {
+        self.selector.as_deref().or(self.model.as_deref())
+    }
+
     /// How the folder should be scanned: this config's breadth, the flag's limit.
     pub fn scan(&self, limit: Option<usize>) -> ScanOptions {
         ScanOptions {
