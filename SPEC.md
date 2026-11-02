@@ -424,6 +424,8 @@ against is a wrong legend quietly labelling an entire library.
 | `no_preview` | no embedded JPEG found | continue |
 | `preview_broken` | JPEG decode fails | continue |
 | `http_400` | invalid criteria / bad question schema | **abort run** (rubric is wrong) |
+| `http_401` | the server refused this run's credentials | **abort run** (every remaining frame would fail the same way); the row names `[server] token_env` / `[server] token`, never the token |
+| `http_403` | the credentials lack permission for this account or model | **abort run**, same advice as `http_401` |
 | `http_413` | context too long | record, continue, suggest smaller `--max-edge` |
 | `http_422` | malformed body | abort run (client bug) |
 | `server_unreachable` | connection refused / DNS | abort after retries |

@@ -281,10 +281,11 @@ enum Asked {
 ///
 /// The row is the only thing the photographer reads after a run, so a status
 /// with a known remedy says what to change: a context that is too long asks for
-/// a smaller preview, and a group that does not fit is a group nothing was
-/// marked for. The path is the one this request actually posted to, never a
-/// constant: it has to be the request the photographer can reproduce with
-/// `curl`.
+/// a smaller preview, a group that does not fit is a group nothing was marked
+/// for, and refused credentials name the config keys that carry them — never the
+/// credential itself, which must not reach a row, a log, or a CSV. The path is
+/// the one this request actually posted to, never a constant: it has to be the
+/// request the photographer can reproduce with `curl`.
 fn failure(status: u16, body: &str, asked: Asked, path: &str) -> Error {
     let kind = ErrorKind::from_status_code(status).unwrap_or(ErrorKind::BadResponse);
     let mut message = format!("POST {path} returned HTTP {status}");
@@ -293,15 +294,22 @@ fn failure(status: u16, body: &str, asked: Asked, path: &str) -> Error {
         message.push_str(": ");
         message.push_str(&detail);
     }
-    if kind == ErrorKind::Http413 {
-        message.push_str(match asked {
+    match kind {
+        ErrorKind::Http413 => message.push_str(match asked {
             Asked::Frame => " — the preview is too big for the model's context; lower --max-edge",
             Asked::Group => {
                 " — the group needs more image tokens than this model's context holds, so nothing \
                  was marked; the request is refused rather than quietly made smaller, and a lower \
                  --max-edge (or [group] max_edge) is how to ask for less picture"
             }
-        });
+        }),
+        // 401 and 403 abort the run, so this row is the one the photographer
+        // reads: it says which keys hold the credential and never repeats it.
+        ErrorKind::Http401 | ErrorKind::Http403 => message.push_str(
+            " — the server refused this run's credentials; check [server] token_env (or \
+             [server] token) and the account the endpoint names",
+        ),
+        _ => {}
     }
     Error::new(kind, message).with_http_status(status)
 }

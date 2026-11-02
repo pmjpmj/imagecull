@@ -602,12 +602,18 @@ fn a_body_that_is_not_json_is_kept_as_the_document_it_was() {
 
 #[test]
 fn the_status_taxonomy_names_what_the_server_rejected() {
-    let cases: [(u16, &str, ErrorKind); 3] = [
+    let cases: [(u16, &str, ErrorKind); 5] = [
         (
             400,
             r#"{"detail":"invalid criteria for question 'stars'"}"#,
             ErrorKind::Http400,
         ),
+        (
+            401,
+            r#"{"detail":"Authentication error"}"#,
+            ErrorKind::Http401,
+        ),
+        (403, r#"{"detail":"permission denied"}"#, ErrorKind::Http403),
         (413, r#"{"detail":"context too long"}"#, ErrorKind::Http413),
         (
             422,
@@ -640,6 +646,48 @@ fn the_status_taxonomy_names_what_the_server_rejected() {
             "the server's own detail must ride along: {message}"
         );
     }
+}
+
+#[test]
+fn a_401_names_the_credential_to_check_and_never_its_value() {
+    // The most likely failure against a hosted server: an expired token, a wrong
+    // account id, a token without permission for the model. The row has to send
+    // the photographer to the credential source, and the token itself must not
+    // appear in anything a diagnostic prints.
+    let stub = Stub::scripted(vec![(
+        401,
+        r#"{"errors":[{"code":10000,"message":"Authentication error"}]}"#.to_string(),
+    )]);
+    let adapter = workers_ai_adapter(
+        &stub,
+        WORKERS_AI_MODEL,
+        workers_ai_wire(),
+        Some(Secret::new(TOKEN)),
+    )
+    .expect("a model id fills the path");
+    let rubric = Builtin::General.rubric().expect("parse");
+    let preview = preview(100, 100);
+
+    let error = adapter
+        .decide(&request(
+            &rubric,
+            &preview,
+            State::for_frame("DSC_0001.NEF", None),
+            WORKERS_AI_MODEL,
+        ))
+        .expect_err("a 401 is not an answer");
+
+    assert_eq!(error.kind(), Some(ErrorKind::Http401));
+    assert_eq!(error.http_status(), Some(401));
+    let message = error.message();
+    assert!(
+        message.contains("check [server] token_env (or [server] token)"),
+        "the row names the variable and the literal fallback: {message}"
+    );
+    assert!(
+        !message.contains(TOKEN),
+        "the token is not in the row: {message}"
+    );
 }
 
 #[test]
