@@ -64,7 +64,7 @@ fn shoot_config(shoot: &Path, stub: &Stub, group: &str) {
     fs::write(
         shoot.join("imagecull.toml"),
         format!(
-            "[server]\nendpoint = \"{}\"\nmodel = \"{ALIAS}\"\n\n{group}",
+            "[server]\nendpoint = \"{}/v1/systemone\"\nmodel = \"{ALIAS}\"\n\n{group}",
             stub.url()
         ),
     )

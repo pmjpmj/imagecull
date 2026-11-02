@@ -23,7 +23,6 @@ use crate::error::{Error, Result};
 use crate::group::{self, Thresholds};
 use crate::ingest::ScanOptions;
 use crate::keeper;
-use crate::omlx;
 use crate::preprocess::Params;
 use crate::rubric::RubricSource;
 use crate::secret::Secret;
@@ -207,9 +206,7 @@ impl ConfigFile {
     pub fn resolve(&self, base: Option<&Path>) -> Resolved {
         Resolved {
             endpoint: self.server.endpoint.clone(),
-            path: self.server.path.clone(),
             model: self.server.model.clone(),
-            selector: self.server.selector.clone(),
             token_env: self.server.token_env.clone(),
             token: self.server.token.clone().map(Secret::new),
             truncate: self.server.truncate,
@@ -233,6 +230,30 @@ impl ConfigFile {
             group_cull_jobs: self.group.cull_jobs,
             group_max_images: self.group.max_images,
         }
+    }
+
+    /// Refuse the two `[server]` keys ADR 0019 folded into `endpoint` and `model`,
+    /// by name and with the value that replaces them.
+    ///
+    /// Both are legal TOML and would otherwise be "unknown field" errors, which
+    /// name nothing a photographer can act on.
+    fn refuse_the_retired_wire_keys(&self) -> Result<()> {
+        if self.server.path.is_some() {
+            return Err(Error::fatal(
+                "server.path is part of server.endpoint now: the endpoint is the whole address, \
+                 `{model}` and all — fold the path into it and delete the key, e.g. \
+                 endpoint = \"http://127.0.0.1:8000/v1/systemone\"",
+            ));
+        }
+        if self.server.selector.is_some() {
+            return Err(Error::fatal(
+                "server.selector is gone: the body's `model` is server.model, and the endpoint \
+                 spells the rest — put the short name in model and the id's own prefix in the \
+                 address, e.g. endpoint = \"https://…/ai/run/@cf/cloudflare/{model}\", \
+                 model = \"clef-flash\"",
+            ));
+        }
+        Ok(())
     }
 
     /// Reject what the flags would reject, with the key that has to change
@@ -316,11 +337,6 @@ impl ConfigFile {
             ("server.endpoint", self.server.endpoint.as_deref(), None),
             ("server.model", self.server.model.as_deref(), None),
             (
-                "server.selector",
-                self.server.selector.as_deref(),
-                Some("delete the key to send the model instead"),
-            ),
-            (
                 "server.token",
                 self.server.token.as_deref(),
                 Some("delete the key or put the secret there"),
@@ -328,21 +344,11 @@ impl ConfigFile {
         ] {
             refuse_empty(key, value, remedy)?;
         }
-        // The wire's four facts: what a request addresses, what it says it is,
-        // and what it carries to be let in. Each refusal names the key and the
-        // remedy, because none of them has a range a photographer could guess.
-        if let Some(path) = &self.server.path {
-            if !path.starts_with('/') {
-                return Err(Error::fatal(format!(
-                    "server.path must be a request path beginning with '/', not {path}"
-                )));
-            }
-            if has_a_bad_placeholder(path) {
-                return Err(Error::fatal(format!(
-                    "server.path '{path}' has a placeholder that is not {{model}}"
-                )));
-            }
-        }
+        // The wire's two facts: the address a request goes to, with `{model}`
+        // where the model name goes, and the credential it carries. Each refusal
+        // names the key and the remedy, because none of them has a shape a
+        // photographer could guess.
+        self.refuse_the_retired_wire_keys()?;
         if let Some(name) = &self.server.token_env
             && !names_a_variable(name)
         {
@@ -409,18 +415,23 @@ impl ConfigFile {
     }
 }
 
-/// `[server]`: what every command shares. Seven keys are the wire — where a
-/// request goes, what it says it is, and what credential it carries — and
-/// `timeout` is how long a run waits for the answer.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// `[server]`: what every command shares. Six keys are the wire — where a request
+/// goes, what it says it is, and what credential it carries — and `timeout` is
+/// how long a run waits for the answer.
+///
+/// `path` and `selector` are retired (ADR 0019): the address carries its own path,
+/// `{model}` and all, and the model name is what the body says. Both are kept as
+/// fields for one reason — so a file that still writes one is refused by name
+/// with the fold-in remedy, rather than by a bare "unknown field".
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerSection {
     endpoint: Option<String>,
-    /// The request path, as a template: `{model}` becomes the run's model id.
-    path: Option<String>,
     model: Option<String>,
-    /// The body's `model` value, when it differs from the model id.
-    selector: Option<String>,
+    /// Retired by ADR 0019: the path is part of `endpoint` now.
+    path: Option<toml::Value>,
+    /// Retired by ADR 0019: the body's `model` is `model`, always.
+    selector: Option<toml::Value>,
     /// The environment variable a bearer token is read from.
     token_env: Option<String>,
     /// A literal bearer token, for a machine whose environment cannot hold one.
@@ -529,29 +540,6 @@ fn refuse_empty(key: &str, value: Option<&str>, remedy: Option<&str>) -> Result<
     Ok(())
 }
 
-/// Whether `path` carries a `{…}` placeholder that is not `{model}`.
-///
-/// A path is a template with exactly one thing to interpolate, so anything else
-/// between braces is a typo that would sail onto the wire and 404, rather than a
-/// value to pass through. The delimiter has to be the brace rather than a
-/// separator, because a Workers AI model id contains `/` and `@` itself. A brace
-/// that never closes is not a placeholder at all, so it is left alone: the path
-/// validator judges placeholders, not braces.
-fn has_a_bad_placeholder(path: &str) -> bool {
-    let mut rest = path;
-    while let Some(open) = rest.find('{') {
-        let from_open = &rest[open..];
-        let Some(close) = from_open.find('}') else {
-            return false;
-        };
-        if &from_open[..=close] != "{model}" {
-            return true;
-        }
-        rest = &from_open[close + 1..];
-    }
-    false
-}
-
 /// Whether `name` could be an environment variable: non-empty, and free of the
 /// separators that would make it a shell assignment or two words.
 fn names_a_variable(name: &str) -> bool {
@@ -578,12 +566,7 @@ where
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Resolved {
     pub endpoint: Option<String>,
-    /// The request path template, `{model}` and all.
-    pub path: Option<String>,
     pub model: Option<String>,
-    /// The body's `model` value, when the server wants a selector rather than
-    /// the id.
-    pub selector: Option<String>,
     /// The environment variable a bearer token is read from.
     pub token_env: Option<String>,
     /// A literal bearer token, wrapped so no `Debug` of this struct prints it.
@@ -625,9 +608,7 @@ impl Resolved {
     pub fn override_with(self, flags: Resolved) -> Resolved {
         Resolved {
             endpoint: flags.endpoint.or(self.endpoint),
-            path: flags.path.or(self.path),
             model: flags.model.or(self.model),
-            selector: flags.selector.or(self.selector),
             token_env: flags.token_env.or(self.token_env),
             token: flags.token.or(self.token),
             truncate: flags.truncate.or(self.truncate),
@@ -659,16 +640,10 @@ impl Resolved {
             source,
             endpoint: self
                 .endpoint
-                .unwrap_or_else(|| omlx::DEFAULT_ENDPOINT.to_string()),
-            // The template is kept whole: interpolating it is the client's job,
-            // and it cannot be done until the model is known.
-            path: self.path.unwrap_or_else(|| systemone::PATH.to_string()),
+                .unwrap_or_else(|| systemone::DEFAULT_ENDPOINT.to_string()),
             // Still optional: an absent alias defers to the rubric's own, which
             // is part of the rubric hash (spec §8.3).
             model: self.model,
-            // Left as written: a selector is spread across two settled values,
-            // and [`Effective::selector`] is where the fallback lives.
-            selector: self.selector,
             // Carried, not resolved: `settle` stays pure, so the environment is
             // read once, at the boundary, by whoever builds the client.
             token_env: self.token_env,
@@ -716,16 +691,12 @@ impl Resolved {
 pub struct Effective {
     /// The config file that contributed, when one did. Provenance only.
     pub source: Option<PathBuf>,
-    /// The server to talk to.
+    /// The server to talk to: the whole address a request is posted to, with
+    /// `{model}` where the model name goes when the server's addressing needs it.
     pub endpoint: String,
-    /// The request path template this run addresses: `{model}` becomes the
-    /// model id, and the default is oMLX's fixed path.
-    pub path: String,
     /// The alias the photographer named, if any: `None` defers to the rubric's.
+    /// It fills the address's `{model}` and is the body's `model`.
     pub model: Option<String>,
-    /// The body's `model` value when the server wants a selector: `None` sends
-    /// [`Effective::model`] whole.
-    pub selector: Option<String>,
     /// The environment variable a bearer token is read from, as written.
     pub token_env: Option<String>,
     /// A literal bearer token, as written, wrapped so it cannot be printed.
@@ -769,30 +740,15 @@ pub struct Effective {
 
 impl Effective {
     /// Whether this run addresses oMLX's own decision path, the one whose probes
-    /// `doctor` and `models` read. A template with `{model}` in it is some other
+    /// `doctor` and `models` read. An address with `{model}` in it is some other
     /// server's addressing, and neither command can say anything about it.
     ///
     /// The comparison itself is [`systemone::is_omlx`], which
     /// [`systemone::Adapter::preflight`] also asks. So the two commands that
-    /// refuse a non-oMLX path and the preflight that skips oMLX's diagnosis
+    /// refuse a non-oMLX address and the preflight that skips oMLX's diagnosis
     /// cannot come to different conclusions about the same config.
     pub fn asks_omlx(&self) -> bool {
-        systemone::is_omlx(&self.path)
-    }
-
-    /// What the request body's `model` field should say: the selector when the
-    /// file named one, and the model id whole otherwise.
-    ///
-    /// Named for the field it fills rather than `selector()`, because the two
-    /// differ: [`Effective::selector`] is only what a file wrote. The fallback
-    /// lives here rather than in [`Resolved::settle`], so "the file said
-    /// nothing" and "the file said the model" stay distinguishable — the first
-    /// defers to `--model`, the second does not.
-    ///
-    /// `None` means no model is settled at all: the rubric's own alias fills the
-    /// field later (spec §8.3), so a caller must not read it as "send none".
-    pub fn body_model(&self) -> Option<&str> {
-        self.selector.as_deref().or(self.model.as_deref())
+        systemone::is_omlx(&self.endpoint)
     }
 
     /// How the folder should be scanned: this config's breadth, the flag's limit.

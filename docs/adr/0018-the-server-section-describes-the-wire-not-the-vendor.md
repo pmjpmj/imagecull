@@ -1,6 +1,8 @@
 # 0018 — The `[server]` section describes the wire, not the vendor
 
 Status: accepted · 2026-11-28 · Feature `cloudflare-clef` ·
+amended by [ADR 0019](0019-the-endpoint-is-the-whole-address.md), which retires
+`path` and `selector` and makes `endpoint` the whole address ·
 amends [ADR 0003](0003-toml-config-file-one-source-at-a-time.md)'s section map
 (`[server]` grows five keys and gains a resolution rule of its own) ·
 amends [ADR 0014](0014-the-comparison-has-its-own-preview-config.md)'s

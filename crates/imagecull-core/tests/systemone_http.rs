@@ -25,7 +25,7 @@ use imagecull_core::reading;
 use imagecull_core::rubric::{Builtin, Rubric};
 use imagecull_core::scoring::{self, Cancel, Config, Decider, Request, Response, State};
 use imagecull_core::secret::Secret;
-use imagecull_core::systemone::{Adapter, Wire};
+use imagecull_core::systemone::{Adapter, PATH, Wire};
 use serde_json::{Value, json};
 use support::ExifFacts;
 use support::stub::Stub;
@@ -76,45 +76,53 @@ fn posts(stub: &Stub) -> Vec<support::stub::Received> {
         .collect()
 }
 
+/// oMLX's address at the stub: the origin the stub listens on, on oMLX's
+/// decision path. The client and the wire are both pointed at it, as the front
+/// end points both at the one `[server] endpoint`.
+fn omlx_wire(stub: &Stub) -> Wire {
+    Wire {
+        endpoint: format!("{}{PATH}", stub.url()),
+        truncate: true,
+    }
+}
+
 /// The real adapter, pointed at the stub, with the timeouts a run would use and
 /// oMLX's wire: the request a config that names no `[server]` keys describes.
 fn adapter(stub: &Stub, model: &str) -> Adapter {
     Adapter::new(
         Client::new(stub.endpoint(), Timeouts::with_read_seconds(5), None),
         model,
-        Wire::default(),
+        omlx_wire(stub),
     )
-    .expect("a model and oMLX's fixed path describe a request")
+    .expect("a model and oMLX's decision path describe a request")
 }
 
-/// The model id Workers AI addresses: it is also the rest of the URL, so `/` and
-/// `@` are part of the address and go on the wire verbatim.
-const WORKERS_AI_MODEL: &str = "@cf/cloudflare/clef-flash";
-
-/// The selector Workers AI's body takes where oMLX takes the alias.
-const CLEF_FLASH_SELECTOR: &str = "clef-flash";
-
-/// The path a Workers AI config describes: the model id *is* the path.
-const WORKERS_AI_PATH: &str = "/{model}";
+/// The model name Workers AI is asked for: the body's `model`, and the value the
+/// address's `{model}` becomes.
+const CLEF_FLASH: &str = "clef-flash";
 
 /// The `/client/v4/accounts/<id>/ai/run` part of a Workers AI request, appended
-/// to the stub's base URL: everything the account's config names as its endpoint.
+/// to the stub's URL: everything the account's config names before the model id.
 const WORKERS_AI_PREFIX: &str = "/client/v4/accounts/abc/ai/run";
 
-/// The wire a Workers AI config describes: the model id in the path, a selector
-/// in the body, and no `truncate`, which its schema does not list.
-fn workers_ai_wire() -> Wire {
+/// The address a Workers AI config describes: the account's prefix, the id's own
+/// prefix, and `{model}` where the name goes.
+fn workers_ai_endpoint_string(stub: &Stub) -> String {
+    format!("{}{WORKERS_AI_PREFIX}/@cf/cloudflare/{{model}}", stub.url())
+}
+
+/// The wire a Workers AI config describes: the model name in the address, and no
+/// `truncate`, which its schema does not list.
+fn workers_ai_wire(stub: &Stub) -> Wire {
     Wire {
-        path: WORKERS_AI_PATH.to_string(),
-        selector: Some(CLEF_FLASH_SELECTOR.to_string()),
+        endpoint: workers_ai_endpoint_string(stub),
         truncate: false,
     }
 }
 
-/// The endpoint a Workers AI client is pointed at: everything before the model
-/// id, which the path template supplies.
+/// The endpoint type the client holds: the same address the wire posts to.
 fn workers_ai_endpoint(stub: &Stub) -> Endpoint {
-    Endpoint::parse(&format!("{}{WORKERS_AI_PREFIX}", stub.url())).expect("a base URL with a path")
+    Endpoint::parse(&workers_ai_endpoint_string(stub)).expect("an address with a placeholder")
 }
 
 /// An adapter built the way the front end builds one: the wire is the config's,
@@ -198,8 +206,12 @@ fn client_with_token(stub: &Stub) -> Client {
 fn a_client_with_a_token_sends_it_as_a_bearer_header() {
     let stub = Stub::scripted(vec![(200, answer_document())]);
     let preview = preview(100, 100);
-    let adapter = Adapter::new(client_with_token(&stub), "clef-flash-oQ4e", Wire::default())
-        .expect("a model and oMLX's fixed path describe a request");
+    let adapter = Adapter::new(
+        client_with_token(&stub),
+        "clef-flash-oQ4e",
+        omlx_wire(&stub),
+    )
+    .expect("a model and oMLX's decision path describe a request");
     let rubric = Builtin::General.rubric().expect("parse");
 
     adapter
@@ -297,8 +309,8 @@ fn a_workers_ai_config_posts_to_the_model_path() {
     let preview = preview(1568, 1045);
     let adapter = workers_ai_adapter(
         &stub,
-        WORKERS_AI_MODEL,
-        workers_ai_wire(),
+        CLEF_FLASH,
+        workers_ai_wire(&stub),
         Some(Secret::new(TOKEN)),
     )
     .expect("a model id fills the path");
@@ -309,7 +321,7 @@ fn a_workers_ai_config_posts_to_the_model_path() {
             &rubric,
             &preview,
             State::for_frame("DSC_0001.NEF", None),
-            WORKERS_AI_MODEL,
+            CLEF_FLASH,
         ))
         .expect("a 200 is an answer");
 
@@ -327,7 +339,7 @@ fn a_workers_ai_config_posts_to_the_model_path() {
     );
     assert_eq!(
         posted.body["model"],
-        json!(CLEF_FLASH_SELECTOR),
+        json!(CLEF_FLASH),
         "the body takes the selector, not the id"
     );
     assert_eq!(
@@ -345,7 +357,7 @@ fn a_workers_ai_config_posts_to_the_model_path() {
 #[test]
 fn a_comparison_against_workers_ai_carries_no_truncate() {
     let stub = Stub::scripted(vec![(200, keeper_document("2", 0.71))]);
-    let adapter = workers_ai_adapter(&stub, WORKERS_AI_MODEL, workers_ai_wire(), None)
+    let adapter = workers_ai_adapter(&stub, CLEF_FLASH, workers_ai_wire(&stub), None)
         .expect("a model id fills the path");
 
     adapter.compare(&comparison(4)).expect("a 200 is an answer");
@@ -357,7 +369,7 @@ fn a_comparison_against_workers_ai_carries_no_truncate() {
         posted.path, "/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash",
         "a comparison addresses the same path a rating does"
     );
-    assert_eq!(posted.body["model"], json!(CLEF_FLASH_SELECTOR));
+    assert_eq!(posted.body["model"], json!(CLEF_FLASH));
     assert_eq!(
         posted.body.get("truncate"),
         None,
@@ -414,13 +426,13 @@ fn a_model_in_the_path_with_no_model_is_refused_before_the_request() {
     // no frame is ever posted to a path with a brace in it.
     let stub = Stub::scripted(vec![(200, answer_document())]);
 
-    let error = workers_ai_adapter(&stub, "", workers_ai_wire(), None)
+    let error = workers_ai_adapter(&stub, "", workers_ai_wire(&stub), None)
         .expect_err("a path that needs a model has none");
 
     assert!(error.is_fatal());
     assert_eq!(
         error.message(),
-        "the configured request path needs a model — pass --model or set [server] model",
+        "the configured endpoint needs a model — pass --model or set [server] model",
         "the row says what is missing and both ways to supply it"
     );
     assert!(
@@ -433,7 +445,7 @@ fn a_model_in_the_path_with_no_model_is_refused_before_the_request() {
 #[test]
 fn a_400_names_the_path_it_posted() {
     let stub = Stub::scripted(vec![(400, r#"{"detail":"invalid criteria"}"#.to_string())]);
-    let adapter = workers_ai_adapter(&stub, WORKERS_AI_MODEL, workers_ai_wire(), None)
+    let adapter = workers_ai_adapter(&stub, CLEF_FLASH, workers_ai_wire(&stub), None)
         .expect("a model id fills the path");
     let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
@@ -443,7 +455,7 @@ fn a_400_names_the_path_it_posted() {
             &rubric,
             &preview,
             State::for_frame("DSC_0001.NEF", None),
-            WORKERS_AI_MODEL,
+            CLEF_FLASH,
         ))
         .expect_err("a 400 is not an answer");
 
@@ -660,8 +672,8 @@ fn a_401_names_the_credential_to_check_and_never_its_value() {
     )]);
     let adapter = workers_ai_adapter(
         &stub,
-        WORKERS_AI_MODEL,
-        workers_ai_wire(),
+        CLEF_FLASH,
+        workers_ai_wire(&stub),
         Some(Secret::new(TOKEN)),
     )
     .expect("a model id fills the path");
@@ -673,7 +685,7 @@ fn a_401_names_the_credential_to_check_and_never_its_value() {
             &rubric,
             &preview,
             State::for_frame("DSC_0001.NEF", None),
-            WORKERS_AI_MODEL,
+            CLEF_FLASH,
         ))
         .expect_err("a 401 is not an answer");
 
@@ -747,9 +759,12 @@ fn nothing_listening_is_server_unreachable() {
             None,
         ),
         "clef-flash-oQ4e",
-        Wire::default(),
+        Wire {
+            endpoint: format!("http://{addr}{PATH}"),
+            truncate: true,
+        },
     )
-    .expect("a model and oMLX's fixed path describe a request");
+    .expect("a model and oMLX's decision path describe a request");
     let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
     let error = adapter
@@ -777,9 +792,9 @@ fn a_server_that_never_answers_times_out() {
             None,
         ),
         "clef-flash-oQ4e",
-        Wire::default(),
+        omlx_wire(&stub),
     )
-    .expect("a model and oMLX's fixed path describe a request");
+    .expect("a model and oMLX's decision path describe a request");
     let rubric = Builtin::General.rubric().expect("parse");
     let preview = preview(100, 100);
 
@@ -1043,11 +1058,11 @@ fn a_workers_ai_run_asks_no_omlx_probe_before_its_first_decision() {
     // Workers AI run is therefore the decision itself.
     let shoot = shoot(1);
     let stub = Stub::scripted(vec![(200, answer_document())]);
-    let adapter = workers_ai_adapter(&stub, WORKERS_AI_MODEL, workers_ai_wire(), None)
+    let adapter = workers_ai_adapter(&stub, CLEF_FLASH, workers_ai_wire(&stub), None)
         .expect("a model id fills the path");
     let config = Config::new(
         Builtin::General.rubric().expect("parse"),
-        Some(WORKERS_AI_MODEL.to_string()),
+        Some(CLEF_FLASH.to_string()),
         Params::default(),
         ingest::ScanOptions::default(),
         None,

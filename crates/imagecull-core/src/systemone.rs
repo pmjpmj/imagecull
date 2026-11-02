@@ -1,10 +1,10 @@
-//! `POST {path}`: the request body the rubric becomes, and the one production
+//! `POST {endpoint}`: the request body the rubric becomes, and the one production
 //! [`Decider`].
 //!
 //! The endpoint is new surface (spec §7), so the body is built in one place and
 //! kept inspectable: exactly one image, a non-null state, the rubric's questions
-//! in declaration order, and the three facts a `[server]` section decides — the
-//! path a request addresses, what the body's `model` says, and whether it
+//! in declaration order, and the two facts a `[server]` section decides — the
+//! address a request goes to, with `{model}` filled in, and whether the body
 //! carries oMLX's `truncate`. The adapter classifies transport and status
 //! failures into the taxonomy and hands the raw document on untouched; reading
 //! it is [`reading`](crate::reading)'s job.
@@ -18,43 +18,48 @@ use serde_json::{Map, Value, json};
 use crate::doctor;
 use crate::error::{Error, ErrorKind, Result};
 use crate::keeper::{self, Comparison};
-use crate::omlx::Client;
+use crate::omlx::{self, Client, MODEL_PLACEHOLDER};
 use crate::scoring::{Decider, Request, Response, State};
 
 /// The path a decision model is served on by default (spec §7.1).
 ///
-/// It is oMLX's, which is why it is the default [`Wire`] and what `config.rs`
-/// settles to. The two places that ask the question ask [`is_omlx`], so a run and
-/// its preflight cannot disagree about which server they are addressing.
+/// It is oMLX's, which is why it is what [`DEFAULT_ENDPOINT`] ends with and what
+/// `config.rs` settles to. The two places that ask the question ask [`is_omlx`],
+/// so a run and its preflight cannot disagree about which server they are
+/// addressing.
 pub const PATH: &str = "/v1/systemone";
 
-/// Whether a path template addresses oMLX's own decision path, the one whose
-/// probes `doctor` and `models` read.
+/// The address a run addresses when nothing says otherwise: oMLX on the port it
+/// listens on, and nothing else — a config with no `[server]` key posts here.
+pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1/systemone";
+
+/// Whether an address is oMLX's own decision path, the one whose probes `doctor`
+/// and `models` read.
+///
+/// An address with `{model}` in it is some other server's addressing: the model
+/// name is part of its path, which no oMLX install does, and neither command can
+/// say anything about it. Anything else has to *end* with the decision path, so
+/// an oMLX behind a prefix (`https://box.local/omlx/v1/systemone`) is still oMLX
+/// to these two commands — its probes hang off the same prefix.
 ///
 /// Asked by [`crate::config::Effective::asks_omlx`], which decides whether those
 /// commands run at all, and by [`Adapter::preflight`], which skips oMLX's
 /// diagnosis when the answer is no.
-pub fn is_omlx(path: &str) -> bool {
-    path == PATH
+pub fn is_omlx(endpoint: &str) -> bool {
+    !endpoint.contains(MODEL_PLACEHOLDER) && omlx::path_of(endpoint).ends_with(PATH)
 }
 
-/// The one placeholder a path template may carry.
-const MODEL_PLACEHOLDER: &str = "{model}";
-
-/// The HTTP wire a run addresses: the three facts a `[server]` section decides.
+/// The HTTP wire a run addresses: the two facts a `[server]` section decides.
 ///
 /// Built in `cli.rs` from the effective config and handed to [`Adapter::new`],
-/// which fills a missing selector with the model it was built for and
-/// interpolates the path. Owned values rather than a borrowed `Effective`,
-/// because the adapter is `Clone` and shared across a cull's workers.
+/// which fills the address's `{model}` per request. Owned values rather than a
+/// borrowed `Effective`, because the adapter is `Clone` and shared across a
+/// cull's workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wire {
-    /// The request path, as a template: `{model}` becomes the run's model id,
-    /// verbatim and unencoded.
-    pub path: String,
-    /// The body's `model` value, when the server wants a selector rather than
-    /// the id. `None` sends the model whole, which is oMLX's case.
-    pub selector: Option<String>,
+    /// The request address, as a template: `{model}` becomes the run's model
+    /// name, verbatim and unencoded.
+    pub endpoint: String,
     /// Whether the body carries oMLX's `truncate: true`. Workers AI's schema
     /// lists no such field, and sends it absent rather than false.
     pub truncate: bool,
@@ -62,11 +67,10 @@ pub struct Wire {
 
 impl Default for Wire {
     /// oMLX's wire, which is what a config that names no `[server]` key
-    /// describes: the fixed path, the model id whole, and `truncate`.
+    /// describes: the fixed address, and `truncate`.
     fn default() -> Wire {
         Wire {
-            path: PATH.to_string(),
-            selector: None,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
             truncate: true,
         }
     }
@@ -76,14 +80,11 @@ impl Default for Wire {
 #[derive(Debug, Clone)]
 pub struct Adapter {
     client: Client,
-    /// The model id: interpolated into the path, and the body's `model` when no
-    /// selector was configured.
+    /// The model name: interpolated into the address, and the body's `model`.
     model: String,
-    /// The path template, unresolved: [`Adapter::path_for`] fills it per request,
-    /// because only the request knows the path it posts to.
-    path: String,
-    /// The body's `model` value: the config's selector, or the model id whole.
-    selector: String,
+    /// The address template, unresolved: [`Adapter::address`] fills it per
+    /// request, because only the request knows the address it posts to.
+    endpoint: String,
     /// Whether the body carries oMLX's `truncate: true`.
     truncate: bool,
 }
@@ -91,33 +92,44 @@ pub struct Adapter {
 impl Adapter {
     /// Wrap a client and a [`Wire`] for one model. The client's timeouts are the
     /// request's timeouts, the model is what the preflight looks for on an oMLX
-    /// server, and the wire is where each request goes and what it says.
+    /// server and what the body carries, and the wire is where each request goes
+    /// and whether it carries `truncate`.
     ///
-    /// A path that needs a model, with no model to fill it, is fatal here rather
-    /// than at the first request: a config can be legal and still describe
-    /// nothing, and a template with a brace in it would 404 once per frame.
+    /// An address that needs a model, with no model to fill it, is fatal here
+    /// rather than at the first request: a config can be legal and still describe
+    /// nothing, and a template with a brace in it would post nowhere once per
+    /// frame.
     pub fn new(client: Client, model: impl Into<String>, wire: Wire) -> Result<Adapter> {
         let model = model.into();
-        if model.trim().is_empty() && wire.path.contains(MODEL_PLACEHOLDER) {
+        if model.trim().is_empty() && wire.endpoint.contains(MODEL_PLACEHOLDER) {
             return Err(Error::fatal(
-                "the configured request path needs a model — pass --model or set [server] model",
+                "the configured endpoint needs a model — pass --model or set [server] model",
             ));
+        }
+        // The model name goes into the address verbatim, so anything that cannot
+        // be a path segment or a body value has to be refused by name rather than
+        // turned into a 404 nobody can read.
+        if model.contains(['{', '}']) || model.chars().any(char::is_whitespace) {
+            return Err(Error::fatal(format!(
+                "the model name '{model}' cannot contain whitespace or braces — it is both the \
+                 body's `model` and the value `{{model}}` takes in the address"
+            )));
         }
         Ok(Adapter {
             client,
-            selector: wire.selector.unwrap_or_else(|| model.clone()),
             model,
-            path: wire.path,
+            endpoint: wire.endpoint,
             truncate: wire.truncate,
         })
     }
 
-    /// The path this adapter posts to, with the model id interpolated verbatim.
+    /// The address this adapter posts to, with the model name interpolated
+    /// verbatim.
     ///
-    /// No escaping: Workers AI ids contain `/` and `@`, which *are* the address
+    /// No escaping: Workers AI names contain `/` and `@`, which *are* the address
     /// being asked for, and encoding them would address something else.
-    fn path_for(&self) -> String {
-        self.path.replace(MODEL_PLACEHOLDER, &self.model)
+    fn address(&self) -> String {
+        self.endpoint.replace(MODEL_PLACEHOLDER, &self.model)
     }
 }
 
@@ -133,13 +145,13 @@ impl Decider for Adapter {
     /// stays strict, so the strictness is available where it is useful —
     /// explaining a server — and does not stop a working one from scoring.
     ///
-    /// A path that is not oMLX's is not asked at all: Workers AI has no
+    /// An address that is not oMLX's is not asked at all: Workers AI has no
     /// `/health` and no model listing suitable for a one-shot check, and
     /// spending a decision request per run to prove the token works is worse
     /// than the 401 rule, which costs one request and names the variable to
     /// check. So the preflight is skipped, not faked.
     fn preflight(&self) -> Result<()> {
-        if !is_omlx(&self.path) {
+        if !is_omlx(&self.endpoint) {
             return Ok(());
         }
         let report = doctor::diagnose(&self.client, &self.model);
@@ -167,9 +179,9 @@ impl Adapter {
     /// body which is not JSON is still kept cannot drift apart between a frame
     /// and a group.
     fn ask(&self, payload: Value, kind: Asked) -> Result<Response> {
-        let path = self.path_for();
+        let url = self.address();
         let started = Instant::now();
-        let fetched = self.client.post_json(&path, &payload)?;
+        let fetched = self.client.post_json(&url, &payload)?;
         let client_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !(200..300).contains(&fetched.http_status) {
@@ -177,7 +189,7 @@ impl Adapter {
                 fetched.http_status,
                 &fetched.body,
                 kind,
-                &self.client.endpoint().path_of(&path),
+                omlx::path_of(&url),
             ));
         }
 
@@ -254,7 +266,7 @@ impl Adapter {
     /// insertion order and an oMLX body has to stay byte for byte what it was.
     fn envelope(&self, state: &State, images: Vec<String>, questions: Value) -> Value {
         let mut body = json!({
-            "model": self.selector,
+            "model": self.model,
             "state": state_json(state),
             "images": images,
         });
@@ -352,5 +364,102 @@ fn detail(body: &str) -> String {
         format!("{cut}…")
     } else {
         one_line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::omlx::{Endpoint, Timeouts};
+
+    /// A client that never connects: these tests are about construction.
+    fn client() -> Client {
+        Client::new(
+            Endpoint::parse(DEFAULT_ENDPOINT).expect("the default address"),
+            Timeouts::with_read_seconds(1),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_default_address_is_omlx_on_its_decision_path() {
+        assert_eq!(
+            DEFAULT_ENDPOINT,
+            format!("{}{PATH}", omlx::DEFAULT_ENDPOINT),
+            "the default address and the oMLX origin constant cannot drift apart"
+        );
+        assert!(is_omlx(DEFAULT_ENDPOINT));
+    }
+
+    #[test]
+    fn is_omlx_is_the_path_and_nothing_else() {
+        assert!(is_omlx("http://127.0.0.1:9000/v1/systemone"));
+        assert!(
+            is_omlx("https://box.local/omlx/v1/systemone"),
+            "an oMLX behind a prefix is still oMLX: its path is the decision path"
+        );
+        assert!(
+            !is_omlx("https://host/ai/run/{model}"),
+            "a model name in the address is another server's addressing"
+        );
+        assert!(
+            !is_omlx("http://127.0.0.1:9000/v1/decisions"),
+            "another fixed path is not oMLX's probe surface"
+        );
+        assert!(
+            !is_omlx("http://127.0.0.1:9000"),
+            "a path-less address addresses `/`, which oMLX does not serve a decision on"
+        );
+    }
+
+    #[test]
+    fn the_address_is_the_request_even_without_a_path() {
+        let plain = Adapter::new(client(), "clef-oQ4e", Wire::default()).expect("a settled wire");
+        assert_eq!(plain.address(), DEFAULT_ENDPOINT);
+        assert_eq!(plain.model, "clef-oQ4e", "the body says the same name");
+
+        let templated = Adapter::new(
+            client(),
+            "clef-flash",
+            Wire {
+                endpoint: "https://host/ai/run/@cf/cloudflare/{model}".to_string(),
+                truncate: false,
+            },
+        )
+        .expect("a name fills the placeholder");
+        assert_eq!(
+            templated.address(),
+            "https://host/ai/run/@cf/cloudflare/clef-flash",
+            "the name is interpolated verbatim, `/` and `@` and all"
+        );
+        assert_eq!(
+            omlx::path_of(&templated.address()),
+            "/ai/run/@cf/cloudflare/clef-flash"
+        );
+    }
+
+    #[test]
+    fn a_name_that_could_not_be_a_path_segment_or_a_body_value_is_refused() {
+        let wire = Wire {
+            endpoint: "https://host/ai/run/{model}".to_string(),
+            truncate: false,
+        };
+        let missing = Adapter::new(client(), "", wire.clone())
+            .expect_err("an address that needs a model has none");
+        assert!(
+            missing.message().contains("needs a model"),
+            "the row says what is missing: {}",
+            missing.message()
+        );
+        for bad in ["clef flash", "clef\tflash", "{model}", "clef}"] {
+            let error = Adapter::new(client(), bad, wire.clone())
+                .expect_err("a name with whitespace or braces is refused by name");
+            assert!(error.is_fatal(), "'{bad}' should be fatal");
+            assert!(
+                error.message().contains("model name"),
+                "the message has to name what is wrong: {}",
+                error.message()
+            );
+        }
     }
 }

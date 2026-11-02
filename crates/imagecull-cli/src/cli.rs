@@ -55,13 +55,16 @@ pub enum Command {
 /// values come from.
 #[derive(Args, Debug)]
 pub struct CommonArgs {
-    /// Base URL of the oMLX server (default http://127.0.0.1:8000)
+    /// Address every request is posted to (default
+    /// http://127.0.0.1:8000/v1/systemone). `{model}` becomes the model name,
+    /// verbatim and unencoded
     #[arg(long, value_name = "URL")]
     pub endpoint: Option<String>,
 
-    /// Model alias to ask: score defaults to the rubric's alias, doctor, groups
-    /// and models to clef-flash-oQ4e
-    #[arg(short = 'm', long, value_name = "ALIAS")]
+    /// Model name to ask: the body's `model`, and the value `{model}` takes in
+    /// the endpoint. score defaults to the rubric's alias, doctor, groups and
+    /// models to clef-flash-oQ4e
+    #[arg(short = 'm', long, value_name = "NAME")]
     pub model: Option<String>,
 
     /// Read timeout in seconds (default 120)
@@ -111,18 +114,15 @@ impl CommonArgs {
         config::discover(self.config.as_deref(), &env).map_err(|error| error.to_string())
     }
 
-    /// The HTTP wire this run's requests carry: the path template, the body's
-    /// selector and whether the body carries `truncate`, straight from the
-    /// effective config.
+    /// The HTTP wire this run's requests carry: the address template and whether
+    /// the body carries `truncate`, straight from the effective config.
     ///
-    /// The template stays unresolved and a missing selector stays missing: only
-    /// the command knows the model the run settles on — a rating's is the
-    /// rubric's alias when nothing named one — and [`Wire`] is resolved against
-    /// it when the adapter is built.
+    /// The template stays unresolved: only the command knows the model the run
+    /// settles on — a rating's is the rubric's alias when nothing named one — and
+    /// [`Wire`] is resolved against it when the adapter is built.
     pub fn wire(&self, effective: &Effective) -> Wire {
         Wire {
-            path: effective.path.clone(),
-            selector: effective.body_model().map(str::to_string),
+            endpoint: effective.endpoint.clone(),
             truncate: effective.truncate,
         }
     }
@@ -130,8 +130,9 @@ impl CommonArgs {
     /// The adapter the effective config describes, for the model the command
     /// settled on: the client it was given, and the wire above.
     ///
-    /// The only failure is the one [`Adapter::new`] refuses — a path that needs a
-    /// model, with nothing to put in it — and it arrives before a frame is read.
+    /// The only failure is the one [`Adapter::new`] refuses — an address that
+    /// needs a model, with nothing to put in it — and it arrives before a frame
+    /// is read.
     pub fn adapter(
         &self,
         effective: &Effective,
@@ -168,15 +169,15 @@ impl CommonArgs {
 }
 
 /// Refuse a config that addresses some other server, for the two commands that
-/// read oMLX's own endpoints: prints what the command would have read, the URL
-/// this run actually posts to, and the two commands that do work there, and says
-/// which exit code the command owes when it does. `None` is "this run addresses
-/// oMLX, carry on".
+/// read oMLX's own endpoints: prints what the command would have read, the
+/// address this run actually posts to, and the two commands that do work there,
+/// and says which exit code the command owes when it does. `None` is "this run
+/// addresses oMLX, carry on".
 ///
-/// The URL is the endpoint and the path template *as configured*, never the
-/// interpolated path: filling the template needs a model these commands were not
-/// given, and a message about a URL the config does not contain would send the
-/// photographer looking for a key that is not there.
+/// The address is the configured one, never the interpolated one: filling
+/// `{model}` needs a model these commands were not given, and a message about a
+/// URL the config does not contain would send the photographer looking for a key
+/// that is not there.
 ///
 /// `reads` is the probe list the command depends on, said in its own words —
 /// `doctor` reads three endpoints, `models` joins two listings — because that
@@ -189,11 +190,10 @@ pub fn refuse_other_server(effective: &Effective, command: &str, reads: &str) ->
         return None;
     }
     eprintln!(
-        "error: {command} reads {reads}, and this run posts to {}{} instead — there is nothing for \
+        "error: {command} reads {reads}, and this run posts to {} instead — there is nothing for \
          it to check. imagecull score and imagecull groups work against any SystemOne server; only \
          doctor and models are oMLX-only.",
         effective.endpoint.trim_end_matches('/'),
-        effective.path
     );
     Some(ExitCode::Fatal.code())
 }
@@ -607,7 +607,10 @@ mod tests {
         );
 
         let effective = effective(&args);
-        assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
+        assert_eq!(
+            effective.endpoint,
+            imagecull_core::systemone::DEFAULT_ENDPOINT
+        );
         assert_eq!(effective.model, None, "no alias means the rubric's own");
         assert_eq!(effective.timeout, 120);
         assert_eq!(effective.score_params.max_edge, Params::DEFAULT_MAX_EDGE);
@@ -750,15 +753,13 @@ mod tests {
 
     #[test]
     fn the_config_file_settles_into_the_wire_it_describes() {
-        // The mapping itself, from the settled config to the three facts a
-        // request carries. The contract tests prove what the adapter does with
-        // them once it has them.
+        // The mapping itself, from the settled config to the two facts a request
+        // carries. The contract tests prove what the adapter does with them once
+        // it has them.
         let file = config::ConfigFile::from_toml(
             "[server]\n\
-             endpoint = \"https://api.cloudflare.com/client/v4/accounts/abc/ai/run\"\n\
-             path = \"/{model}\"\n\
-             model = \"@cf/cloudflare/clef-flash\"\n\
-             selector = \"clef-flash\"\n\
+             endpoint = \"https://api.cloudflare.com/client/v4/accounts/abc/ai/run/@cf/cloudflare/{model}\"\n\
+             model = \"clef-flash\"\n\
              truncate = false\n",
         )
         .expect("a valid config");
@@ -772,13 +773,14 @@ mod tests {
             .settle(None);
         let wire = args.common.wire(&effective);
         assert_eq!(
-            wire.path, "/{model}",
-            "the template stays unresolved: only the adapter knows the model"
+            wire.endpoint,
+            "https://api.cloudflare.com/client/v4/accounts/abc/ai/run/@cf/cloudflare/{model}",
+            "the address stays unresolved: only the adapter knows the model"
         );
         assert_eq!(
-            wire.selector.as_deref(),
+            effective.model.as_deref(),
             Some("clef-flash"),
-            "the body's model is the selector, not the id"
+            "the name is both the body's model and what the address's {{model}} becomes"
         );
         assert!(!wire.truncate, "Workers AI's schema lists no truncate");
 
@@ -945,7 +947,10 @@ mod tests {
         assert_eq!(args.file, None);
         assert_eq!(args.common.endpoint, None);
         let effective = args.overrides().settle(None);
-        assert_eq!(effective.endpoint, omlx::DEFAULT_ENDPOINT);
+        assert_eq!(
+            effective.endpoint,
+            imagecull_core::systemone::DEFAULT_ENDPOINT
+        );
         assert_eq!(args.common.alias(&effective), omlx::DEFAULT_MODEL);
         assert_eq!(effective.score_params.max_edge, Params::DEFAULT_MAX_EDGE);
 

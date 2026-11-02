@@ -169,8 +169,8 @@ oMLX is the **reference server** this contract is written against, not the only 
 
 | | local oMLX | Cloudflare Workers AI |
 |---|---|---|
-| request URL | `{endpoint}/v1/systemone` | `{endpoint}/{model-id}`, i.e. `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/clef` |
-| body `model` | the alias, `clef-flash-oQ4e` | a selector, `clef` or `clef-flash` — not the id |
+| address | `http://127.0.0.1:8000/v1/systemone` (the default) | `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}` — the id's own prefix is in the address |
+| body `model` | the alias, `clef-flash-oQ4e` | the name, `clef` or `clef-flash` — the same string `{model}` becomes |
 | auth | none | `Authorization: Bearer <API token>` |
 | `truncate: true` | an oMLX request field | not in Workers AI's schema |
 | images per request | the measured budget of 20 | `maxItems: 4` |
@@ -181,11 +181,11 @@ oMLX is the **reference server** this contract is written against, not the only 
 ### 7.1 Request
 
 ```http
-POST {endpoint}{path}
+POST {endpoint}
 Content-Type: application/json
 ```
 
-`path` defaults to `/v1/systemone`, oMLX's fixed path. It is a template interpolated once per request: `{model}` becomes the run's model id, verbatim and unencoded, because a Workers AI id contains `/` and `@` and those *are* the address (`[server] path`). A placeholder other than `{model}` and a path that does not start with `/` are fatal when the file is read; a `{model}` template with no model configured is fatal when the request is built, because `--model` or the rubric's own alias may still supply one. Each names its key.
+`endpoint` is the whole address a request is posted to, path and all — there is no separate `path` key (ADR 0019). It is a template interpolated once per request: `{model}` becomes the run's model name, verbatim and unencoded, because a Workers AI name contains `/` and `@` and those *are* the address. The address defaults to `http://127.0.0.1:8000/v1/systemone`, oMLX's own. A placeholder other than `{model}` is fatal when the client is built, as is one in the scheme or host; a `{model}` template with no model configured is fatal when the adapter is built, because `--model` or the rubric's own alias may still supply one. A model name carrying whitespace or braces is fatal there too, since it is both a path segment and a body value. Each refusal names what to change.
 
 ```json
 {
@@ -202,7 +202,7 @@ Content-Type: application/json
 ```
 
 - `state` must not be null. It carries the *task framing* and user context — never the scores.
-- `model` is the run's model id by default, and `[server] selector` overrides it for a server that wants a selector rather than the id (`clef-flash` on Workers AI, where the field may not contain the `@cf/…` id at all).
+- `model` is the run's model name — the same string the address's `{model}` becomes, and by default the rubric's own alias. Workers AI wants the short name (`clef-flash`) where oMLX wants the full alias (`clef-flash-oQ4e`); the `@cf/…` id is not sent as `model` at all, and never has to be typed, because the id's prefix lives in the address.
 - Exactly **one** image per request. Several are supported by the API, but one frame per decision keeps results attributable.
 - `truncate: true` (default). It is an oMLX request field: `[server] truncate = false` for servers whose schema does not list it, and the field is then absent rather than `false`. Clef cuts the state to fit 16,384 tokens instead of returning 413. Our prompt is far smaller than that, so truncation should never fire — if it does, the telemetry in §9 will show it via an unexpectedly low `input_tokens` ceiling.
 - A comparison carries up to twenty images (`[group] max_images`, `keeper::MAX`), which is the reference server's measured budget: a server that takes fewer per request (Workers AI: 4) sets the key lower, and a group larger than the cap is split into rounds rather than refused (§11.1, `keeper::chunk`). It is scheduling, not algorithm, so it does not enter the grouping hash.
@@ -467,8 +467,9 @@ Exit codes: `0` all ok (a run that skipped every frame is all ok) · `1` complet
 
 ```
 imagecull score <DIR> [OPTIONS]
-        --endpoint <URL>        default: http://127.0.0.1:8000
-    -m, --model <ALIAS>         default: from rubric.toml
+        --endpoint <URL>        whole address; {model} is the name
+                                default: http://127.0.0.1:8000/v1/systemone
+    -m, --model <NAME>          default: from rubric.toml
         --rubric <NAME|FILE>    one of general/press/holiday, or a path
                                 default: general
         --shoot-context <STR>   free text passed into state.shoot_context
@@ -528,8 +529,8 @@ failure's message.
 
 Values that stay true across runs can come from a TOML file instead of being
 retyped as flags. Keys are grouped into four sections, split by who reads them:
-`[server]` (`endpoint`, `path`, `model`, `selector`, `token_env`, `token`,
-`truncate`, `timeout`) and `[scan]` (`recursive`) are every command's, `[score]`
+`[server]` (`endpoint`, `model`, `token_env`, `token`, `truncate`, `timeout`)
+and `[scan]` (`recursive`) are every command's, `[score]`
 (`max_edge`, `jpeg_quality`, `json_scores`, `rubric`, `shoot_context`, `dedupe`)
 is what a rating needs, and `[group]` (`gap`, `similarity`, `exposure_stops`,
 `max_edge`, `jpeg_quality`, `cull_jobs`, `max_images`) is what a cull needs.
@@ -540,15 +541,15 @@ all; ADR 0003 records why this file at all, ADR 0004 the three built-ins, ADR
 own, ADR 0016 why the rating's keys share one section too, and ADR 0018 why
 `[server]` describes the wire rather than a vendor.
 
-**`[server]` is the wire.** Eight keys, none of which names a vendor: `endpoint`;
-`path`, a template whose `{model}` is interpolated verbatim and unencoded,
-default `/v1/systemone`; `model`, the id; `selector`, what the body's `model`
-field says instead, for a server that wants `clef-flash` rather than the `@cf/…`
-id; `token_env` and `token`, the bearer credential, the environment winning over
-the literal; `truncate`, whether the body carries oMLX's `truncate: true`,
-default true; and `timeout`, how long a run waits for the answer. A Workers AI
-config is `path = "/{model}"`, a `selector`, a `token_env` and
-`truncate = false`.
+**`[server]` is the wire.** Six keys, none of which names a vendor: `endpoint`,
+the whole address a request is posted to, whose `{model}` is interpolated
+verbatim and unencoded, default `http://127.0.0.1:8000/v1/systemone`; `model`,
+the name that fills it and that the body's `model` field says; `token_env` and
+`token`, the bearer credential, the environment winning over the literal;
+`truncate`, whether the body carries oMLX's `truncate: true`, default true; and
+`timeout`, how long a run waits for the answer. A Workers AI config is an address
+ending in `@cf/cloudflare/{model}`, `model = "clef-flash"`, a `token_env` and
+`truncate = false` (ADR 0019).
 
 **Which command reads which key.** `score` resolves every key. `groups` resolves
 `[server]` (the alias, the endpoint and the wire a cull asks), all of `[group]`
@@ -565,10 +566,12 @@ command reads is simply not consulted by this one.
 
 **`doctor` and `models` are oMLX-only.** They read oMLX's own probes — `/health`,
 `/v1/models`, `/v1/models/status` — which no other SystemOne host serves, so both
-refuse a config whose `[server] path` is not `/v1/systemone`, naming the endpoint
-and template they would have read, and make no request. `score` and `groups`
-work against any host, and their preflight is skipped rather than faked when the
-path is not oMLX's (ADR 0018).
+refuse a config whose `[server] endpoint` does not end in `/v1/systemone` (or
+carries `{model}`, which no oMLX install does), naming the address they would
+have read, and make no request. `score` and `groups` work against any host, and
+their preflight is skipped rather than faked when the address is not oMLX's
+(ADR 0018). An address with no path is legal and means `/`, but it is not oMLX's
+decision path either.
 
 **Retired sections.** `[preview]`, `[outputs]` and `[run]` are gone. A file that
 still sets a key under one is fatal and names its new home — `preview.max_edge
@@ -583,10 +586,15 @@ whole: `--config <FILE>`, `./imagecull.toml`,
 and there are no environment-variable overrides. `--no-config` skips discovery
 entirely.
 
-**Precedence.** Flag > config file > built-in default, per key. The wire has no
-flags: `path`, `selector`, `token_env`, `token`, `truncate` and `max_images`
-describe the server and the shoot, not one invocation, so they are the file's
-alone (`--endpoint` and `--model` keep theirs).
+**Retired `[server]` keys.** `path` and `selector` are gone (ADR 0019). A file
+that still sets one is fatal and says where it went: `path` folds into
+`endpoint`, and `selector` becomes `model` with the id's prefix in the address.
+
+**Precedence.** Flag > config file > built-in default, per key. `--endpoint`
+takes the whole address, `{model}` and all, exactly as the key does. `token_env`,
+`token`, `truncate` and `max_images` have no flags: they describe the server and
+the shoot, not one invocation, so they are the file's alone (`--endpoint` and
+`--model` keep theirs).
 
 **What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
 `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`, `--quiet`,

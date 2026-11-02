@@ -40,7 +40,8 @@ fn shoot(stub: &Stub) -> tempfile::TempDir {
     fs::write(
         dir.path().join("imagecull.toml"),
         format!(
-            "[server]\nendpoint = \"{}\"\nmodel = \"{ALIAS}\"\ntoken_env = \"{VARIABLE}\"\n",
+            "[server]\nendpoint = \"{}/v1/systemone\"\nmodel = \"{ALIAS}\"\n\
+             token_env = \"{VARIABLE}\"\n",
             stub.url()
         ),
     )

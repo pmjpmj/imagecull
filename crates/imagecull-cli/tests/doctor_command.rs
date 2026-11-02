@@ -16,12 +16,13 @@ use std::process::{Command, Output};
 
 use support::stub::Stub;
 
-/// The Workers AI model id a photographer would configure: it *is* the rest of
-/// the URL, which is why the path has to be a template.
-const MODEL: &str = "@cf/cloudflare/clef-flash";
+/// The model name a photographer would configure for Workers AI: the body's
+/// `model`, and the value the address's `{model}` becomes.
+const MODEL: &str = "clef-flash";
 
-/// The path template a Workers AI config describes.
-const PATH: &str = "/{model}";
+/// The part of a Workers AI address that names the model's family, `{model}` and
+/// all: the address is the request, so the path lives in it.
+const PATH: &str = "/@cf/cloudflare/{model}";
 
 /// A shoot whose config addresses a Workers AI account at the stub's address.
 fn shoot(stub: &Stub) -> tempfile::TempDir {
@@ -29,7 +30,7 @@ fn shoot(stub: &Stub) -> tempfile::TempDir {
     fs::write(
         dir.path().join("imagecull.toml"),
         format!(
-            "[server]\nendpoint = \"{}\"\npath = \"{PATH}\"\nmodel = \"{MODEL}\"\n",
+            "[server]\nendpoint = \"{}{PATH}\"\nmodel = \"{MODEL}\"\n",
             stub.url()
         ),
     )

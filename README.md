@@ -166,7 +166,7 @@ imagecull score --shoot-context "night street, pushed two stops" /path/to/shoot
 ```
 
 Ratings made under different rubrics or models are not comparable, which is why
-each sidecar records the rubric hash and the model alias. Changing the rubric and
+each sidecar records the rubric hash and the model name. Changing the rubric and
 re-running will not re-rate anything unless you also pass `--force`.
 
 ### Useful options
@@ -270,10 +270,8 @@ naming the `[score]` key it became.
 
 ```toml
 [server]
-endpoint = "http://127.0.0.1:8000"
-# path = "/v1/systemone"
+endpoint = "http://127.0.0.1:8000/v1/systemone"
 # model = "clef-flash-oQ4e"
-# selector = "clef-flash"
 # token_env = "CLOUDFLARE_API_TOKEN"
 # token = "..."
 # truncate = true
@@ -310,20 +308,20 @@ comparison carries, for a server that refuses more per request.
 
 ## A server somewhere else
 
-`[server]` describes the HTTP wire a run posts on, not a vendor: where a request
-goes, what its body says it is, and what it carries to be let in. So a local
-oMLX is the default, and Cloudflare's hosted Clef — the same model family on
-Workers AI, for a machine with no Apple Silicon to spare — is one config block
-away rather than a second code path. Copy the recipe at the bottom of
+`[server]` describes the HTTP wire a run posts on, not a vendor: the address a
+request goes to, what its body says it is, and what it carries to be let in. The
+address is the whole request — path and all — and `{model}` in it becomes the
+model name, verbatim and unencoded. So a local oMLX is the default, and
+Cloudflare's hosted Clef — the same model family on Workers AI, for a machine
+with no Apple Silicon to spare — is one config block away rather than a second
+code path. Copy the recipe at the bottom of
 [`imagecull.toml.example`](imagecull.toml.example), put your account id where
 `<ACCOUNT_ID>` is, export the token, and run as usual:
 
 ```toml
 [server]
-endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run"
-path = "/{model}"
-model = "@cf/cloudflare/clef-flash"
-selector = "clef-flash"
+endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}"
+model = "clef-flash"
 token_env = "CLOUDFLARE_API_TOKEN"
 truncate = false
 
@@ -344,15 +342,15 @@ Four facts about the request differ from a local oMLX, and each is one key, plus
 
 | | local oMLX | Workers AI |
 |---|---|---|
-| request path | `/v1/systemone` (the default) | `/{model}` — the model id *is* the path |
-| body `model` | the alias, `clef-flash-oQ4e` | the selector, `clef-flash` |
+| address | `http://127.0.0.1:8000/v1/systemone` (the default) | `…/ai/run/@cf/cloudflare/{model}` — the id's prefix is in the address |
+| body `model` | the alias, `clef-flash-oQ4e` | the name, `clef-flash` — the same string `{model}` becomes |
 | auth | none | `Authorization: Bearer $CLOUDFLARE_API_TOKEN` |
 | body extras | `truncate: true` | none — `truncate = false` sends the field absent |
 | images per request | 20 | 4 — a bigger group is split, never refused |
 
-Two model ids are served: `@cf/cloudflare/clef-flash`, the fast one in the recipe
-above, whose selector is `clef-flash`, and `@cf/cloudflare/clef`, the bigger one
-— `model = "@cf/cloudflare/clef"` and `selector = "clef"`.
+Two models are served: `@cf/cloudflare/clef-flash`, the fast one in the recipe
+above, which is `model = "clef-flash"`, and `@cf/cloudflare/clef`, the bigger one
+— the same address ending in `{model}`, with `model = "clef"`.
 
 **`doctor` and `models` stay oMLX-only.** They read oMLX's own endpoints
 (`/health`, `/v1/models`, `/v1/models/status`), which no other server has, so
@@ -403,7 +401,8 @@ no sidecar at all — no zero, no blank file.
 ## Troubleshooting
 
 - **`doctor` says the server is unreachable** — start oMLX and check
-  `--endpoint`. The default is `http://127.0.0.1:8000`.
+  `--endpoint`. The default is `http://127.0.0.1:8000/v1/systemone`; an endpoint
+  with no path is posted to as written, which means `/`.
 - **`doctor` says the model is not a decision model** — the oMLX version is too
   old, or the Clef checkpoint was loaded as a plain vision model. Upgrade to
   oMLX 0.7.1.dev1 or newer and load a Clef decision model.

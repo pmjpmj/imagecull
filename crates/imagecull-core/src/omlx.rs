@@ -21,7 +21,13 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::secret::Secret;
 
 /// Where oMLX listens by default.
+///
+/// This is the server's origin; the decision address a config defaults to is
+/// [`crate::systemone::DEFAULT_ENDPOINT`], which is this plus oMLX's path.
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000";
+
+/// The one placeholder an address may carry: where the run's model name goes.
+pub const MODEL_PLACEHOLDER: &str = "{model}";
 
 /// The alias used when nothing else says otherwise.
 ///
@@ -61,16 +67,26 @@ impl Timeouts {
     }
 }
 
-/// A validated base URL, such as `http://127.0.0.1:8000`, with no trailing
-/// slash, so paths can be appended without doubling it.
+/// A validated request address, such as
+/// `http://127.0.0.1:8000/v1/systemone` or
+/// `https://api.cloudflare.com/client/v4/accounts/<id>/ai/run/@cf/cloudflare/{model}`,
+/// with no trailing slash, so a probe path can be appended to its base without
+/// doubling it.
+///
+/// The address *is* the request: its path is part of it rather than a second key,
+/// and `{model}` is where the run's model name goes. Filling the placeholder is
+/// the adapter's job, because the adapter owns the model; this type owns "is this
+/// an address" and where oMLX's probes hang off it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint(String);
 
 impl Endpoint {
-    /// Validate a user-supplied base URL.
+    /// Validate a user-supplied address.
     ///
-    /// Only the shape is checked: a URL that parses can still point at nothing,
-    /// which is [`Client::health`]'s job to report.
+    /// Only the shape and the placeholders are checked: an address that parses
+    /// can still point at nothing, which is [`Client::health`]'s job to report.
+    /// A path is optional — the address is posted to as written — so
+    /// `http://127.0.0.1:9000` is legal and means `/`.
     pub fn parse(raw: &str) -> Result<Endpoint> {
         let trimmed = raw.trim();
         let rest = trimmed
@@ -78,43 +94,106 @@ impl Endpoint {
             .or_else(|| trimmed.strip_prefix("https://"));
         let Some(rest) = rest else {
             return Err(Error::fatal(format!(
-                "--endpoint must be an http:// or https:// URL, got '{raw}'"
+                "the endpoint must be an http:// or https:// address, got '{raw}' — pass \
+                 --endpoint or set [server] endpoint"
             )));
         };
         if rest.is_empty() || rest.starts_with('/') {
-            return Err(Error::fatal(format!("--endpoint '{raw}' has no host")));
+            return Err(Error::fatal(format!("the endpoint '{raw}' has no host")));
         }
-        Ok(Endpoint(trimmed.trim_end_matches('/').to_string()))
+        let address = trimmed.trim_end_matches('/');
+        if has_a_bad_placeholder(address) {
+            return Err(Error::fatal(format!(
+                "the endpoint '{raw}' has a placeholder that is not {{model}} — {{model}} is \
+                 replaced with the model name, and nothing else is interpolated"
+            )));
+        }
+        // `{model}` is a path or query value, never part of a hostname: a model
+        // name is not a host, and a brace there would reach the resolver.
+        let after_scheme = &address[address.find("://").map_or(0, |at| at + 3)..];
+        let host_len = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        if after_scheme[..host_len].contains('{') {
+            return Err(Error::fatal(format!(
+                "the endpoint '{raw}' puts {{model}} in the host — a model name is not a host, \
+                 so put it in the path"
+            )));
+        }
+        Ok(Endpoint(address.to_string()))
     }
 
-    /// The base URL, without a trailing slash.
+    /// The address as written, without a trailing slash.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.0, path)
+    /// The address minus oMLX's decision path: the base its probes hang off.
+    ///
+    /// oMLX's probes are fixed paths on the server's own base, so an oMLX behind
+    /// a prefix (`https://box.local/omlx/v1/systemone`) keeps the prefix and
+    /// drops the decision path. Any other address is never probed —
+    /// [`crate::systemone::is_omlx`] decides that — so the fallback is its
+    /// origin.
+    pub fn base(&self) -> &str {
+        self.0
+            .strip_suffix(crate::systemone::PATH)
+            .unwrap_or_else(|| origin(&self.0))
+            .trim_end_matches('/')
     }
 
-    /// The path portion of the URL a request to `path` addresses: the endpoint's
-    /// own path when it carries one, followed by `path`.
-    ///
-    /// This is what a failure row names, because the row has to read the same
-    /// whether or not the endpoint carries a prefix: an oMLX on
-    /// `http://127.0.0.1:8000` posts to `/v1/systemone` and stays silent about the
-    /// host, while a Workers AI account's base URL carries
-    /// `/client/v4/accounts/<id>/ai/run` and the photographer needs all of it to
-    /// reproduce the request.
-    pub fn path_of(&self, path: &str) -> String {
-        let after_scheme = self
-            .0
-            .split_once("://")
-            .map_or(self.0.as_str(), |(_scheme, rest)| rest);
-        match after_scheme.find('/') {
-            Some(prefix) => format!("{}{}", &after_scheme[prefix..], path),
-            None => path.to_string(),
-        }
+    /// The URL a probe path is fetched from.
+    fn probe(&self, path: &str) -> String {
+        format!("{}{}", self.base(), path)
     }
+}
+
+/// The `scheme://host` part of a URL, and nothing after it.
+fn origin(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map_or(url, |(_scheme, rest)| rest);
+    match after_scheme.find('/') {
+        Some(at) => &url[..url.len() - after_scheme.len() + at],
+        None => url,
+    }
+}
+
+/// The path portion of a URL, host and scheme left out.
+///
+/// This is what a failure row names, because the row has to read the same
+/// whether or not the address carries a host prefix: an oMLX on
+/// `http://127.0.0.1:8000` posts to `/v1/systemone` and stays silent about the
+/// host, while a Workers AI account's address carries
+/// `/client/v4/accounts/<id>/ai/run/...` and the photographer needs all of it to
+/// reproduce the request. A URL with no path addresses `/`.
+pub fn path_of(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map_or(url, |(_scheme, rest)| rest);
+    match after_scheme.find('/') {
+        Some(at) => &after_scheme[at..],
+        None => "/",
+    }
+}
+
+/// Whether `address` carries a `{…}` placeholder that is not `{model}`.
+///
+/// An address is a template with exactly one thing to interpolate, so anything
+/// else between braces is a typo that would sail onto the wire and 404, rather
+/// than a value to pass through. The delimiter has to be the brace rather than a
+/// separator, because a Workers AI model name contains `/` and `@` itself. A
+/// brace that never closes is not a placeholder at all, so it is left alone: the
+/// address validator judges placeholders, not braces.
+fn has_a_bad_placeholder(address: &str) -> bool {
+    let mut rest = address;
+    while let Some(open) = rest.find('{') {
+        let from_open = &rest[open..];
+        let Some(close) = from_open.find('}') else {
+            return false;
+        };
+        if &from_open[..=close] != MODEL_PLACEHOLDER {
+            return true;
+        }
+        rest = &from_open[close + 1..];
+    }
+    false
 }
 
 impl fmt::Display for Endpoint {
@@ -391,17 +470,16 @@ impl Client {
     /// Classifying the answer is the caller's job: a 400 names a rejected
     /// rubric, a 5xx names a hiccup, and both are decisions rather than
     /// transport failures.
-    pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Fetched> {
-        let url = self.endpoint.url(path);
+    pub fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<Fetched> {
         let mut response = self
-            .authorized(self.agent.post(&url))
+            .authorized(self.agent.post(url))
             .send_json(body)
-            .map_err(|error| self.transport_error("POST", path, error))?;
+            .map_err(|error| self.transport_error("POST", url, error))?;
         let http_status = response.status().as_u16();
         let body = response
             .body_mut()
             .read_to_string()
-            .map_err(|error| self.transport_error("POST", path, error))?;
+            .map_err(|error| self.transport_error("POST", url, error))?;
         Ok(Fetched { http_status, body })
     }
 
@@ -416,16 +494,16 @@ impl Client {
 
     /// Fetch `path` and return the status and body whatever the status is.
     fn get(&self, path: &str) -> Result<Fetched> {
-        let url = self.endpoint.url(path);
+        let url = self.endpoint.probe(path);
         let mut response = self
             .authorized(self.agent.get(&url))
             .call()
-            .map_err(|error| self.transport_error("GET", path, error))?;
+            .map_err(|error| self.transport_error("GET", &url, error))?;
         let http_status = response.status().as_u16();
         let body = response
             .body_mut()
             .read_to_string()
-            .map_err(|error| self.transport_error("GET", path, error))?;
+            .map_err(|error| self.transport_error("GET", &url, error))?;
         Ok(Fetched { http_status, body })
     }
 
@@ -438,20 +516,19 @@ impl Client {
         }
     }
 
-    fn transport_error(&self, method: &str, path: &str, error: ureq::Error) -> Error {
+    fn transport_error(&self, method: &str, url: &str, error: ureq::Error) -> Error {
         match error {
             ureq::Error::Timeout(_) => Error::new(
                 ErrorKind::Timeout,
                 format!(
-                    "{method} {path} at {} timed out after {}s",
-                    self.endpoint,
+                    "{method} {url} timed out after {}s",
                     self.timeouts.read.as_secs()
                 ),
             ),
-            ureq::Error::StatusCode(status) => status_error(path, status),
+            ureq::Error::StatusCode(status) => status_error(url, status),
             other => Error::new(
                 ErrorKind::ServerUnreachable,
-                format!("cannot reach {}: {other}", self.endpoint),
+                format!("cannot reach {url}: {other}"),
             ),
         }
     }
@@ -550,20 +627,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoints_normalise_trailing_slashes() {
-        let endpoint = Endpoint::parse("http://127.0.0.1:8000/").unwrap();
-        assert_eq!(endpoint.as_str(), "http://127.0.0.1:8000");
-        assert_eq!(endpoint.url("/health"), "http://127.0.0.1:8000/health");
+    fn addresses_keep_their_path_and_drop_trailing_slashes() {
+        let origin_only = Endpoint::parse("http://127.0.0.1:8000/").unwrap();
+        assert_eq!(origin_only.as_str(), "http://127.0.0.1:8000");
+        assert_eq!(origin_only.base(), "http://127.0.0.1:8000");
+        assert_eq!(origin_only.probe("/health"), "http://127.0.0.1:8000/health");
 
-        let with_path = Endpoint::parse("https://box.local:8443/omlx").unwrap();
+        let decision = Endpoint::parse("http://127.0.0.1:8000/v1/systemone").unwrap();
+        assert_eq!(decision.as_str(), "http://127.0.0.1:8000/v1/systemone");
         assert_eq!(
-            with_path.url("/v1/models"),
-            "https://box.local:8443/omlx/v1/models"
+            decision.base(),
+            "http://127.0.0.1:8000",
+            "oMLX's probes hang off the origin, not the decision path"
+        );
+
+        let prefixed = Endpoint::parse("https://box.local:8443/omlx/v1/systemone").unwrap();
+        assert_eq!(
+            prefixed.probe("/v1/models"),
+            "https://box.local:8443/omlx/v1/models",
+            "an oMLX behind a prefix keeps the prefix"
         );
     }
 
     #[test]
-    fn endpoints_reject_what_is_not_a_base_url() {
+    fn endpoints_reject_what_is_not_an_address() {
         for bad in [
             "",
             "127.0.0.1:8000",
@@ -577,21 +664,33 @@ mod tests {
     }
 
     #[test]
-    fn a_request_path_is_the_endpoints_own_path_plus_the_request() {
-        let bare = Endpoint::parse("http://127.0.0.1:8000").expect("a base URL");
-        assert_eq!(
-            bare.path_of("/v1/systemone"),
-            "/v1/systemone",
-            "an endpoint with no path of its own names only the request path, as it always has"
-        );
+    fn endpoints_reject_a_placeholder_that_is_not_the_model_or_is_a_host() {
+        let typo = Endpoint::parse("http://127.0.0.1:8000/v1/{modle}").unwrap_err();
+        assert!(typo.message().contains("not {model}"), "{}", typo.message());
 
-        let prefixed = Endpoint::parse("https://api.cloudflare.com/client/v4/accounts/abc/ai/run")
-            .expect("a base URL with a path");
-        assert_eq!(
-            prefixed.path_of("/@cf/cloudflare/clef-flash"),
-            "/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash",
-            "a prefixed endpoint names the whole path the request addresses"
+        let in_host = Endpoint::parse("http://{model}.example.com/v1/run").unwrap_err();
+        assert!(
+            in_host.message().contains("in the host"),
+            "{}",
+            in_host.message()
         );
+    }
+
+    #[test]
+    fn a_request_path_is_the_addresses_path_with_the_host_left_out() {
+        assert_eq!(
+            path_of("http://127.0.0.1:8000/v1/systemone"),
+            "/v1/systemone",
+            "a host-less request path is what a failure row names"
+        );
+        assert_eq!(
+            path_of(
+                "https://api.cloudflare.com/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash"
+            ),
+            "/client/v4/accounts/abc/ai/run/@cf/cloudflare/clef-flash",
+            "a prefixed address names the whole path the request addresses"
+        );
+        assert_eq!(path_of("http://127.0.0.1:9000"), "/");
     }
 
     #[test]

@@ -26,23 +26,19 @@
 # `--quiet`/`--verbose`.
 
 [server]
-# Base URL of the server this run talks to: a local oMLX by default, and any host
-# speaking the same decision API when something else is named here. Default:
-# http://127.0.0.1:8000
-endpoint = "http://127.0.0.1:8000"
-# The request path, as a template: `{model}` becomes the model id, verbatim and
-# unencoded — a Workers AI id contains `/` and `@`, and encoding them would
-# address something else. Default: /v1/systemone (oMLX's fixed path)
-# path = "/v1/systemone"
-# Model alias to ask. `score` defaults to the rubric's own alias; `groups`,
-# `doctor` and `models` default to clef-flash-oQ4e when neither this nor
-# `--model` is given. Changing the alias changes the rubric hash, and two runs
-# with different hashes are not comparable.
+# The address every request is posted to: a local oMLX by default, and any host
+# speaking the same decision API when something else is named here. It is the
+# whole address, path and all — there is no separate `path` key — and `{model}`
+# is replaced with the model name, verbatim and unencoded (a Workers AI address
+# contains `/` and `@`, and encoding them would address something else).
+# Default: http://127.0.0.1:8000/v1/systemone
+endpoint = "http://127.0.0.1:8000/v1/systemone"
+# Model name to ask: the request body's `model`, and the value `{model}` takes in
+# the address. `score` defaults to the rubric's own alias; `groups`, `doctor` and
+# `models` default to clef-flash-oQ4e when neither this nor `--model` is given.
+# Changing the name changes the rubric hash, and two runs with different hashes
+# are not comparable.
 # model = "clef-flash-oQ4e"
-# What the request body's `model` field says, when the server wants a selector
-# (`clef-flash` on Workers AI) rather than the model id. Default: the model,
-# whole — which is what oMLX, Vultr and DeepInfra read.
-# selector = "clef-flash"
 # The environment variable a bearer token is read from, for a server that wants
 # one. The variable wins over `token` below. Default: no token source, so no
 # Authorization header is sent.
@@ -160,10 +156,8 @@ endpoint = "http://127.0.0.1:8000"
 #
 # recipe begins
 # [server]
-# endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run"
-# path = "/{model}"
-# model = "@cf/cloudflare/clef-flash"
-# selector = "clef-flash"
+# endpoint = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}"
+# model = "clef-flash"
 # token_env = "CLOUDFLARE_API_TOKEN"
 # truncate = false
 #

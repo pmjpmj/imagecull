@@ -18,10 +18,8 @@ use tempfile::TempDir;
 /// vanished would show up as a missing assertion.
 const EVERY_KEY: &str = r#"
 [server]
-endpoint = "http://192.168.1.9:8000"
-path = "/{model}"
+endpoint = "http://192.168.1.9:8000/v1/systemone/{model}"
 model = "clef-27b-oQ4e"
-selector = "clef-27b"
 token_env = "CLOUDFLARE_API_TOKEN"
 token = "a-literal-secret"
 truncate = false
@@ -91,15 +89,10 @@ fn every_key_reaches_the_resolved_values() {
     let resolved = resolved(EVERY_KEY);
     assert_eq!(
         resolved.endpoint.as_deref(),
-        Some("http://192.168.1.9:8000")
+        Some("http://192.168.1.9:8000/v1/systemone/{model}"),
+        "the address is carried as written, not interpolated here"
     );
     assert_eq!(resolved.model.as_deref(), Some("clef-27b-oQ4e"));
-    assert_eq!(
-        resolved.path.as_deref(),
-        Some("/{model}"),
-        "a path template is carried as written, not interpolated here"
-    );
-    assert_eq!(resolved.selector.as_deref(), Some("clef-27b"));
     assert_eq!(
         resolved.token_env.as_deref(),
         Some("CLOUDFLARE_API_TOKEN"),
@@ -320,23 +313,46 @@ fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
 }
 
 #[test]
-fn a_path_template_says_what_a_placeholder_may_be() {
-    // The message is the only documentation a photographer gets at 2am, so it
-    // has to name the one placeholder a path may interpolate.
-    let message = error("[server]\npath = \"/v1/{frame}\"\n");
+fn an_address_with_no_path_is_a_config_like_any_other() {
+    // The address is posted to as written: `http://127.0.0.1:9000` means `/`, and
+    // a file is not refused for lacking a path. It is simply not an oMLX decision
+    // path, so `doctor` and `models` will not read it.
+    let effective = resolved("[server]\nendpoint = \"http://127.0.0.1:9000\"\n").settle(None);
+    assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
     assert!(
-        message.contains("{model}"),
-        "a rejected placeholder must say what is allowed: {message}"
+        !effective.asks_omlx(),
+        "`/` is not the path oMLX serves a decision on"
     );
 }
 
 #[test]
-fn a_path_template_with_no_model_is_legal_in_a_file() {
-    // `path = "/{model}"` with no model is fatal when the request is built,
+fn a_retired_path_key_names_where_it_went() {
+    // ADR 0019 folded the path into the address. The key is legal TOML, so the
+    // refusal has to be a sentence that names the replacement, not "unknown
+    // field" over a key the photographer copied from an older README.
+    let message = error("[server]\npath = \"/v1/systemone\"\n");
+    assert!(
+        message.contains("server.endpoint") && message.contains("/v1/systemone"),
+        "the refusal must name the key that replaces it: {message}"
+    );
+}
+
+#[test]
+fn a_retired_selector_key_names_where_it_went() {
+    let message = error("[server]\nselector = \"clef-flash\"\n");
+    assert!(
+        message.contains("server.model") && message.contains("endpoint"),
+        "the refusal must say which two values replace it: {message}"
+    );
+}
+
+#[test]
+fn an_address_that_needs_a_model_is_legal_in_a_file() {
+    // `endpoint = "…/{model}"` with no model is fatal when the request is built,
     // not here: `--model` can supply the model for one run, and a file cannot
-    // know that (ticket 04 owns that message).
-    let resolved = resolved("[server]\npath = \"/{model}\"\n");
-    assert_eq!(resolved.path.as_deref(), Some("/{model}"));
+    // know that.
+    let resolved = resolved("[server]\nendpoint = \"http://host/v1/{model}\"\n");
+    assert_eq!(resolved.endpoint.as_deref(), Some("http://host/v1/{model}"));
     assert_eq!(
         resolved.model, None,
         "the file said nothing about the model, and that is allowed"
@@ -353,11 +369,13 @@ fn a_token_env_says_that_it_names_a_variable() {
 }
 
 #[test]
-fn a_blank_selector_says_how_to_send_the_model_instead() {
+fn the_retired_wire_keys_are_refused_before_their_values_are_judged() {
+    // A selector is refused for being gone, not for being empty: the key that
+    // replaces it is `model`, and the remedy names both halves.
     let message = error("[server]\nselector = \"\"\n");
     assert!(
-        message.contains("delete the key"),
-        "an empty selector has a remedy, and the message must give it: {message}"
+        message.contains("server.model") && message.contains("endpoint"),
+        "a retired key has a remedy, and the message must give it: {message}"
     );
 }
 
@@ -652,16 +670,19 @@ fn the_file_wins_over_the_built_in_default() {
     assert_eq!(effective.score_params.max_edge, 1024);
     assert_eq!(effective.score_params.jpeg_quality, 72);
     assert_eq!(effective.timeout, 300);
-    assert_eq!(effective.endpoint, "http://192.168.1.9:8000");
     assert_eq!(
-        effective.path, "/{model}",
-        "the file's path template is what the run addresses"
+        effective.endpoint,
+        "http://192.168.1.9:8000/v1/systemone/{model}"
     );
     assert!(
         !effective.truncate,
         "and a file that turns oMLX's field off keeps it off"
     );
-    assert_eq!(effective.body_model(), Some("clef-27b"));
+    assert_eq!(
+        effective.model.as_deref(),
+        Some("clef-27b-oQ4e"),
+        "the model is what the body says and what {{model}} becomes"
+    );
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
     assert_eq!(
         effective.token.as_ref().map(Secret::as_str),
@@ -694,18 +715,13 @@ fn the_file_wins_over_the_built_in_default() {
 #[test]
 fn an_empty_source_settles_to_the_specs_defaults() {
     let effective = Resolved::default().settle(None);
-    assert_eq!(effective.endpoint, "http://127.0.0.1:8000");
+    assert_eq!(
+        effective.endpoint, "http://127.0.0.1:8000/v1/systemone",
+        "an absent address is the one oMLX serves a decision model on"
+    );
     assert_eq!(
         effective.model, None,
         "no alias means the rubric's own alias, which is part of its hash"
-    );
-    assert_eq!(
-        effective.path, "/v1/systemone",
-        "an absent path is the one oMLX serves a decision model on"
-    );
-    assert_eq!(
-        effective.selector, None,
-        "no selector: the model goes whole"
     );
     assert_eq!(effective.token_env, None, "and no variable is looked up");
     assert_eq!(effective.token, None, "and no token is sent");
@@ -747,84 +763,53 @@ fn an_empty_source_settles_to_the_specs_defaults() {
 
 #[test]
 fn a_server_nobody_named_still_posts_where_it_always_did() {
-    // The whole point of the five new keys: a file that says nothing about them
-    // addresses exactly the URL it addressed before they existed. The two
-    // halves come from their own constants, so neither can drift alone.
+    // The default address is oMLX's own: the origin constant plus the path
+    // constant, which is what keeps the default from drifting away from the
+    // path `is_omlx` recognises.
     let effective = Resolved::default().settle(None);
-    assert_eq!(effective.endpoint, imagecull_core::omlx::DEFAULT_ENDPOINT);
-    assert_eq!(effective.path, imagecull_core::systemone::PATH);
     assert_eq!(
-        format!("{}{}", effective.endpoint, effective.path),
+        effective.endpoint,
+        imagecull_core::systemone::DEFAULT_ENDPOINT
+    );
+    assert_eq!(
+        imagecull_core::systemone::DEFAULT_ENDPOINT,
         format!(
             "{}{}",
             imagecull_core::omlx::DEFAULT_ENDPOINT,
             imagecull_core::systemone::PATH
         ),
-        "the default request is the oMLX one, unchanged"
+        "the default address is oMLX on its port, on its decision path"
     );
-    assert_eq!(
-        effective.body_model(),
-        None,
-        "and no selector: no model at all"
-    );
+    assert_eq!(effective.model, None, "and no model at all");
 }
 
 #[test]
 fn only_the_omlx_path_is_the_one_doctor_and_models_can_read() {
     // `doctor` and `models` read oMLX's own probes, and no other server has
-    // them. The question is asked of the path template, so a server that keeps
-    // oMLX's fixed path is oMLX to these two commands and a server that puts
-    // its model in the path is not.
+    // them. The question is asked of the address, so a server that keeps oMLX's
+    // fixed path is oMLX to these two commands and a server that puts its model
+    // in the path is not.
     assert!(
         Resolved::default().settle(None).asks_omlx(),
-        "a file that names no path posts to oMLX's"
+        "a file that names no address posts to oMLX's"
     );
     assert!(
-        resolved("[server]\npath = \"/v1/systemone\"\n")
+        resolved("[server]\nendpoint = \"http://127.0.0.1:9000/v1/systemone\"\n")
             .settle(None)
             .asks_omlx(),
-        "naming oMLX's path explicitly is the same path"
+        "another port on oMLX's own path is still oMLX"
     );
     assert!(
-        !resolved("[server]\npath = \"/{model}\"\n")
+        !resolved("[server]\nendpoint = \"https://host/ai/run/{model}\"\n")
             .settle(None)
             .asks_omlx(),
-        "a template with a model in it is another server's addressing"
+        "an address with a model in it is another server's addressing"
     );
     assert!(
-        !resolved("[server]\npath = \"/v1/decisions\"\n")
+        !resolved("[server]\nendpoint = \"http://127.0.0.1:9000/v1/decisions\"\n")
             .settle(None)
             .asks_omlx(),
         "and so is any fixed path that is not oMLX's"
-    );
-}
-
-#[test]
-fn a_brace_that_never_closes_is_not_a_placeholder() {
-    // A placeholder is `{…}`. An unclosed brace is a typo the server will 404
-    // on, not a template this validator has anything to say about.
-    let resolved = resolved("[server]\npath = \"/v1/{model\"\n");
-    assert_eq!(resolved.path.as_deref(), Some("/v1/{model"));
-}
-
-#[test]
-fn a_body_selector_falls_back_to_the_model_whole() {
-    // oMLX and most hosts want the alias in `model`; Workers AI wants a
-    // selector. Only a file that named one gets one, and the fallback is what
-    // keeps every other server unchanged.
-    let effective = Resolved {
-        model: Some("clef-flash-oQ4e".to_string()),
-        ..Resolved::default()
-    }
-    .settle(None);
-    assert_eq!(
-        effective.body_model(),
-        Some("clef-flash-oQ4e"),
-        "no selector means the model id goes whole"
-    );
-    assert_eq!(
-        effective.selector, None,
-        "and the settled field stays empty"
     );
 }
 
@@ -838,8 +823,11 @@ fn a_key_no_flag_sets_survives_the_flags() {
             ..Resolved::default()
         })
         .settle(None);
-    assert_eq!(effective.path, "/{model}");
-    assert_eq!(effective.body_model(), Some("clef-27b"));
+    assert_eq!(
+        effective.endpoint,
+        "http://192.168.1.9:8000/v1/systemone/{model}"
+    );
+    assert_eq!(effective.model.as_deref(), Some("clef-27b-oQ4e"));
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
     assert_eq!(
         effective.token.as_ref().map(Secret::as_str),
@@ -1069,18 +1057,14 @@ fn the_workers_ai_recipe_in_the_example_is_a_config_that_parses() {
         .settle(None);
 
     assert_eq!(
-        effective.path, "/{model}",
-        "the id is the path on Workers AI"
+        effective.endpoint,
+        "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/{model}",
+        "the id's own prefix is part of the address"
     );
     assert_eq!(
         effective.model.as_deref(),
-        Some("@cf/cloudflare/clef-flash"),
-        "the path template needs the model id"
-    );
-    assert_eq!(
-        effective.selector.as_deref(),
         Some("clef-flash"),
-        "the body says the selector, not the id"
+        "the name fills {{model}} and is the body's model"
     );
     assert_eq!(effective.token_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
     assert!(
