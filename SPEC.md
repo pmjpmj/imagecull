@@ -341,12 +341,15 @@ red can be explained without the folder (ADR 0008):
 There is no `imagecull:stars`: the rating is `xmp:Rating`, and two properties
 holding one number is a disagreement waiting to happen. `xmpDM:pick` is never
 written, and `xmp:Rating=-1` (the destructive reject) is never written by this
-tool. `xmp:Label` is written in exactly one case — `Red` on a group's
-non-keepers, and only where the label is absent or was written by a previous run;
-a red this tool wrote is retired when a later run promotes the frame to keeper,
-and a label without `imagecull:labeledBy` is never touched
-([ADR 0008](docs/adr/0008-the-group-command-culls.md)). Every other label, on
-every other frame, stays the photographer's.
+tool. `xmp:Label` is written only by the group cull: `Green` on the keeper,
+`Red` on a non-keeper of a confident group, and `Yellow` on a non-keeper of a
+group below `pick_conf_floor`, and only where the label is absent or was written
+by a previous run. A mark this tool wrote is rewritten when a later verdict says
+something else, or retired when the frame is left in no group of two or more;
+a label without `imagecull:labeledBy` is never touched
+([ADR 0008](docs/adr/0008-the-group-command-culls.md),
+[ADR 0012](docs/adr/0012-green-marks-the-keeper-and-yellow-the-unsure.md)). Every
+other label, on every other frame, stays the photographer's.
 
 ### 9.2 Merge, not replace
 

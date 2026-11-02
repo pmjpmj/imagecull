@@ -300,8 +300,9 @@ fn one_request_decides_the_group_and_every_other_frame_wears_the_red() {
 
     let keeper = sidecar_of(shoot.path(), "DSC_0002.NEF");
     assert!(
-        !keeper.contains("xmp:Label"),
-        "the keeper's mark is its rating: this pass writes no label on it: {keeper}"
+        keeper.contains("xmp:Label=\"Green\"")
+            && keeper.contains("imagecull:labeledBy=\"imagecull\""),
+        "the keeper is green: the comparison's answer is the mark: {keeper}"
     );
     assert!(
         keeper.contains("imagecull:groupKeeper=\"true\"")
@@ -335,6 +336,7 @@ fn one_request_decides_the_group_and_every_other_frame_wears_the_red() {
             groups: 1,
             non_keepers: 2,
             red: 2,
+            green: 1,
             rounds: 1,
             verdicts: vec![cull::Verdict {
                 number: 1,
@@ -342,7 +344,10 @@ fn one_request_decides_the_group_and_every_other_frame_wears_the_red() {
                 size: 3,
                 keeper: Some("DSC_0002.NEF".to_string()),
                 red: 2,
+                yellow: 0,
+                green: 1,
                 unmarked: 0,
+                keeper_unmarked: 0,
                 confidence: 0.71,
                 rounds: 1,
                 failure: None,
@@ -528,7 +533,7 @@ fn a_losing_batchs_coin_flip_does_not_shadow_the_winners_path() {
 }
 
 #[test]
-fn a_group_the_model_was_unsure_about_is_marked_anyway_and_counted() {
+fn a_group_the_model_was_unsure_about_marks_its_losers_yellow_and_counts_it() {
     let shoot = two_frames();
     let decider = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.42))]);
     let recorded = quiet();
@@ -539,10 +544,75 @@ fn a_group_the_model_was_unsure_about_is_marked_anyway_and_counted() {
         culled.low_confidence, 1,
         "a near-tie is the common case for a group, and it is reported rather than suppressed"
     );
-    assert_eq!(culled.red, 1, "and the non-keeper is marked anyway");
+    assert_eq!(
+        culled.yellow, 1,
+        "the non-keeper is marked anyway, but yellow: a near-tie is worth a look before deleting"
+    );
+    assert_eq!(culled.red, 0, "a low-confidence group marks no frame red");
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Yellow\""),
+        "yellow says the comparison was unsure, and the frame is still the one it did not keep"
+    );
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0001.NEF").contains("xmp:Label=\"Green\""),
+        "the pick is green whatever the confidence, because it is still the pick"
+    );
+}
+
+#[test]
+fn a_confident_run_rewrites_the_yellow_an_unsure_run_wrote() {
+    let shoot = two_frames();
+    let unsure = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.42))]);
+    cull(shoot.path(), &unsure, &sidecar::Filesystem, &quiet());
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Yellow\""),
+        "the first run was a near-tie, so it marked the loser yellow"
+    );
+
+    let sure = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.82))]);
+    let culled = cull(shoot.path(), &sure, &sidecar::Filesystem, &quiet());
+
     assert!(
         sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Red\""),
-        "the mark is what a cull filters on, so 0.42 would have to be very wrong to withhold it"
+        "a later, confident run is free to rewrite the yellow it wrote as red"
+    );
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0001.NEF").contains("xmp:Label=\"Green\""),
+        "and the keeper stays green"
+    );
+    assert_eq!(culled.yellow, 0, "this run marked no frame yellow");
+    assert_eq!(culled.red, 1, "it marked one red");
+    assert_eq!(culled.green, 1);
+}
+
+#[test]
+fn a_keepers_photographer_label_is_left_alone_and_counted() {
+    let shoot = two_frames();
+    let yellow = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+                  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                  <rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                  xmp:Label=\"Yellow\"/></rdf:RDF></x:xmpmeta>";
+    fs::write(
+        sidecar::path_for(&shoot.path().join("DSC_0001.NEF")),
+        yellow,
+    )
+    .expect("a sidecar of the photographer's");
+    let decider = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.80))]);
+    let culled = cull(shoot.path(), &decider, &sidecar::Filesystem, &quiet());
+
+    let keeper = sidecar_of(shoot.path(), "DSC_0001.NEF");
+    assert!(
+        keeper.contains("xmp:Label=\"Yellow\"") && !keeper.contains("imagecull:labeledBy"),
+        "a photographer's colour is never overwritten, not even to make the pick green: {keeper}"
+    );
+    assert_eq!(
+        culled.keeper_unmarked, 1,
+        "the keeper the run could not colour is counted, so a grid without a green is explained"
+    );
+    assert_eq!(culled.green, 0);
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Red\""),
+        "and the frame that lost is still marked"
     );
 }
 
@@ -670,13 +740,17 @@ fn a_red_this_tool_did_not_write_is_the_photographers_and_is_left_alone() {
 }
 
 #[test]
-fn a_promoted_keeper_loses_the_red_this_tool_wrote() {
+fn a_promoted_keeper_turns_green_and_the_frame_that_lost_turns_red() {
     let shoot = two_frames();
     let first = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("2", 0.62))]);
     cull(shoot.path(), &first, &sidecar::Filesystem, &quiet());
     assert!(
         sidecar_of(shoot.path(), "DSC_0001.NEF").contains("xmp:Label=\"Red\""),
         "the first cull made the first frame red"
+    );
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Green\""),
+        "and the first keeper green"
     );
 
     let second = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.68))]);
@@ -685,18 +759,23 @@ fn a_promoted_keeper_loses_the_red_this_tool_wrote() {
 
     let promoted = sidecar_of(shoot.path(), "DSC_0001.NEF");
     assert!(
-        !promoted.contains("xmp:Label") && !promoted.contains("imagecull:labeledBy"),
-        "the red this tool wrote is retired, so the keeper is not the frame a cull filters out: \
+        promoted.contains("xmp:Label=\"Green\"")
+            && promoted.contains("imagecull:labeledBy=\"imagecull\""),
+        "the red this tool wrote is rewritten as green, so the keeper is the frame a cull keeps: \
          {promoted}"
     );
     assert!(
         promoted.contains("imagecull:groupKeeper=\"true\""),
         "and the verdict says what this run decided: {promoted}"
     );
-    assert_eq!(culled.retired, 1, "the retirement is counted");
+    assert_eq!(culled.green, 1, "the promotion is counted green");
+    assert_eq!(
+        culled.retired, 0,
+        "a decided group rewrites a colour, it does not remove one"
+    );
     assert!(
         sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Red\""),
-        "and the frame that lost this time is marked now"
+        "and the frame that lost this time is red now"
     );
 }
 

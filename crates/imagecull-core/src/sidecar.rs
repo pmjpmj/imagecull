@@ -39,15 +39,32 @@ pub const RDF_NAMESPACE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 /// The opening tag whose attributes we read and extend.
 const DESCRIPTION: &str = "<rdf:Description";
 
-/// The label written on a frame that lost its group.
+/// The label written on a frame that lost its group to a verdict the comparison
+/// was sure of.
 ///
-/// Red is the only label this tool ever writes: it says "not this group's
-/// keeper", never "bad". A 4★ frame that lost to a 5★ is correctly red.
+/// Red says "not this group's keeper", never "bad". A 4★ frame that lost to a
+/// 5★ is correctly red.
 pub const RED: &str = "Red";
+
+/// The label written on a frame that lost its group to a verdict below the
+/// confidence floor.
+///
+/// Yellow says the same thing Red does — "not this group's keeper" — and adds
+/// one: the comparison was a near-tie, so the photographer should look before
+/// deleting. It is this tool's label only when `imagecull:labeledBy` proves it;
+/// a photographer's Yellow is never touched.
+pub const YELLOW: &str = "Yellow";
+
+/// The label written on a group's keeper.
+///
+/// Green is the answer to the comparison, so the frame a cull keeps is the frame
+/// the grid shows as green. Like every label this tool writes, it is only ours
+/// where the colour is absent or already ours.
+pub const GREEN: &str = "Green";
 
 /// The value of `imagecull:labeledBy` on a frame whose label this tool wrote:
 /// the proof a later run needs before it may touch that label, and the only
-/// thing that makes a red attributable to us rather than to the photographer.
+/// thing that makes a mark attributable to us rather than to the photographer.
 pub const LABELED_BY: &str = "imagecull";
 
 /// The name the proof that a label is ours is written under.
@@ -76,7 +93,7 @@ fn written() -> &'static [&'static str] {
 
 /// The verdict names a mark write may retire: the ones it owns, except
 /// `imagecull:labeledBy`, which is written whenever a label is written and left
-/// in place whenever the label is left in place — a red without it can never be
+/// in place whenever the label is left in place — a mark without it can never be
 /// attributed to us again.
 fn retirable_by_mark() -> &'static [&'static str] {
     static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -146,13 +163,13 @@ pub struct Properties {
 ///
 /// The verdict is not a copy of the label: the label can be missing (the frame's
 /// colour is not ours to touch) or carry the photographer's own choice, and the
-/// verdict still exists. That is what lets a summary say `12 red, 9 marked, 3
-/// unmarked` about one grouping.
+/// verdict still exists. That is what lets a summary say `12 red, 2 yellow, 9
+/// green, 3 unmarked` about one grouping.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mark {
     /// The label this write puts on the frame, or `None` when it writes none:
-    /// on the keeper, whose rating is its mark, and on a frame whose colour
-    /// belongs to the photographer.
+    /// on a keeper whose colour belongs to the photographer, and on a non-keeper
+    /// whose colour does too.
     pub label: Option<&'static str>,
     /// Whether this frame is the group's keeper.
     pub keeper: bool,
@@ -173,10 +190,10 @@ pub struct Mark {
     /// in batches.
     pub rounds: usize,
     /// Whether this write removes the label a previous run of this tool put
-    /// here: the promotion case, where a red would otherwise sit on the group's
-    /// keeper forever.
+    /// here: the retirement case, where a frame is left in no group of two or
+    /// more and the mark would otherwise outlive the comparison.
     ///
-    /// Only a label carrying our `labeledBy` proof is ever removed; a red with
+    /// Only a label carrying our `labeledBy` proof is ever removed; a label with
     /// no proof is the photographer's, whatever this flag says.
     pub retire_label: bool,
 }
@@ -233,7 +250,8 @@ pub fn has_verdict(document: &str) -> bool {
 }
 
 /// The document to write when a frame keeps no group's verdict: every property
-/// a verdict owns is retired, and the red this tool wrote goes with them.
+/// a verdict owns is retired, and the mark — red, yellow or green — this tool
+/// wrote goes with them.
 ///
 /// A frame that was a group's non-keeper and is now alone in its group would
 /// otherwise keep a red for a comparison that no longer exists. Nothing the
@@ -250,7 +268,7 @@ pub fn retire_label(document: &str) -> Result<String> {
 
 /// Whether the label this document carries was written by this tool: the proof
 /// `labeledBy` exists to give, asked in one place so a write and a removal
-/// cannot disagree about whose red it is.
+/// cannot disagree about whose mark it is.
 fn label_is_ours(document: &str) -> bool {
     existing_label(document).is_some_and(|label| label.ours)
 }
@@ -903,11 +921,11 @@ pub struct ExistingLabel {
 }
 
 impl ExistingLabel {
-    /// Whether this is the `Red` mark this tool wrote: the one label a cull may
-    /// rewrite, and the only one it may ever remove. A red without our proof is
-    /// the photographer's.
-    pub fn is_ours_red(&self) -> bool {
-        self.ours && self.value == RED
+    /// Whether this label is one this tool wrote: the proof that lets a later
+    /// run rewrite or remove it. A label without our proof is the
+    /// photographer's, whatever its colour.
+    pub fn is_ours(&self) -> bool {
+        self.ours
     }
 }
 

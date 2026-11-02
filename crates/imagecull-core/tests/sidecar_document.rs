@@ -196,7 +196,7 @@ fn a_frame_with_no_sidecar_yields_a_document_carrying_only_our_properties() {
 fn mark(label: Option<&'static str>) -> sidecar::Mark {
     sidecar::Mark {
         label,
-        keeper: label.is_none(),
+        keeper: label.is_none() || label == Some(sidecar::GREEN),
         group_start: "2026-11-02T10:00:03.25".to_string(),
         group_size: 4,
         grouping_hash: "2c7d90ab1f".to_string(),
@@ -236,7 +236,35 @@ fn a_non_keepers_verdict_writes_the_red_and_the_facts_that_explain_it() {
 }
 
 #[test]
-fn a_keepers_verdict_leaves_the_red_a_previous_run_wrote_exactly_where_it_was() {
+fn a_keepers_verdict_turns_the_red_a_previous_run_wrote_green() {
+    let rated = sidecar::render(None, &properties()).expect("a rated document");
+    let marked =
+        sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
+
+    let promoted =
+        sidecar::render_mark(&marked, &mark(Some(sidecar::GREEN))).expect("a promoted document");
+
+    assert!(
+        promoted.contains("xmp:Label=\"Green\"") && !promoted.contains("xmp:Label=\"Red\""),
+        "the keeper is green, and the red this tool wrote is replaced in place: {promoted}"
+    );
+    assert!(
+        promoted.contains("imagecull:labeledBy=\"imagecull\""),
+        "the proof stays, because this tool still owns the colour: {promoted}"
+    );
+    assert!(
+        promoted.contains("imagecull:groupKeeper=\"true\""),
+        "the verdict is not the label: the keeper's groupKeeper is true: {promoted}"
+    );
+    assert_eq!(
+        promoted.matches("imagecull:groupKeeper=").count(),
+        1,
+        "rewritten in place, not appended twice: {promoted}"
+    );
+}
+
+#[test]
+fn a_verdict_that_writes_no_label_leaves_the_colour_where_it_was() {
     let rated = sidecar::render(None, &properties()).expect("a rated document");
     let marked =
         sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");
@@ -245,7 +273,8 @@ fn a_keepers_verdict_leaves_the_red_a_previous_run_wrote_exactly_where_it_was() 
 
     assert!(
         promoted.contains("xmp:Label=\"Red\""),
-        "a label is never removed, not even one this tool wrote: {promoted}"
+        "a verdict that writes no label removes none: a keeper whose colour is not ours to write \
+         keeps what is there: {promoted}"
     );
     assert!(
         promoted.contains("imagecull:labeledBy=\"imagecull\""),
@@ -337,7 +366,7 @@ fn a_verdict_names_how_many_rounds_it_took() {
 }
 
 #[test]
-fn a_promoted_keeper_loses_the_red_this_tool_wrote() {
+fn a_retired_verdict_loses_the_red_this_tool_wrote() {
     let rated = sidecar::render(None, &properties()).expect("a rated document");
     let marked =
         sidecar::render_mark(&rated, &mark(Some(sidecar::RED))).expect("a marked document");

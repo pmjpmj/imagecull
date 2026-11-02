@@ -44,10 +44,11 @@
 //! Measured on a real three-frame group: the pick swapped between orderings at
 //! 0.55 against 0.43, and between preview sizes. A confidence floor would
 //! therefore go silent on exactly the groups this exists for. Instead the
-//! confidence is recorded beside the verdict on every member, and a group below
-//! [`FLOOR`] is counted on the summary line: the photographer is told which
-//! groups the model was unsure about, rather than being handed a filter that
-//! quietly omits them.
+//! confidence is recorded beside the verdict on every member, a group below
+//! [`FLOOR`] is counted on the summary line, and its non-keepers are marked
+//! yellow instead of red: the photographer is told which groups the model was
+//! unsure about, rather than being handed a filter that quietly omits them or a
+//! red that claims a certainty the run does not have.
 
 use serde_json::Value;
 
@@ -63,8 +64,9 @@ pub const EDGE: u32 = 512;
 pub const MAX: usize = 20;
 
 /// The confidence under which a group's verdict is reported as a low-confidence
-/// one — and still written. Measured near-ties sit at 0.55 against 0.43, so a
-/// gate here would silence the feature rather than improve it.
+/// one — and still written, on non-keepers as Yellow rather than Red. Measured
+/// near-ties sit at 0.55 against 0.43, so a gate here would silence the feature
+/// rather than improve it.
 pub const FLOOR: f64 = 0.60;
 
 /// The id of the question a comparison asks.
@@ -156,7 +158,8 @@ pub struct Budget {
     pub edge: u32,
     /// The most previews one request carries.
     pub max: usize,
-    /// The confidence below which a group is counted as low-confidence.
+    /// The confidence below which a group is counted as low-confidence and its
+    /// non-keepers are marked yellow rather than red.
     pub floor: f64,
 }
 

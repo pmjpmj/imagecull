@@ -1,6 +1,9 @@
 # 0008 — The group command culls; `score` rates
 
-Status: accepted · 2026-11-23 · Feature `burst-grouping-v1` (ticket 03) ·
+Status: accepted · 2026-11-23 · superseded in part by
+[ADR 0012](0012-green-marks-the-keeper-and-yellow-the-unsure.md), which writes
+Green on the keeper and Yellow on a low-confidence group's non-keepers ·
+Feature `burst-grouping-v1` (ticket 03) ·
 supersedes [ADR 0007](0007-the-red-label-marks-the-non-keepers.md)'s command
 split, its rating-based shortlist and its "never remove a label" rule ·
 keeps ADR 0007's label semantics and ADR 0006's rating-in-the-sidecar decision

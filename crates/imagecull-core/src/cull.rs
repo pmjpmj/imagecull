@@ -1,12 +1,14 @@
-//! The cull: every group of a shoot, the keeper clef chose, and the red on
-//! everyone else.
+//! The cull: every group of a shoot, the keeper clef chose, and the green or
+//! yellow/red mark on everyone else.
 //!
 //! `imagecull groups` finds the groups and measures them; this module is what
 //! turns that plan into a decision. One comparative request per round asks which
-//! frame of a group to keep, the answer names one, and every other frame of the
-//! group gets the red mark a cull can filter on. A group of one is asked nothing
-//! and marked nothing — but a red this tool wrote on a frame that is no longer in
-//! a group is retired, because the group it lost does not exist any more.
+//! frame of a group to keep, the answer names one, and the group is marked with
+//! that answer: the keeper green, every other frame red — or yellow when the
+//! comparison was below the confidence floor, because a near-tie is worth a look
+//! before it is deleted. A group of one is asked nothing and marked nothing — but
+//! a mark this tool wrote on a frame that is no longer in a group is retired,
+//! because the group it lost does not exist any more.
 //!
 //! # What it reads and what it never writes
 //!
@@ -19,12 +21,12 @@
 //!
 //! # Whose label it is
 //!
-//! The rules of ADR 0007 hold: a photographer's Yellow is never overwritten, a
+//! The rules of ADR 0007 hold: a photographer's colour is never overwritten, a
 //! label without our `labeledBy` proof is never removed, and a group nothing
-//! could decide marks nothing. ADR 0008 adds the one exception: a red this tool
-//! wrote is retired when a later run promotes that frame to its group's keeper,
-//! because the cull is repeatable and a red on the keeper is the one thing it
-//! must not leave.
+//! could decide marks nothing. ADR 0008 adds the one exception: a mark this tool
+//! wrote is rewritten when a later run changes the verdict, because the cull is
+//! repeatable and a mark that says the keeper lost is the one thing it must not
+//! leave.
 //!
 //! # Nothing here knows a terminal or a command line
 //!
@@ -47,22 +49,30 @@ use crate::sidecar::{self, Failure, Mark, Prior, Writer};
 /// What one cull pass did, group by group and in total.
 ///
 /// Every count counts frames except `groups`, `rounds`, `low_confidence` and
-/// `undecided`, which count groups or requests. The three that describe
-/// non-keepers — `non_keepers`, `red` and `unmarked` — count the same
-/// population, so `non_keepers` is `red` plus `unmarked` and the summary's
-/// arithmetic adds up.
+/// `undecided`, which count groups or requests. The counts that describe
+/// non-keepers — `non_keepers`, `red`, `yellow` and `unmarked` — count the same
+/// population, so `non_keepers` is `red` plus `yellow` plus `unmarked` and the
+/// summary's arithmetic adds up. `green` and `keeper_unmarked` count the keepers
+/// of those same groups.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Culled {
     /// How many groups of two or more frames were judged.
     pub groups: usize,
     /// How many non-keepers carry this run's verdict.
     pub non_keepers: usize,
-    /// How many of them are red.
+    /// How many of them are red: they lost to a verdict at or above the floor.
     pub red: usize,
+    /// How many of them are yellow: they lost to a verdict below the floor. Every
+    /// yellow is a near-tie the photographer may want to review before deleting.
+    pub yellow: usize,
+    /// How many keepers are green.
+    pub green: usize,
     /// How many were left unmarked because the label on the frame is not ours to
     /// write.
     pub unmarked: usize,
-    /// How many keepers lost the red an earlier run of this tool wrote.
+    /// How many keepers were left unmarked for the same reason.
+    pub keeper_unmarked: usize,
+    /// How many frames that lost their group had a mark this tool wrote removed.
     pub retired: usize,
     /// How many keepers still wear a red this tool did not write.
     pub stale_reds: usize,
@@ -93,10 +103,18 @@ pub struct Verdict {
     /// The frame clef chose, by the name the folder knows it by; `None` when the
     /// group is undecided.
     pub keeper: Option<String>,
-    /// How many non-keepers this group marked.
+    /// How many non-keepers this group marked red.
     pub red: usize,
+    /// How many non-keepers it marked yellow, because the verdict was below the
+    /// confidence floor.
+    pub yellow: usize,
+    /// How many keepers it marked green; 1 for a decided group whose colour was
+    /// ours to write, 0 when the photographer's label was left alone.
+    pub green: usize,
     /// How many it left to the photographer.
     pub unmarked: usize,
+    /// How many keepers it left to the photographer, for the same reason.
+    pub keeper_unmarked: usize,
     /// The shakiest call the verdict depended on.
     pub confidence: f64,
     /// How many comparative requests stood between the group and this verdict.
@@ -178,7 +196,10 @@ impl Culled {
         self.groups += other.groups;
         self.non_keepers += other.non_keepers;
         self.red += other.red;
+        self.yellow += other.yellow;
+        self.green += other.green;
         self.unmarked += other.unmarked;
+        self.keeper_unmarked += other.keeper_unmarked;
         self.retired += other.retired;
         self.stale_reds += other.stale_reds;
         self.low_confidence += other.low_confidence;
@@ -459,7 +480,10 @@ fn judge_group(
         size: row.frames.len(),
         keeper: None,
         red: 0,
+        yellow: 0,
+        green: 0,
         unmarked: 0,
+        keeper_unmarked: 0,
         confidence: 1.0,
         rounds: 0,
         failure: None,
@@ -480,7 +504,8 @@ fn judge_group(
             return;
         }
     };
-    if verdict.confidence < config.budget.floor {
+    let low_confidence = verdict.confidence < config.budget.floor;
+    if low_confidence {
         culled.low_confidence += 1;
     }
     verdict.keeper = Some(name(&row.frames[keeper]));
@@ -574,7 +599,9 @@ fn compare_batch(
 }
 
 /// Write the verdict beside every frame of a decided group, keeper and
-/// non-keeper alike.
+/// non-keeper alike. The keeper is green, and a non-keeper of a low-confidence
+/// group is yellow rather than red: the comparison was a near-tie, and a frame
+/// that may be the better picture should not be filtered out as if it were sure.
 fn mark_group(
     row: &GroupRow<'_>,
     keeper: usize,
@@ -584,6 +611,7 @@ fn mark_group(
     culled: &mut Culled,
     verdict: &mut Verdict,
 ) {
+    let low_confidence = verdict.confidence < config.budget.floor;
     let picked_at = crate::time::now_rfc3339();
     for (place, frame) in row.frames.iter().enumerate() {
         let existing = match sidecar::read(&frame.source.path) {
@@ -612,7 +640,7 @@ fn mark_group(
             continue;
         }
         let keeper_here = place == keeper;
-        let marking = Marking::of(keeper_here, existing.as_deref());
+        let marking = Marking::of(keeper_here, low_confidence, existing.as_deref());
         let mark = Mark {
             label: marking.label(),
             keeper: keeper_here,
@@ -625,7 +653,9 @@ fn mark_group(
             pick_conf: verdict.confidence,
             picked_at: picked_at.clone(),
             rounds: verdict.rounds,
-            retire_label: marking.retires_label(),
+            // A decided group rewrites its members' colours; nothing is removed
+            // outright. Retirement is the singleton path's business.
+            retire_label: false,
         };
         let document = match sidecar::mark_document(existing.as_deref(), &mark) {
             Ok(document) => document,
@@ -645,22 +675,34 @@ fn mark_group(
                 culled.red += 1;
                 verdict.red += 1;
             }
+            Marking::Yellow => {
+                culled.non_keepers += 1;
+                culled.yellow += 1;
+                verdict.yellow += 1;
+            }
+            Marking::Green => {
+                culled.green += 1;
+                verdict.green += 1;
+            }
             Marking::Unmarked => {
                 culled.non_keepers += 1;
                 culled.unmarked += 1;
                 verdict.unmarked += 1;
             }
-            Marking::Retired => culled.retired += 1,
+            Marking::KeeperUnmarked => {
+                culled.keeper_unmarked += 1;
+                verdict.keeper_unmarked += 1;
+            }
             Marking::StaleRed => culled.stale_reds += 1,
-            Marking::Keeper => {}
         }
     }
 }
 
 /// A frame that is no longer in any group: the verdict a previous run wrote
-/// about a comparison that no longer exists is retired, and so is the red.
+/// about a comparison that no longer exists is retired, and so is the mark —
+/// red, yellow or green — this tool wrote.
 ///
-/// Nothing is written unless the sidecar carries a verdict or a red this tool
+/// Nothing is written unless the sidecar carries a verdict or a mark this tool
 /// wrote, so a folder of singletons costs one read per frame and no write.
 fn retire_singleton(
     frame: &Planned,
@@ -672,8 +714,8 @@ fn retire_singleton(
     let Ok(Some(existing)) = sidecar::read(&frame.source.path) else {
         return;
     };
-    let ours_red = sidecar::existing_label(&existing).is_some_and(|label| label.is_ours_red());
-    if !ours_red && !sidecar::has_verdict(&existing) {
+    let ours_mark = sidecar::existing_label(&existing).is_some_and(|label| label.is_ours());
+    if !ours_mark && !sidecar::has_verdict(&existing) {
         return;
     }
     if sidecar::is_foreign(&existing) && !config.allow_foreign {
@@ -692,7 +734,7 @@ fn retire_singleton(
         &document,
         Prior::earlier(Some(&existing)),
     ) {
-        Ok(_) if ours_red => culled.retired += 1,
+        Ok(_) if ours_mark => culled.retired += 1,
         Ok(_) => {}
         Err(error) => culled.unwritten(frame, error.to_string(), watcher),
     }
@@ -706,43 +748,49 @@ const FOREIGN: &str =
 /// What writing a frame's verdict does to its colour label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Marking {
-    /// The label was written, under this tool's name: the frame is red.
+    /// A non-keeper that lost to a verdict the comparison was sure of: red.
     Red,
-    /// The label is the photographer's, so nothing was written and the frame
-    /// stays out of the delete set.
+    /// A non-keeper that lost to a verdict below the confidence floor: yellow,
+    /// so the photographer reviews the near-tie before deleting.
+    Yellow,
+    /// The keeper: green, the answer to the comparison.
+    Green,
+    /// A non-keeper whose colour is the photographer's, so nothing was written
+    /// and the frame stays out of the delete set.
     Unmarked,
-    /// The keeper, whose red this tool wrote and this write removes.
-    Retired,
     /// The keeper, still wearing a red this tool did not write.
     StaleRed,
-    /// The keeper, whose mark is its rating.
-    Keeper,
+    /// The keeper, wearing a colour this tool did not write, so it cannot be
+    /// made green.
+    KeeperUnmarked,
 }
 
 impl Marking {
-    /// What this frame's verdict does to its label, from the two facts that
-    /// decide it: whether the frame is the keeper, and whose colour is there.
-    fn of(keeper: bool, existing: Option<&str>) -> Marking {
+    /// What this frame's verdict does to its label, from the facts that decide
+    /// it: whether the frame is the keeper, whether the verdict was below the
+    /// floor, and whose colour is there.
+    fn of(keeper: bool, low_confidence: bool, existing: Option<&str>) -> Marking {
         let carried = existing.and_then(sidecar::existing_label);
-        let ours = carried
-            .as_ref()
-            .is_some_and(|label| label.ours && label.value == sidecar::RED);
-        let any_red = carried
-            .as_ref()
-            .is_some_and(|label| label.value == sidecar::RED);
+        let ours_to_write = sidecar::label_is_ours_to_write(existing);
         if keeper {
-            return if ours {
-                Marking::Retired
-            } else if any_red {
+            return if ours_to_write {
+                Marking::Green
+            } else if carried
+                .as_ref()
+                .is_some_and(|label| label.value == sidecar::RED)
+            {
                 Marking::StaleRed
             } else {
-                Marking::Keeper
+                Marking::KeeperUnmarked
             };
         }
-        if sidecar::label_is_ours_to_write(existing) {
-            Marking::Red
+        if !ours_to_write {
+            return Marking::Unmarked;
+        }
+        if low_confidence {
+            Marking::Yellow
         } else {
-            Marking::Unmarked
+            Marking::Red
         }
     }
 
@@ -750,13 +798,10 @@ impl Marking {
     fn label(self) -> Option<&'static str> {
         match self {
             Marking::Red => Some(sidecar::RED),
-            Marking::Unmarked | Marking::Retired | Marking::StaleRed | Marking::Keeper => None,
+            Marking::Yellow => Some(sidecar::YELLOW),
+            Marking::Green => Some(sidecar::GREEN),
+            Marking::Unmarked | Marking::StaleRed | Marking::KeeperUnmarked => None,
         }
-    }
-
-    /// Whether this verdict removes a red this tool wrote.
-    fn retires_label(self) -> bool {
-        matches!(self, Marking::Retired)
     }
 }
 
