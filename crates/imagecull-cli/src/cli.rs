@@ -293,6 +293,16 @@ pub struct GroupsArgs {
     #[arg(short = 'j', long, value_name = "N", value_parser = parallel_jobs)]
     pub jobs: Option<usize>,
 
+    /// How many groups to cull at once (default 4); different groups' requests
+    /// may be in flight together
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parallel_jobs,
+        conflicts_with = "no_cull"
+    )]
+    pub cull_jobs: Option<usize>,
+
     /// Group and measure only: make no request and write no label
     #[arg(long, conflicts_with = "print_sidecars")]
     pub no_cull: bool,
@@ -321,8 +331,8 @@ impl GroupsArgs {
     /// `--recursive` is included even though a run's breadth is the file's
     /// subject and not the invocation's: the flag takes an explicit `false`, so
     /// a shoot config that turns recursion on can still be turned off for one
-    /// run. `--limit`, `--out`, `--jobs` and the cull/console flags describe the
-    /// invocation and stay out.
+    /// run. `--limit`, `--out`, `--jobs`, `--cull-jobs` and the cull/console
+    /// flags describe the invocation and stay out.
     pub fn overrides(&self) -> Resolved {
         Resolved {
             recursive: self.recursive,
@@ -851,6 +861,7 @@ mod tests {
         assert_eq!(args.group_similarity, None);
         assert_eq!(args.group_exposure_stops, None);
         assert_eq!(args.jobs, None);
+        assert_eq!(args.cull_jobs, None);
 
         let options = groups_options(&args);
         assert_eq!(options.thresholds, Thresholds::default());
@@ -877,6 +888,8 @@ mod tests {
             "1.5",
             "--jobs",
             "4",
+            "--cull-jobs",
+            "2",
         ]) else {
             panic!("not a groups command");
         };
@@ -891,6 +904,7 @@ mod tests {
         assert!(options.scan.recursive);
         assert_eq!(options.scan.limit, Some(40));
         assert_eq!(options.jobs, Some(4), "the degree is the flag's");
+        assert_eq!(args.cull_jobs, Some(2), "the cull has its own degree");
         assert_eq!(args.out, PathBuf::from("march-groups.csv"));
     }
 
@@ -968,6 +982,7 @@ mod tests {
             &["groups", "shoot", "--group-exposure-stops", "nan"][..],
             &["groups", "shoot", "--limit", "0"][..],
             &["groups", "shoot", "--jobs", "0"][..],
+            &["groups", "shoot", "--cull-jobs", "0"][..],
         ] {
             assert!(
                 parse_result(arguments).is_err(),
@@ -1019,6 +1034,10 @@ mod tests {
         assert!(
             parse_result(&["groups", "shoot", "--no-cull", "--print-sidecars"]).is_err(),
             "a pass that asks nothing cannot preview what an answer would write"
+        );
+        assert!(
+            parse_result(&["groups", "shoot", "--no-cull", "--cull-jobs", "2"]).is_err(),
+            "a pass that does not cull has no cull degree"
         );
         assert!(
             parse_result(&["groups", "shoot", "--print-sidecars", "--quiet"]).is_err(),

@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use imagecull_core::error::{Error, Result};
 use imagecull_core::keeper::Comparison;
@@ -191,6 +191,40 @@ impl Decider for Scripted {
             document,
             client_latency_ms: self.latency_ms,
         })
+    }
+}
+
+/// A [`Scripted`] behind a lock: the concurrent cull needs a `Sync` decider, and
+/// the script itself is single-threaded.
+///
+/// Every request is serialised by the lock, so this wrapper can never report two
+/// requests in flight; a test that wants to observe overlap brings its own
+/// decider with atomics instead.
+pub struct Guarded(Mutex<Scripted>);
+
+impl Guarded {
+    /// Wrap a script for a pass that runs groups on several threads.
+    pub fn new(scripted: Scripted) -> Guarded {
+        Guarded(Mutex::new(scripted))
+    }
+
+    /// The script, for the assertions a test makes after the pass.
+    pub fn get(&self) -> std::sync::MutexGuard<'_, Scripted> {
+        self.0.lock().expect("a decider lock")
+    }
+}
+
+impl Decider for Guarded {
+    fn decide(&self, request: &Request<'_>) -> Result<Response> {
+        self.get().decide(request)
+    }
+
+    fn compare(&self, comparison: &Comparison) -> Result<Response> {
+        self.get().compare(comparison)
+    }
+
+    fn preflight(&self) -> Result<()> {
+        self.get().preflight()
     }
 }
 

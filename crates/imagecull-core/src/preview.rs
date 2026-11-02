@@ -74,6 +74,25 @@ pub fn read(path: &Path) -> Result<(Embedded, raw_files::Metadata)> {
     Ok((embedded, raw.metadata().clone()))
 }
 
+/// What a camera recorded about the frame, read without touching the preview
+/// bytes.
+///
+/// The grouping pass needs a frame's capture time before it can place the frame
+/// in capture order, and that is known from the header alone. A streaming pass
+/// reads every frame's metadata first (this call), then reads previews in the
+/// scan's order while consuming them in that capture order, so a group can be
+/// finished and culled while later previews are still being decoded. Opening a
+/// file twice is the price of that overlap; extracting the preview is the
+/// expensive half by a wide margin.
+///
+/// The error is the one `read` would give for the same file, so a frame that
+/// cannot be opened fails the same way whichever pass sees it first.
+pub fn metadata(path: &Path) -> Result<raw_files::Metadata> {
+    let name = file_name(path);
+    let raw = RawFile::open(path).map_err(|error| unreadable(path, &name, &error))?;
+    Ok(raw.metadata().clone())
+}
+
 /// The `unreadable` error for a file the extractor cannot open.
 ///
 /// A `.dng` is the one case that needs more than the reader's own words: the

@@ -15,17 +15,20 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use image::RgbImage;
 use imagecull_core::cull::{self, Culled, Event, Watcher};
 use imagecull_core::error::Error;
 use imagecull_core::ingest::ScanOptions;
 use imagecull_core::preprocess::Params;
-use imagecull_core::scoring::RetryPolicy;
+use imagecull_core::scoring::{Decider, Request, Response, RetryPolicy};
 use imagecull_core::sidecar::{Prior, Writer, Written};
 use imagecull_core::{ErrorKind, group, keeper, sidecar};
 use support::ExifFacts;
-use support::decider::{Scripted, keeper};
+use support::decider::{Guarded, Scripted, keeper};
 use support::scenes;
 
 /// The size the group tests draw at: above the comparison edge, so a comparison
@@ -829,5 +832,279 @@ fn a_server_that_fails_the_preflight_marks_nothing() {
     assert!(
         !shoot.path().join("DSC_0001.xmp").exists(),
         "nothing is marked before the server has shown it can answer"
+    );
+}
+
+/// A cull config for a grouping hash, with the measured budget and no waiting.
+fn stream_config(hash: &str) -> cull::Config<'_> {
+    cull::Config {
+        model: "clef-flash-oQ4e",
+        shoot_context: None,
+        budget: keeper::Budget::default(),
+        jpeg_quality: Params::default().jpeg_quality,
+        grouping_hash: hash,
+        allow_foreign: false,
+        retry: RetryPolicy::without_waiting(),
+    }
+}
+
+#[test]
+fn a_streamed_cull_judges_every_group_and_writes_its_verdicts() {
+    let shoot = shoot_of(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.0, 5, "10"),
+        frame("DSC_0004.NEF", 0.2, 5, "20"),
+    ]);
+    let decider = Guarded::new(
+        Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.9)), Ok(keeper("1", 0.9))]),
+    );
+    let recorded = quiet();
+    let hash = group::grouping_hash(&group::Thresholds::default());
+    let config = stream_config(&hash);
+
+    let streamed = cull::run_streaming(
+        &config,
+        &decider,
+        &sidecar::Filesystem,
+        &recorded,
+        2,
+        |sink| {
+            group::stream_with(
+                shoot.path(),
+                &group::Options {
+                    jobs: Some(1),
+                    ..group::Options::default()
+                },
+                &imagecull_core::progress::Silent,
+                sink,
+            )
+        },
+    )
+    .expect("a streamed cull");
+
+    assert!(streamed.fatal.is_none());
+    assert_eq!(streamed.plan.groups, 2);
+    assert_eq!(streamed.culled.groups, 2, "both groups were judged");
+    assert_eq!(streamed.culled.red, 2, "one non-keeper per group");
+    let verdicts = &streamed.culled.verdicts;
+    assert_eq!(verdicts.len(), 2);
+    assert_eq!(
+        verdicts
+            .iter()
+            .map(|verdict| verdict.number)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the report's verdicts are in group order however the workers finished"
+    );
+    assert_eq!(decider.get().compared().len(), 2, "one request per group");
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0002.NEF").contains("xmp:Label=\"Red\""),
+        "the non-keeper of the first group wears the red"
+    );
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0004.NEF").contains("xmp:Label=\"Red\""),
+        "the non-keeper of the second group wears the red"
+    );
+}
+
+#[test]
+fn a_streamed_preflight_failure_leaves_the_plan_and_writes_nothing() {
+    let shoot = two_frames();
+    let decider = Guarded::new(Scripted::refusing_preflight(Error::new(
+        ErrorKind::Http400,
+        "POST /v1/systemone returned 400: this model is not a decision model",
+    )));
+    let recorded = quiet();
+    let hash = group::grouping_hash(&group::Thresholds::default());
+    let config = stream_config(&hash);
+
+    let streamed = cull::run_streaming(
+        &config,
+        &decider,
+        &sidecar::Filesystem,
+        &recorded,
+        2,
+        |sink| {
+            group::stream_with(
+                shoot.path(),
+                &group::Options::default(),
+                &imagecull_core::progress::Silent,
+                sink,
+            )
+        },
+    )
+    .expect("a failed cull is not a failed grouping pass");
+
+    assert_eq!(
+        streamed.fatal.as_ref().map(Error::kind),
+        Some(Some(ErrorKind::Http400))
+    );
+    assert_eq!(streamed.plan.groups, 1, "the plan is whole");
+    assert_eq!(streamed.culled.groups, 0, "nothing was judged");
+    assert!(
+        !shoot.path().join("DSC_0001.xmp").exists(),
+        "nothing is marked before the server has shown it can answer"
+    );
+}
+
+/// A decider that answers every group with the same choice, slowly enough that
+/// two requests can be in flight together, and counts how many were.
+struct Slow {
+    in_flight: AtomicUsize,
+    most: AtomicUsize,
+    preflights: AtomicUsize,
+}
+
+impl Slow {
+    fn new() -> Slow {
+        Slow {
+            in_flight: AtomicUsize::new(0),
+            most: AtomicUsize::new(0),
+            preflights: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Decider for Slow {
+    fn decide(&self, _request: &Request<'_>) -> imagecull_core::Result<Response> {
+        panic!("a cull never rates a frame");
+    }
+
+    fn compare(
+        &self,
+        _comparison: &imagecull_core::keeper::Comparison,
+    ) -> imagecull_core::Result<Response> {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(300));
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(Response {
+            document: keeper("1", 0.9),
+            client_latency_ms: 0,
+        })
+    }
+
+    fn preflight(&self) -> imagecull_core::Result<()> {
+        self.preflights.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_streamed_cull_has_several_groups_in_flight_and_waits_for_every_one() {
+    let shoot = shoot_of(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.2, 0, "20"),
+        frame("DSC_0003.NEF", 0.0, 5, "10"),
+        frame("DSC_0004.NEF", 0.2, 5, "20"),
+        frame("DSC_0005.NEF", 0.0, 10, "10"),
+        frame("DSC_0006.NEF", 0.2, 10, "20"),
+        frame("DSC_0007.NEF", 0.0, 15, "10"),
+        frame("DSC_0008.NEF", 0.2, 15, "20"),
+    ]);
+    let decider = Slow::new();
+    let recorded = quiet();
+    let hash = group::grouping_hash(&group::Thresholds::default());
+    let config = stream_config(&hash);
+
+    let streamed = cull::run_streaming(
+        &config,
+        &decider,
+        &sidecar::Filesystem,
+        &recorded,
+        4,
+        |sink| {
+            group::stream_with(
+                shoot.path(),
+                &group::Options {
+                    jobs: Some(4),
+                    ..group::Options::default()
+                },
+                &imagecull_core::progress::Silent,
+                sink,
+            )
+        },
+    )
+    .expect("a streamed cull");
+
+    assert_eq!(streamed.culled.groups, 4, "every group was judged");
+    assert!(
+        decider.most.load(Ordering::SeqCst) >= 2,
+        "two groups' comparisons were in flight at once, not one after another"
+    );
+    assert_eq!(
+        decider.preflights.load(Ordering::SeqCst),
+        1,
+        "four workers share one preflight"
+    );
+    assert_eq!(
+        decider.in_flight.load(Ordering::SeqCst),
+        0,
+        "the pass returned only after every comparison finished"
+    );
+}
+
+#[test]
+fn a_streamed_cull_retires_a_singletons_red_after_the_preflight() {
+    // A first run decides the pair in `shoot` and leaves a red on its first frame.
+    let shoot = two_frames();
+    let first = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("2", 0.62))]);
+    cull(shoot.path(), &first, &sidecar::Filesystem, &quiet());
+    assert!(
+        sidecar_of(shoot.path(), "DSC_0001.NEF").contains("xmp:Label=\"Red\""),
+        "the first cull made the first frame red"
+    );
+
+    // The folder is regrouped: DSC_0001 is now alone, and DSC_0002 and DSC_0003
+    // are one moment. The lone frame is emitted before the group, so its
+    // retirement waits for the preflight the group triggers.
+    let regrouped = shoot_of(&[
+        frame("DSC_0001.NEF", 0.0, 0, "10"),
+        frame("DSC_0002.NEF", 0.0, 10, "10"),
+        frame("DSC_0003.NEF", 0.2, 10, "20"),
+    ]);
+    fs::copy(
+        sidecar::path_for(&shoot.path().join("DSC_0001.NEF")),
+        sidecar::path_for(&regrouped.path().join("DSC_0001.NEF")),
+    )
+    .expect("copy the verdict");
+    let decider =
+        Guarded::new(Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("1", 0.9))]));
+    let recorded = quiet();
+    let hash = group::grouping_hash(&group::Thresholds::default());
+    let config = stream_config(&hash);
+
+    let streamed = cull::run_streaming(
+        &config,
+        &decider,
+        &sidecar::Filesystem,
+        &recorded,
+        2,
+        |sink| {
+            group::stream_with(
+                regrouped.path(),
+                &group::Options {
+                    jobs: Some(1),
+                    ..group::Options::default()
+                },
+                &imagecull_core::progress::Silent,
+                sink,
+            )
+        },
+    )
+    .expect("a streamed cull");
+
+    assert!(streamed.fatal.is_none());
+    assert_eq!(streamed.culled.groups, 1, "only the pair was judged");
+    assert_eq!(streamed.culled.retired, 1, "the lone frame lost our red");
+    let text = sidecar_of(regrouped.path(), "DSC_0001.NEF");
+    assert!(
+        !text.contains("xmp:Label") && !text.contains("imagecull:groupKeeper"),
+        "a red for a comparison that no longer exists is retired: {text}"
+    );
+    assert!(
+        sidecar_of(regrouped.path(), "DSC_0003.NEF").contains("xmp:Label=\"Red\""),
+        "the pair's non-keeper still wears the red"
     );
 }

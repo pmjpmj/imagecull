@@ -31,7 +31,7 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
 - No writing anywhere but the sidecars of the shoot folder (no catalogue import, no raw edits), no GUI (v3, §13).
 - No video (`/v1/systemone` does not accept video over HTTP).
 - No cloud calls, no telemetry, no server management (starting/stopping oMLX).
-- No batching. oMLX serializes decision requests; pretending otherwise is a lie in the UX.
+- No batching. A frame is rated by one request and a group is compared by one request per round; the client never packs several frames into a per-frame decision. The group cull may have several *groups'* comparative requests in flight at once (`--cull-jobs`), which is a pipeline, not a batch.
 
 ## 4. Locked decisions
 
@@ -42,7 +42,7 @@ The task is *decision*, not generation: each frame gets one keeper rating from 1
 | Scoring shape | **One `choice` question, answered 1–5** | A cull wants a keeper rating, not a diagnosis; a single 5-way choice is Clef's native mode and leaves nothing to combine. |
 | Rating legend | **1 = delete · 2 = not great · 3 = okay to keep · 4 = good · 5 = great** | Five named levels, so the answer is a decision the photographer can act on and a spreadsheet can sort. |
 | Output | **An XMP sidecar per frame** — `DSC_0001.xmp` | The cull happens in a catalogue, so the rating goes where the catalogue reads it (`xmp:Rating`), not into a file beside the terminal. |
-| Run model | **Sequential, and skip what is already rated** | oMLX serialises requests anyway; the sidecar is the state, so an interrupted run finishes cheaply. |
+| Run model | **Sequential ratings, a fan-out cull, and skip what is already rated** | oMLX serialises requests, so a rating run gains nothing from overlap; the cull's groups are independent and `--cull-jobs` overlaps their preview rendering and server waits. The sidecar is the state, so an interrupted run finishes cheaply. |
 | A rating already there | **Left alone** (1–5), `--force` to override | The photographer's star and the model's must never fight over one property. |
 
 ## 5. Architecture
@@ -184,7 +184,7 @@ Content-Type: application/json
 - `state` must not be null. It carries the *task framing* and user context — never the scores.
 - Exactly **one** image per request. Several are supported by the API, but one frame per decision keeps results attributable.
 - `truncate: true` (default). Clef cuts the state to fit 16,384 tokens instead of returning 413. Our prompt is far smaller than that, so truncation should never fire — if it does, the telemetry in §9 will show it via an unexpectedly low `input_tokens` ceiling.
-- Requests are serialized server-side; the client sends **one at a time**, never a concurrent burst.
+- A per-frame rating is one request at a time. The group cull may have up to `--cull-jobs` comparative requests in flight at once (default 4); oMLX serialises them server-side, so the degree is bounded by the option and is not a promise of server parallelism.
 
 ### 7.2 Response
 
@@ -208,7 +208,7 @@ Parsing rules (defensive — this contract is new surface):
 
 ### 7.3 Client
 
-`ureq` (blocking) + `serde_json`. No tokio in v1: the workload is strictly serial, and a blocking client keeps `imagecull-core` trivially portable into Tauri (which can call it from a background thread). Timeouts: connect 5 s, read 120 s (`--timeout`), overridable because 27B Clef on a long prompt can take tens of seconds.
+`ureq` (blocking) + `serde_json`. No tokio in v1: the client is blocking and `Sync`, so a rating run stays serial and the cull's workers can share it. A blocking client keeps `imagecull-core` trivially portable into Tauri (which can call it from a background thread). Timeouts: connect 5 s, read 120 s (`--timeout`), overridable because 27B Clef on a long prompt can take tens of seconds.
 
 ---
 
@@ -461,6 +461,7 @@ imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef,
         --group-similarity <COSINE>   default 0.90
         --group-exposure-stops <STOPS>  default 2.0; 0 asks for one exposure exactly
     -j, --jobs <N>              frames read at once, default one per core
+        --cull-jobs <N>         groups culled at once, default 4
         --recursive [BOOL]      also scan subdirectories
         --limit <N>             smoke test on the first N files
         --no-cull               group and measure only: no request, no label
@@ -573,7 +574,7 @@ Published per-request latencies on an M5 Max (text, 1k tokens): **clef-flash 9B 
 
 Memory/VRAM is the server's problem, not the client's: Flash needs ~16 GB RAM minimum, 27B ~32 GB. `doctor` reports which is actually installed rather than assuming.
 
-Bottleneck reality: the run is **serialized by the server**, so client-side optimisation (prefetch, parallelism) buys little. The real lever is `--no-dedupe` off (burst dedupe) and rubric length, both handled above.
+Bottleneck reality: **the server serialises requests**. A rating run is therefore sequential and client-side optimism buys little; the cull's `--cull-jobs` overlaps only the local extraction, downscale and encode with the previous group's server wait. The real lever is `--no-dedupe` off (burst dedupe) and rubric length, both handled above.
 
 ---
 

@@ -1,12 +1,18 @@
 //! `imagecull groups`: a shoot folder, grouped by moment, measured from its own
 //! pixels, and culled by clef.
 //!
-//! Two passes, in order. The technical pass is local CPU and needs nothing: every
-//! frame is grouped with the moment it was taken in and measured from its own
-//! pixels, and each frame gets a line as it is read. The cull asks one
-//! comparative question per group of two or more — which frame to keep — and
-//! marks every other frame of that group red. `--no-cull` stops after the first
-//! pass, so the whole technical pass still runs on a machine with no model
+//! The technical pass is local CPU and needs nothing: every frame is grouped with
+//! the moment it was taken in and measured from its own pixels, and each frame
+//! gets a line as it is read. The cull asks one comparative question per group of
+//! two or more — which frame to keep — and marks every other frame of that group
+//! red.
+//!
+//! The two overlap on purpose. A group is final the moment the next frame's
+//! capture time is beyond its gap, so the cull starts that group while the rest
+//! of the folder is still being read, and [`--cull-jobs`](GroupsArgs::cull_jobs)
+//! groups are judged at once. Both passes meet again before the report: no report
+//! is written until every cull job has finished. `--no-cull` leaves the second
+//! pass out, so the whole technical pass still runs on a machine with no model
 //! running.
 //!
 //! Rendering is all this module does — the grouping and the numbers are
@@ -40,48 +46,88 @@ pub fn run(args: &GroupsArgs) -> u8 {
         quiet: args.quiet,
         verbose: args.verbose,
     };
-    let plan = match group::run_with(&args.dir, &args.options(&effective), &console) {
-        Ok(plan) => plan,
-        Err(error) => {
-            eprintln!("error: {error}");
+    let options = args.options(&effective);
+    let outcome = match drive(args, &effective, &options, &console) {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            eprintln!("error: {message}");
             return ExitCode::Fatal.code();
         }
     };
-    let csv = group::render_csv(&plan);
+    // The plan is whole whether or not the cull was: a fatal preflight still
+    // leaves the measures worth reading, and the CSV is what ticket 01 shipped.
+    let csv = group::render_csv(&outcome.plan);
     if let Err(error) = std::fs::write(&args.out, csv.as_bytes()) {
         eprintln!("error: cannot write {}: {error}", args.out.display());
         return ExitCode::Fatal.code();
     }
-    // The cull is the pass that talks to a server, and the one a machine with no
-    // model running can leave out.
-    let culled = if args.no_cull {
-        None
-    } else {
-        match cull_for(args, &effective, &plan, &console) {
-            Ok(culled) => Some(culled),
-            Err(message) => {
-                eprintln!("error: {message}");
-                return ExitCode::Fatal.code();
-            }
-        }
-    };
+    if let Some(message) = outcome.fatal {
+        eprintln!("error: {message}");
+        return ExitCode::Fatal.code();
+    }
     // Through the same write as the progress lines: a reader that stopped at
     // `head` is not a failed run.
     write(
         Stream::Out,
-        &report(&plan, culled.as_ref(), &args.out, args.quiet),
+        &report(
+            &outcome.plan,
+            outcome.culled.as_ref(),
+            &args.out,
+            args.quiet,
+        ),
     );
-    exit_code(&plan, culled.as_ref())
+    exit_code(&outcome.plan, outcome.culled.as_ref())
 }
 
-/// Run the cull over a plan: the server the effective config names, the model
-/// alias it resolved, and the writer the preview flag chose.
-fn cull_for(
+/// What a run leaves to render: the plan both passes produced, the cull when
+/// there was one, and the error that stopped a cull after its plan was built.
+///
+/// A fatal preflight is why `fatal` is separate from the plan: grouping still
+/// finished, so the CSV is written first, but no verdict was written and the run
+/// exits fatal rather than printing a report that would read complete.
+struct Outcome {
+    plan: Plan,
+    culled: Option<Culled>,
+    fatal: Option<String>,
+}
+
+/// Drive the passes: one for `--no-cull`, both — overlapped — otherwise.
+fn drive(
     args: &GroupsArgs,
     effective: &imagecull_core::config::Effective,
-    plan: &Plan,
+    options: &group::Options,
     console: &Console,
-) -> Result<Culled, String> {
+) -> Result<Outcome, String> {
+    if args.no_cull {
+        let plan =
+            group::run_with(&args.dir, options, console).map_err(|error| error.to_string())?;
+        return Ok(Outcome {
+            plan,
+            culled: None,
+            fatal: None,
+        });
+    }
+    // The hash is a pure function of the thresholds, so it is known before the
+    // groups are: a verdict can be written while the plan is still being built.
+    let hash = group::grouping_hash(&options.thresholds);
+    let streamed = cull_streamed(args, effective, &hash, options, console)?;
+    Ok(Outcome {
+        plan: streamed.plan,
+        culled: Some(streamed.culled),
+        fatal: streamed.fatal.map(|error| error.to_string()),
+    })
+}
+
+/// Run the cull alongside the grouping pass: the server the effective config
+/// names, the model alias it resolved, the writer the preview flag chose, and the
+/// degree the cull flag asked for.
+fn cull_streamed(
+    args: &GroupsArgs,
+    effective: &imagecull_core::config::Effective,
+    grouping_hash: &str,
+    options: &group::Options,
+    console: &Console,
+) -> Result<cull::Streamed, String> {
     let alias = effective
         .model
         .clone()
@@ -95,23 +141,24 @@ fn cull_for(
         // The comparison renders its own previews at the budget's edge, and
         // encodes them at the quality this run would send.
         jpeg_quality: effective.params.jpeg_quality,
-        grouping_hash: &plan.hash,
+        grouping_hash,
         allow_foreign: args.allow_foreign,
         retry: RetryPolicy::default(),
     };
     // A preview scores and prints; a run writes. The port is the whole
     // difference between the two, which is why there is no second pipeline.
-    let writer: &dyn sidecar::Writer = if args.print_sidecars {
+    let writer: &(dyn sidecar::Writer + Sync) = if args.print_sidecars {
         &Printer
     } else {
         &sidecar::Filesystem
     };
-    cull::run(
-        plan,
+    cull::run_streaming(
         &config,
         &Adapter::new(client, &alias),
         writer,
         console,
+        args.cull_jobs.unwrap_or(cull::DEFAULT_JOBS),
+        |sink| group::stream_with(&args.dir, options, console, sink),
     )
     .map_err(|error| error.to_string())
 }
@@ -154,10 +201,15 @@ impl cull::Watcher for Console {
         match event {
             cull::Event::Started { groups } => {
                 if !self.quiet {
-                    write(
-                        Stream::Out,
-                        &format!("culling {groups} {}\n", plural(*groups, "group", "groups")),
-                    );
+                    let line = match groups {
+                        Some(groups) => {
+                            format!("culling {groups} {}\n", plural(*groups, "group", "groups"))
+                        }
+                        // The folder is still being read, so the total is not
+                        // known yet; the summary has the count when it is.
+                        None => "culling groups as they are found\n".to_string(),
+                    };
+                    write(Stream::Out, &line);
                 }
             }
             cull::Event::Group(verdict) => {

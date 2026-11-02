@@ -66,6 +66,31 @@ fn roll_recovers_a_known_rotation() {
 }
 
 #[test]
+fn roll_holds_a_hundredth_of_a_degree_where_it_reports_a_line() {
+    // The bin is `ROLL_BIN_DEG` wide, so a tenth of a degree is the finest
+    // answer this histogram can quote; the angles below are the ones the
+    // detector is honest about, and they have to land inside a twentieth of a
+    // degree of the truth. Both signs, and a sub-degree tilt: a horizon a
+    // degree off level is the case a photographer actually cares about.
+    //
+    // Past about 4° the synthetic scene stops being a fair test — its two flat
+    // halves leave the tilted edge carrying little of the frame's weight, so
+    // the peak search (not the angle it reads) drifts. Real texture does not
+    // have that hole, so the range here is the measure's, not the arithmetic's.
+    let (width, height) = (1_600, 1_067);
+    for tilt in [-3.0_f32, -1.0, -0.7, 0.0, 0.7, 1.0, 3.0] {
+        let measured = measures(&scenes::tilted_scene(width, height, tilt));
+        let degrees = measured
+            .roll_deg
+            .expect("a scene with a horizon has a roll");
+        assert!(
+            (degrees - f64::from(tilt)).abs() <= 0.05,
+            "a {tilt}° horizon should measure as {tilt}° ± 0.05, measured {degrees}"
+        );
+    }
+}
+
+#[test]
 fn a_frame_with_no_dominant_line_reports_no_roll_rather_than_zero() {
     let speckle = scenes::noise(1_600, 1_067, 7);
     let measured = measures(&speckle);
