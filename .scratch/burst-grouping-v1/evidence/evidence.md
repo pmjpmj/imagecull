@@ -148,6 +148,54 @@ with a pan, a gap and one unreadable file in it. `assign` also stopped scanning
 the timed list once per frame (O(n²) → linear), which is invisible at 400 frames
 and not at 20,000.
 
+### The roll histogram stopped calling `atan2` (2026-11-02)
+
+A profile of the pass found almost all of a frame's measures in one place: the
+per-pixel `hypot` + `atan2` + `to_degrees` that builds the orientation
+histogram. On a real 20.7 Mpx NEF preview (5568×3712, fitted to 2048), serial
+release build:
+
+| stage | before | after |
+|---|---|---|
+| measures, whole | 63 ms | 24 ms |
+| — `roll` | 60 ms | 20 ms |
+| — acutance | 3.5 ms | 3.5 ms |
+| — gradient energy | 0.0 ms | 0.0 ms |
+
+`atan2` and `hypot` are libm calls: nothing about them vectorises, and
+the loop asks for one of each per interior pixel — over two million on a
+full-frame preview. Both are now arithmetic. The angle comes from a degree-11
+odd polynomial fitted over the whole range the fold leaves it
+(`atan_degrees`, max error `ATAN_ERROR_DEG` = 2×10⁻⁴ °, a five-hundredth of the
+0.1° bin it is rounded into), and the magnitude is
+`long · √(1 + (short/long)²)` rather than `hypot`. The fold into the upper half
+plane is what keeps the polynomial's range at `0.0..=1.0` with no range
+reduction and no branch.
+
+Whole pass, 24 frames of one 20.7 Mpx NEF on an M4 Pro, release, warm page
+cache:
+
+```
+$ imagecull groups . --no-cull --quiet -j 1   # before → after
+179 ms/frame  →  134 ms/frame
+$ imagecull groups . --no-cull --quiet -j 14
+ 19 ms/frame  →   15 ms/frame
+```
+
+1.34× serial, 1.27× at every core — the rest of the frame is the JPEG decode
+(32 ms) and the 20.7 Mpx Lanczos3 fit (41 ms), neither of which is the
+histogram's to fix.
+
+The bytes barely moved: over real previews the other measures are
+bit-identical and `roll_deg` differs in the sixth decimal (7.6×10⁻⁵ ° and
+2.2×10⁻⁶ ° on the two frames that had a horizon), inside the documented budget.
+`direction_of` is pinned against `atan2` on every axis, both diagonals and a
+full sweep in all four quadrants, and `roll_holds_a_hundredth_of_a_degree_where_it_reports_a_line`
+now pins the reported angle to ±0.05° from −3° to +3° — the range this synthetic
+scene can answer for, since past about 4° its flat halves leave the tilted edge
+carrying too little of the frame's weight for the *peak search* to find, which is
+a property of the detector and not of the arithmetic.
+
 ### What a pass says while it runs
 
 A 400-frame shoot is half a minute of a terminal showing nothing, so each frame

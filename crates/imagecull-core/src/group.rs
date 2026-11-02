@@ -44,7 +44,6 @@
 //! every verdict computed under the old hash is invalid, exactly as changing
 //! rubric wording invalidates scores.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -448,6 +447,125 @@ pub struct Grouping {
     pub members: Vec<usize>,
 }
 
+/// One group the sweep is filling: its first frame's facts (every gate but the
+/// gap compares against them), its last frame's capture time (the gap compares
+/// against that), and the indices of the frames it holds.
+#[derive(Debug, Clone)]
+struct Moment {
+    first: Facts,
+    last: Capture,
+    members: Vec<usize>,
+}
+
+impl Moment {
+    /// The moment a frame opens on its own.
+    fn opening(index: usize, facts: &Facts) -> Moment {
+        Moment {
+            first: facts.clone(),
+            last: facts
+                .captured
+                .expect("a timed frame records its capture time"),
+            members: vec![index],
+        }
+    }
+
+    /// Whether `candidate` belongs to this moment: all four gates, in order,
+    /// against the group's first frame — and the time gate against its last.
+    fn takes(&self, candidate: &Facts, thresholds: &Thresholds) -> bool {
+        let Some(next) = candidate.captured else {
+            return false;
+        };
+        if self.last.seconds_after(&next) > thresholds.gap.as_secs_f64() {
+            return false;
+        }
+        if self.first.serial != candidate.serial
+            || !self
+                .first
+                .settings
+                .within(candidate.settings, thresholds.exposure_stops)
+        {
+            return false;
+        }
+        let (Some(seen), Some(fresh)) = (&self.first.signature, &candidate.signature) else {
+            return false;
+        };
+        seen.similarity(fresh) >= thresholds.similarity
+    }
+
+    /// Add a frame that [`takes`](Moment::takes) it.
+    fn add(&mut self, index: usize, facts: &Facts) {
+        self.members.push(index);
+        self.last = facts
+            .captured
+            .expect("a timed frame records its capture time");
+    }
+}
+
+/// The sweep that turns a capture-ordered stream of timed frames into groups.
+///
+/// The one implementation of the grouping rule: [`assign`] runs it over a whole
+/// slice, and the streaming pass runs it over frames as their previews arrive.
+/// A frame is only ever offered to the most recent group, which is what makes a
+/// group final the moment a later frame starts a new one — or fails the gap
+/// against its last member.
+#[derive(Debug, Clone)]
+struct Grouper<'a> {
+    thresholds: &'a Thresholds,
+    open: Option<Moment>,
+}
+
+impl<'a> Grouper<'a> {
+    fn new(thresholds: &'a Thresholds) -> Grouper<'a> {
+        Grouper {
+            thresholds,
+            open: None,
+        }
+    }
+
+    /// Offer one timed frame, in capture order. The group it closes, when the
+    /// frame starts a new one instead of joining the open one.
+    fn push(&mut self, index: usize, facts: &Facts) -> Option<Grouping> {
+        if let Some(open) = self.open.as_mut()
+            && open.takes(facts, self.thresholds)
+        {
+            open.add(index, facts);
+            return None;
+        }
+        let closed = self.open.take().map(Moment::closing);
+        self.open = Some(Moment::opening(index, facts));
+        closed
+    }
+
+    /// Close the open group when the next frame in capture order cannot reach
+    /// it: the gap is the one gate a frame can fail by time alone, so a frame
+    /// beyond it can never join, whatever its other facts say.
+    ///
+    /// This is what lets a streaming pass start culling a group before the next
+    /// frame's preview exists.
+    fn close_before(&mut self, next: Capture) -> Option<Grouping> {
+        let open = self.open.as_ref()?;
+        if open.last.seconds_after(&next) > self.thresholds.gap.as_secs_f64() {
+            self.open.take().map(Moment::closing)
+        } else {
+            None
+        }
+    }
+
+    /// Close the open group at the end of the timed frames.
+    fn close(&mut self) -> Option<Grouping> {
+        self.open.take().map(Moment::closing)
+    }
+}
+
+impl Moment {
+    /// The finished group, as the plan numbers it.
+    fn closing(self) -> Grouping {
+        Grouping {
+            members: self.members,
+        }
+    }
+}
+
 /// Assign every frame to a group.
 ///
 /// Groups come back in capture order, and so do their members. A frame with no
@@ -471,17 +589,15 @@ pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
     let mut ordered: Vec<usize> = (0..facts.len()).filter(|&index| timed[index]).collect();
     ordered.sort_by_key(|&index| (facts[index].captured, index));
 
+    let mut grouper = Grouper::new(thresholds);
     let mut groups: Vec<Grouping> = Vec::new();
     for index in ordered {
-        if let Some(group) = groups.last_mut()
-            && same_moment(facts, group, index, thresholds)
-        {
-            group.members.push(index);
-            continue;
+        if let Some(closed) = grouper.push(index, &facts[index]) {
+            groups.push(closed);
         }
-        groups.push(Grouping {
-            members: vec![index],
-        });
+    }
+    if let Some(closed) = grouper.close() {
+        groups.push(closed);
     }
 
     for (index, &timed) in timed.iter().enumerate() {
@@ -492,37 +608,6 @@ pub fn assign(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
         }
     }
     groups
-}
-
-/// Whether `candidate` belongs to `group`: all four gates, in order, against the
-/// group's first frame — and the time gate against its last.
-fn same_moment(
-    facts: &[Facts],
-    group: &Grouping,
-    candidate: usize,
-    thresholds: &Thresholds,
-) -> bool {
-    let first = &facts[group.members[0]];
-    let last = facts[group.members[group.members.len() - 1]].captured;
-    let next = facts[candidate].captured;
-    let (Some(previous), Some(next)) = (last, next) else {
-        return false;
-    };
-    if previous.seconds_after(&next) > thresholds.gap.as_secs_f64() {
-        return false;
-    }
-    let candidate = &facts[candidate];
-    if first.serial != candidate.serial
-        || !first
-            .settings
-            .within(candidate.settings, thresholds.exposure_stops)
-    {
-        return false;
-    }
-    let (Some(seen), Some(fresh)) = (&first.signature, &candidate.signature) else {
-        return false;
-    };
-    seen.similarity(fresh) >= thresholds.similarity
 }
 
 /// The hash that makes a plan's groups comparable with another run's.
@@ -659,6 +744,44 @@ pub struct GroupRow<'a> {
     pub frames: &'a [Planned],
 }
 
+/// A group the streaming pass has finished finding: it can no longer gain a
+/// frame. Either the next frame in capture order is beyond its gap, or that frame
+/// has opened a new group by failing one of the other gates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    /// The group's number, from 1, in capture order.
+    pub number: usize,
+    /// Its frames, in capture order.
+    pub frames: Vec<Planned>,
+}
+
+impl Found {
+    /// How many frames the group holds.
+    pub fn size(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The group as the cull reads it.
+    pub fn row(&self) -> GroupRow<'_> {
+        GroupRow {
+            number: self.number,
+            frames: &self.frames,
+        }
+    }
+}
+
+/// Where a streaming pass puts each group as soon as it is final.
+///
+/// The pass calls [`group`](Sink::group) as soon as the sweep can prove the group
+/// can no longer grow — often from the next frame's header alone, before that
+/// frame's preview has been decoded — so a sink can start the group's work while
+/// the rest of the shoot is still being read. An error stops the pass: a sink that
+/// cannot take a group has no use for the ones after it.
+pub trait Sink {
+    /// One finished group, in capture order.
+    fn group(&mut self, group: Found) -> Result<()>;
+}
+
 /// What a pass says while it runs, as plain data.
 ///
 /// The same seam [`progress`] describes for `score`, for the pass that asks no
@@ -693,9 +816,10 @@ pub struct Started {
 /// One frame read: the unit the progress line shows.
 ///
 /// It comes in the pass's own order — the scan's, which is the folder's names —
-/// rather than the plan's capture order, because the groups are not known until
-/// every frame has been read and being told about a frame after the run is over
-/// would not be progress. The CSV is where capture order lives.
+/// rather than the plan's capture order, because a photographer reads the folder
+/// as they named it; the CSV is where capture order lives. A cull's verdict lines
+/// may arrive before some of these when a group is finished ahead of an earlier
+/// scan index, but the report at the end is in group order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameEvent {
     /// The frame's position in the pass, counting from 1, so a line reads
@@ -732,16 +856,15 @@ impl Watcher for progress::Silent {
 
 /// Group a shoot folder and measure every frame in it.
 ///
-/// One pass, one decode per frame, no requests. A frame that cannot be read is a
-/// row with empty measures and a status, and a group of its own: one odd file
-/// never costs the photographer the other 399.
+/// One pass over the frames, one decode per frame, no requests. A frame that
+/// cannot be read is a row with empty measures and a status, and a group of its
+/// own: one odd file never costs the photographer the other 399.
 ///
 /// The frames are independent of each other — a reading is a pure function of
-/// one path, and grouping is a pass over what the readings said — so they are
-/// read [`Options::jobs`] at a time, and the plan is assembled in the scan's
-/// order whatever order they finished in. Everything the pass costs is local
-/// CPU, which is why this command is worth threading where `score` is not: no
-/// server is serialising anything here.
+/// one path — so their previews are read [`Options::jobs`] at a time, and the
+/// plan is assembled in the scan's order whatever order they finished in.
+/// Everything this pass costs is local CPU, which is why this command is worth
+/// threading where `score` is not: no server is serialising anything here.
 ///
 /// What the pass says while it runs goes to a [`Watcher`]; this is the entry
 /// point for a caller that has nothing to say about it.
@@ -756,46 +879,202 @@ pub fn run(shoot: &Path, options: &Options) -> Result<Plan> {
 /// photographer reads is the same text at any degree, and a redirected log is
 /// the same log a serial run would have written.
 pub fn run_with(shoot: &Path, options: &Options, watcher: &dyn Watcher) -> Result<Plan> {
-    check(&options.thresholds)?;
-    let started = Instant::now();
-    let scan = ingest::scan(shoot, &options.scan)?;
+    /// A pass with no interest in a group before it is all over.
+    struct Ignore;
 
-    let jobs = degree(options.jobs, scan.files.len());
-    watcher.event(Event::Started(Started {
-        total: scan.files.len(),
-        jobs,
-    }));
-    let readings = read_all(&scan.files, jobs, watcher);
-    let facts: Vec<Facts> = readings
-        .iter()
-        .map(|reading| reading.facts.clone())
-        .collect();
-
-    let groupings = assign(&facts, &options.thresholds);
-    let mut frames = Vec::with_capacity(scan.files.len());
-    for (number, grouping) in groupings.iter().enumerate() {
-        for (place, &index) in grouping.members.iter().enumerate() {
-            let reading = &readings[index];
-            frames.push(Planned {
-                source: scan.files[index].clone(),
-                group: number + 1,
-                group_index: place + 1,
-                group_size: grouping.members.len(),
-                captured: reading.facts.captured,
-                measures: reading.measures,
-                failure: reading.failure.clone(),
-            });
+    impl Sink for Ignore {
+        fn group(&mut self, _group: Found) -> Result<()> {
+            Ok(())
         }
     }
 
+    stream_with(shoot, options, watcher, &mut Ignore)
+}
+
+/// [`run_with`], handing each group to `sink` the moment it can no longer grow.
+///
+/// The frame events still arrive in the scan's order, exactly as [`run_with`]
+/// says; the sink's groups arrive in capture order, as soon as the next frame's
+/// capture time is beyond the open group's gap. The two orders are the reason a
+/// group can be culled before the folder has finished being read.
+///
+/// The metadata pass is what makes that possible. A group cannot be final until
+/// a frame's capture time is known, and a preview cannot be placed in capture
+/// order until it has been decoded; reading every header first costs one extra
+/// open per frame and lets the previews be handed out in the order the groups
+/// need them. A frame whose header cannot be read is unreadable in exactly the
+/// way [`read`] would have said so, and falls into the undated tail.
+pub fn stream_with(
+    shoot: &Path,
+    options: &Options,
+    watcher: &dyn Watcher,
+    sink: &mut dyn Sink,
+) -> Result<Plan> {
+    check(&options.thresholds)?;
+    let started = Instant::now();
+    let scan = ingest::scan(shoot, &options.scan)?;
+    let total = scan.files.len();
+    let jobs = degree(options.jobs, total);
+    watcher.event(Event::Started(Started { total, jobs }));
+
+    // The headers first: capture times, bodies and exposures, which is what
+    // places every frame in the one order grouping reads.
+    let prepared = read_metadata(&scan.files, jobs);
+    let captures: Vec<Option<Capture>> = prepared
+        .iter()
+        .map(|prepared| {
+            prepared
+                .as_ref()
+                .ok()
+                .and_then(|metadata| metadata.capture_time().map(Capture::of))
+        })
+        .collect();
+
+    // The order the sweep considers frames in: the timed ones by capture time
+    // (the scan's index breaking a tie, as [`assign`] does), then every frame
+    // with no capture time in the scan's order. Previews are still read in the
+    // scan's order; this is the order their *readings* are consumed in.
+    let mut order: Vec<usize> = (0..total)
+        .filter(|&index| captures[index].is_some())
+        .collect();
+    order.sort_by_key(|&index| (captures[index], index));
+    let timed = order.len();
+    order.extend((0..total).filter(|&index| captures[index].is_none()));
+
+    let mut foundry = Foundry {
+        sources: &scan.files,
+        order: &order,
+        captures: &captures,
+        timed,
+        grouper: Grouper::new(&options.thresholds),
+        groups: 0,
+        planned: (0..total).map(|_| None).collect(),
+        untimed: Vec::new(),
+        frames: Vec::with_capacity(total),
+        sink,
+    };
+    read_previews(
+        &scan.files,
+        &prepared,
+        &order,
+        jobs,
+        watcher,
+        |position, index, reading| foundry.consume(position, index, reading),
+    )?;
+    foundry.close()?;
+    let groups = foundry.groups;
+    let frames = foundry.frames;
+
     Ok(Plan {
-        groups: groupings.len(),
+        groups,
         frames,
         hash: grouping_hash(&options.thresholds),
         counts: scan.counts,
         elapsed: started.elapsed(),
         jobs,
     })
+}
+
+/// The state a streamed pass fills as readings arrive and groups finish.
+struct Foundry<'a> {
+    /// The files, for the frame a group reports.
+    sources: &'a [SourceFile],
+    /// The order readings are consumed in: timed frames first, by capture time.
+    order: &'a [usize],
+    /// The capture time the metadata pass found, for the lookahead that closes a
+    /// group before its next frame's preview exists.
+    captures: &'a [Option<Capture>],
+    /// How many leading entries of `order` are timed.
+    timed: usize,
+    /// The group being filled.
+    grouper: Grouper<'a>,
+    /// How many groups have been handed to the sink.
+    groups: usize,
+    /// One row per frame, built when its reading arrives and moved out when its
+    /// group is handed over.
+    planned: Vec<Option<Planned>>,
+    /// Frames with no signature, each a group of its own at the end.
+    untimed: Vec<usize>,
+    /// The plan's rows, in group order.
+    frames: Vec<Planned>,
+    /// Where each finished group goes.
+    sink: &'a mut dyn Sink,
+}
+
+impl Foundry<'_> {
+    /// Take one reading that the sweep is due to consider, in `order`.
+    fn consume(&mut self, position: usize, index: usize, reading: &Reading) -> Result<()> {
+        let planned = Planned {
+            source: self.sources[index].clone(),
+            group: 0,
+            group_index: 1,
+            group_size: 1,
+            captured: reading.facts.captured,
+            measures: reading.measures,
+            failure: reading.failure.clone(),
+        };
+        self.planned[index] = Some(planned);
+
+        if position >= self.timed {
+            // No capture time at all: the undated tail, in the scan's order.
+            self.untimed.push(index);
+            return Ok(());
+        }
+
+        if reading.facts.signature.is_none() {
+            // Printable but not comparable: `assign` would never place it in a
+            // timed group, so it belongs to the tail and must not interrupt the
+            // open one.
+            self.untimed.push(index);
+        } else if let Some(closed) = self.grouper.push(index, &reading.facts) {
+            self.emit(closed)?;
+        }
+
+        // The next frame's header already says whether it can reach the open
+        // group at all. If it cannot, the group is final now — its next frame's
+        // preview has not been decoded, and does not need to be.
+        if position + 1 < self.timed
+            && let Some(next) = self.captures[self.order[position + 1]]
+            && let Some(closed) = self.grouper.close_before(next)
+        {
+            self.emit(closed)?;
+        }
+        Ok(())
+    }
+
+    /// Finish the timed groups, then the undated tail in the scan's order.
+    fn close(&mut self) -> Result<()> {
+        if let Some(closed) = self.grouper.close() {
+            self.emit(closed)?;
+        }
+        let mut untimed = std::mem::take(&mut self.untimed);
+        untimed.sort_unstable();
+        for index in untimed {
+            self.emit(Grouping {
+                members: vec![index],
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Number one finished group, keep its rows, and hand it to the sink.
+    fn emit(&mut self, grouping: Grouping) -> Result<()> {
+        let number = self.groups + 1;
+        let size = grouping.members.len();
+        let mut frames = Vec::with_capacity(size);
+        for (place, index) in grouping.members.iter().enumerate() {
+            let mut frame = self.planned[*index]
+                .take()
+                .expect("a group is only finished after its frames are read");
+            frame.group = number;
+            frame.group_index = place + 1;
+            frame.group_size = size;
+            self.frames.push(frame.clone());
+            frames.push(frame);
+        }
+        self.groups = number;
+        self.sink.group(Found { number, frames })
+    }
 }
 
 /// Refuse a similarity that is not a cosine before a single file is read: a
@@ -824,32 +1103,109 @@ fn degree(asked: Option<usize>, frames: usize) -> usize {
         .clamp(1, frames.max(1))
 }
 
-/// Read every frame, `jobs` of them at a time, and return them in the scan's
-/// order, telling `watcher` about each one as it arrives.
+/// Read every frame's header, `jobs` at a time, in the scan's order.
 ///
-/// A worker claims the next index from a cursor and sends its reading back; the
-/// pass's own thread buffers whatever arrived out of order and says each frame
-/// exactly once, in index order. So the plan, the CSV, the hash and the log are
-/// the same at any degree. Below two jobs this is a plain loop: a shoot of one
-/// file has nothing to overlap, and keeping the serial path exact is what lets a
-/// slow run be reproduced.
-fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<Reading> {
+/// A header is all the grouping gates but the signature need, and it is what
+/// puts a frame in capture order before its preview exists. A frame the header
+/// cannot be read from carries the failure that costs it its measures, exactly
+/// as [`read`] would have reported it.
+fn read_metadata(
+    sources: &[SourceFile],
+    jobs: usize,
+) -> Vec<std::result::Result<Metadata, Failure>> {
     let total = sources.len();
-    let mut readings: Vec<Reading> = Vec::with_capacity(total);
-    let tell = |readings: &mut Vec<Reading>, index: usize, reading: Reading| {
-        watcher.event(Event::Frame(FrameEvent::of(
-            index,
-            total,
-            &sources[index],
-            &reading,
-        )));
-        readings.push(reading);
+    if jobs < 2 || total < 2 {
+        return sources
+            .iter()
+            .map(|source| preview::metadata(&source.path).map_err(|error| Failure::of(&error)))
+            .collect();
+    }
+
+    let cursor = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel::<(usize, std::result::Result<Metadata, Failure>)>();
+    let cursor = &cursor;
+    let mut prepared: Vec<Option<std::result::Result<Metadata, Failure>>> =
+        (0..total).map(|_| None).collect();
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            let sender = sender.clone();
+            scope.spawn(move || {
+                while let Some(index) = next(cursor, total) {
+                    let result = preview::metadata(&sources[index].path)
+                        .map_err(|error| Failure::of(&error));
+                    // The receiver lives until every sender is gone, which is
+                    // the end of this scope: a send cannot be refused here.
+                    sender
+                        .send((index, result))
+                        .expect("the pass is still collecting headers");
+                }
+            });
+        }
+        drop(sender);
+        for (index, result) in receiver {
+            prepared[index] = Some(result);
+        }
+    });
+    prepared
+        .into_iter()
+        .map(|result| result.expect("every frame has a header reading"))
+        .collect()
+}
+
+/// Read every frame's preview, `jobs` at a time, in the scan's order, telling
+/// `watcher` about each frame as it arrives and handing each reading to
+/// `consume` in `order`.
+///
+/// The two orders are the point: a photographer reads frame lines in the scan's
+/// order, while the sweep needs the readings in capture order. A worker claims
+/// the next scan index from a cursor; the pass's own thread buffers whatever
+/// arrived out of order, says each frame exactly once in index order, and then
+/// consumes every position of `order` that has become available. So the plan,
+/// the CSV, the hash and the log are the same at any degree, and a group can be
+/// finished before the folder has been fully read.
+fn read_previews(
+    sources: &[SourceFile],
+    prepared: &[std::result::Result<Metadata, Failure>],
+    order: &[usize],
+    jobs: usize,
+    watcher: &dyn Watcher,
+    mut consume: impl FnMut(usize, usize, &Reading) -> Result<()>,
+) -> Result<()> {
+    let total = sources.len();
+    let mut readings: Vec<Option<Reading>> = (0..total).map(|_| None).collect();
+    let mut announced = 0;
+    let mut due = 0;
+    let mut deliver = |index: usize, reading: Reading| -> Result<()> {
+        readings[index] = Some(reading);
+        while announced < total {
+            let Some(reading) = readings[announced].as_ref() else {
+                break;
+            };
+            watcher.event(Event::Frame(FrameEvent::of(
+                announced,
+                total,
+                &sources[announced],
+                reading,
+            )));
+            announced += 1;
+        }
+        while due < order.len() {
+            let index = order[due];
+            let Some(reading) = readings[index].as_ref() else {
+                break;
+            };
+            consume(due, index, reading)?;
+            due += 1;
+        }
+        Ok(())
     };
     if jobs < 2 || total < 2 {
         for (index, source) in sources.iter().enumerate() {
-            tell(&mut readings, index, read(source));
+            deliver(index, read_streamed(source, prepared[index].as_ref()))?;
         }
-        return readings;
+        debug_assert_eq!(announced, total, "every frame line was announced");
+        debug_assert_eq!(due, order.len(), "every reading was consumed");
+        return Ok(());
     }
 
     let cursor = AtomicUsize::new(0);
@@ -860,28 +1216,23 @@ fn read_all(sources: &[SourceFile], jobs: usize, watcher: &dyn Watcher) -> Vec<R
             let sender = sender.clone();
             scope.spawn(move || {
                 while let Some(index) = next(cursor, total) {
-                    let reading = read(&sources[index]);
-                    // The receiver lives until every sender is gone, which is
-                    // the end of this scope: a send cannot be refused here.
-                    sender
-                        .send((index, reading))
-                        .expect("the pass is still collecting readings");
+                    let reading = read_streamed(&sources[index], prepared[index].as_ref());
+                    // A sink that stopped the pass may have dropped the receiver;
+                    // a worker's reading is then simply not wanted.
+                    let _ = sender.send((index, reading));
                 }
             });
         }
         // Drop the pass's own handle, or the channel would never close.
         drop(sender);
-        let mut pending: BTreeMap<usize, Reading> = BTreeMap::new();
-        let mut due = 0;
         for (index, reading) in receiver {
-            pending.insert(index, reading);
-            while let Some(reading) = pending.remove(&due) {
-                tell(&mut readings, due, reading);
-                due += 1;
-            }
+            deliver(index, reading)?;
         }
-    });
-    readings
+        Ok(())
+    })?;
+    debug_assert_eq!(announced, total, "every frame line was announced");
+    debug_assert_eq!(due, order.len(), "every reading was consumed");
+    Ok(())
 }
 
 /// The next unclaimed frame index, or `None` when the shoot has been handed out.
@@ -916,6 +1267,40 @@ pub fn read(source: &SourceFile) -> Reading {
         Ok(pair) => pair,
         Err(error) => return Reading::unreadable(&error),
     };
+    read_embedded(&metadata, embedded)
+}
+
+/// Read one frame against a header the metadata pass already read.
+///
+/// The failure is the one [`read`] would have produced from a single open: a
+/// header that could not be read at all leaves the frame with no facts, and a
+/// preview that cannot be extracted leaves it with no facts either, while a
+/// preview that was extracted but could not be decoded keeps the capture time
+/// the header recorded.
+fn read_streamed(
+    source: &SourceFile,
+    prepared: std::result::Result<&Metadata, &Failure>,
+) -> Reading {
+    let metadata = match prepared {
+        Ok(metadata) => metadata,
+        Err(failure) => {
+            return Reading {
+                facts: Facts::default(),
+                measures: Measures::default(),
+                failure: Some(failure.clone()),
+            };
+        }
+    };
+    let embedded = match preview::extract(&source.path) {
+        Ok(embedded) => embedded,
+        Err(error) => return Reading::unreadable(&error),
+    };
+    read_embedded(metadata, embedded)
+}
+
+/// The decode and the measures, from an extracted preview and the header it came
+/// with: the half of [`read`] that is the same however the picture arrived.
+fn read_embedded(metadata: &Metadata, embedded: preview::Embedded) -> Reading {
     let af = af_point(metadata.focus().as_ref());
     let previewed = preprocess::decode(&embedded).and_then(|image| {
         let rgb = image.to_rgb8();
@@ -926,14 +1311,14 @@ pub fn read(source: &SourceFile) -> Reading {
         Ok(pair) => pair,
         Err(error) => {
             return Reading {
-                facts: Facts::of(&metadata, None),
+                facts: Facts::of(metadata, None),
                 measures: Measures::default(),
                 failure: Some(Failure::of(&error)),
             };
         }
     };
     Reading {
-        facts: Facts::of(&metadata, Signature::of_rgb(&rgb).ok()),
+        facts: Facts::of(metadata, Signature::of_rgb(&rgb).ok()),
         measures: measure::of_working(&working, af.as_ref(), embedded.orientation),
         failure: None,
     }
@@ -1083,6 +1468,61 @@ mod tests {
 
     fn sizes(groups: &[Grouping]) -> Vec<usize> {
         groups.iter().map(|group| group.members.len()).collect()
+    }
+
+    /// The groups a streaming sweep finds, with the lookahead the pass uses: a
+    /// group closes when the *next* frame's header cannot reach it.
+    fn streamed(facts: &[Facts], thresholds: &Thresholds) -> Vec<Grouping> {
+        let timed: Vec<bool> = facts
+            .iter()
+            .map(|frame| frame.captured.is_some() && frame.signature.is_some())
+            .collect();
+        let mut ordered: Vec<usize> = (0..facts.len()).filter(|&index| timed[index]).collect();
+        ordered.sort_by_key(|&index| (facts[index].captured, index));
+
+        let mut grouper = Grouper::new(thresholds);
+        let mut groups = Vec::new();
+        for (position, &index) in ordered.iter().enumerate() {
+            if let Some(closed) = grouper.push(index, &facts[index]) {
+                groups.push(closed);
+            }
+            if position + 1 < ordered.len()
+                && let Some(next) = facts[ordered[position + 1]].captured
+                && let Some(closed) = grouper.close_before(next)
+            {
+                groups.push(closed);
+            }
+        }
+        if let Some(closed) = grouper.close() {
+            groups.push(closed);
+        }
+        for (index, &timed) in timed.iter().enumerate() {
+            if !timed {
+                groups.push(Grouping {
+                    members: vec![index],
+                });
+            }
+        }
+        groups
+    }
+
+    #[test]
+    fn a_streamed_sweep_does_not_close_a_group_before_the_frame_that_extends_it() {
+        // The second frame is a second after the first, and the third is three
+        // seconds after the second: the group's gap is measured from its *last*
+        // member, so the second frame must join before the lookahead decides the
+        // group is over.
+        let frames = vec![
+            facts(0, "3001", 0),
+            facts(1, "3001", 0),
+            facts(4, "3001", 0),
+        ];
+
+        assert_eq!(sizes(&assign(&frames, &Thresholds::default())), vec![2, 1]);
+        assert_eq!(
+            sizes(&streamed(&frames, &Thresholds::default())),
+            vec![2, 1]
+        );
     }
 
     #[test]

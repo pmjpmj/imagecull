@@ -787,3 +787,104 @@ fn the_lines_are_the_same_at_any_degree_of_parallelism() {
         );
     }
 }
+
+/// What a streaming pass handed a sink, in the order it handed them over.
+#[derive(Default)]
+struct Handed {
+    groups: std::cell::RefCell<Vec<Vec<String>>>,
+}
+
+impl group::Sink for Handed {
+    fn group(&mut self, found: group::Found) -> imagecull_core::Result<()> {
+        self.groups.borrow_mut().push(
+            found
+                .frames
+                .iter()
+                .map(|frame| frame.source.relative.display().to_string())
+                .collect(),
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn a_streaming_pass_hands_every_group_to_the_sink_in_the_plans_own_order() {
+    let image = scene();
+    let other = scenes::tilted_scene(WIDTH, HEIGHT, 30.0);
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 0, "20"),
+        moment("DSC_0003.NEF", &other, 3, "00"),
+        moment("DSC_0004.NEF", &other, 3, "20"),
+        moment("DSC_0005.NEF", &image, 9, "00"),
+    ]);
+
+    let mut handed = Handed::default();
+    let plan = group::stream_with(
+        dir.path(),
+        &group::Options {
+            jobs: Some(4),
+            ..group::Options::default()
+        },
+        &imagecull_core::progress::Silent,
+        &mut handed,
+    )
+    .expect("a folder that scans");
+
+    let planned: Vec<Vec<String>> = plan
+        .grouped()
+        .iter()
+        .map(|row| {
+            row.frames
+                .iter()
+                .map(|frame| frame.source.relative.display().to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        handed.groups.borrow().clone(),
+        planned,
+        "the sink saw the plan's groups, in the plan's order, and nothing else"
+    );
+    assert_eq!(plan.groups, planned.len());
+}
+
+/// A sink that refuses its second group, however it is shaped.
+struct RefusesSecond {
+    seen: std::cell::Cell<usize>,
+}
+
+impl group::Sink for RefusesSecond {
+    fn group(&mut self, _found: group::Found) -> imagecull_core::Result<()> {
+        let seen = self.seen.get() + 1;
+        self.seen.set(seen);
+        if seen == 2 {
+            return Err(imagecull_core::Error::fatal("the sink said no"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_sink_that_refuses_a_group_stops_the_streaming_pass() {
+    let image = scene();
+    let dir = shoot(vec![
+        moment("DSC_0001.NEF", &image, 0, "00"),
+        moment("DSC_0002.NEF", &image, 3, "00"),
+        moment("DSC_0003.NEF", &image, 6, "00"),
+    ]);
+    let mut sink = RefusesSecond {
+        seen: std::cell::Cell::new(0),
+    };
+
+    let error = group::stream_with(
+        dir.path(),
+        &group::Options::default(),
+        &imagecull_core::progress::Silent,
+        &mut sink,
+    )
+    .expect_err("a sink's refusal is the pass's failure");
+
+    assert!(error.to_string().contains("the sink said no"), "{error}");
+    assert_eq!(sink.seen.get(), 2, "the pass stopped at the refusal");
+}

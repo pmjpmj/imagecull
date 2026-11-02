@@ -238,8 +238,10 @@ impl Catalog {
     }
 }
 
-/// A blocking client for the endpoints above. One client per run; requests are
-/// made one at a time, because oMLX serializes them anyway.
+/// A blocking client for the endpoints above. One client per run; the client is
+/// `Sync`, so the cull's workers share it and may have several comparative
+/// requests in flight, while a rating run still sends one at a time because oMLX
+/// serialises them server-side.
 #[derive(Debug, Clone)]
 pub struct Client {
     endpoint: Endpoint,

@@ -63,6 +63,17 @@ const ROLL_PEAK_WINDOW_DEG: f64 = 10.0;
 /// its weight inside it, which is what makes the strength below mean something.
 const ROLL_STRENGTH_WINDOW_DEG: f64 = 1.0;
 
+/// The most the angle behind [`Measures::roll_deg`] is off for arithmetic's
+/// sake, in degrees.
+///
+/// The histogram is built from a polynomial rather than from `atan2` (see
+/// `atan_degrees`), and this is its whole error budget: a five-hundredth of the
+/// 0.1° [`ROLL_BIN_DEG`] bin the answer is rounded into, so the approximation
+/// cannot move a pixel between bins except where the truth sits on a boundary.
+/// Published because it is a property of the number a photographer reads, not of
+/// the polynomial: the binning's own ±0.05° is the larger share.
+pub const ATAN_ERROR_DEG: f32 = 2e-4;
+
 /// The least share of the frame's orientation weight a peak must hold to be
 /// called a line at all (see [`Measures::roll_strength`]).
 ///
@@ -224,16 +235,15 @@ impl Working {
         let mut total = 0.0;
         for y in 1..(self.height - 1) {
             for x in 1..(self.width - 1) {
-                let dx = f64::from(self.at(x + 1, y) - self.at(x - 1, y));
-                let dy = f64::from(self.at(x, y + 1) - self.at(x, y - 1));
-                let magnitude = dx.hypot(dy);
+                let dx = self.at(x + 1, y) - self.at(x - 1, y);
+                let dy = self.at(x, y + 1) - self.at(x, y - 1);
+                let (angle, magnitude) = direction_of(dx, dy);
                 if magnitude <= 0.0 {
                     continue;
                 }
-                let angle = dy.atan2(dx).to_degrees().rem_euclid(180.0);
-                let bin = ((angle / ROLL_BIN_DEG).round() as usize).min(bins - 1);
-                histogram[bin] += magnitude;
-                total += magnitude;
+                let bin = ((angle / ROLL_BIN_DEG as f32).round() as usize).min(bins - 1);
+                histogram[bin] += f64::from(magnitude);
+                total += f64::from(magnitude);
             }
         }
         if total <= 0.0 {
@@ -366,6 +376,72 @@ impl Working {
         )?;
         Some(window < AF_RATIO * frame_acutance)
     }
+}
+
+/// The coefficients of `atan_degrees`: `atan(z)`, in degrees, as
+/// `z · (c₀ + c₁z² + … + c₅z¹⁰)` for `z` in `0.0..=1.0`.
+///
+/// Odd powers only, which is the shape `atan` has, and fitted over the whole
+/// range so the caller needs no range reduction. The error is
+/// [`ATAN_ERROR_DEG`].
+const ATAN_DEGREES: [f32; 6] = [
+    5.729_462_4e1,
+    -1.905_975_5e1,
+    1.109_649_2e1,
+    -6.683_617e0,
+    3.026_563_1e0,
+    -6.744_0e-1,
+];
+
+/// `atan(z)` in degrees for `z` in `0.0..=1.0`, to within [`ATAN_ERROR_DEG`].
+///
+/// The roll histogram asks for one angle per interior pixel — over two million
+/// of them on a full-frame preview — and `atan2` is a libm call, so it costs
+/// more than every other measure in this module together and vectorises not at
+/// all. This is the same answer for the price of six multiply-adds.
+fn atan_degrees(z: f32) -> f32 {
+    let square = z * z;
+    let coefficients = ATAN_DEGREES.iter().rev();
+    let polynomial = coefficients.fold(0.0, |sum, coefficient| sum * square + coefficient);
+    z * polynomial
+}
+
+/// The direction of a gradient in degrees, `0.0..180.0`, and its magnitude.
+///
+/// The direction is taken modulo half a turn, because a line and its reverse are
+/// one orientation. Folding the pair into the upper half plane is what lets
+/// [`atan_degrees`] see nothing but a fraction in `0.0..=1.0`, and taking the
+/// magnitude as `long · √(1 + (short/long)²)` is what keeps `hypot` — a libm
+/// call with scaling branches in it — out of the loop as well.
+#[inline]
+fn direction_of(dx: f32, dy: f32) -> (f32, f32) {
+    // Fold into the upper half plane, so the only thing left to carry is the
+    // sign of the horizontal component.
+    let (gx, gy) = if dy < 0.0 { (-dx, -dy) } else { (dx, dy) };
+    let across = gx.abs();
+    let (long, short) = if across >= gy {
+        (across, gy)
+    } else {
+        (gy, across)
+    };
+    if long <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let fraction = short / long;
+    let within = if across >= gy {
+        atan_degrees(fraction)
+    } else {
+        // Past the diagonal the fraction measures the angle's complement, so
+        // the polynomial's own quarter turn is read off the other side.
+        90.0 - atan_degrees(fraction)
+    };
+    // A gradient pointing straight along −x is half a turn, which is the same
+    // orientation as none and belongs in the first bin rather than one past the
+    // last; nothing else can reach a full half turn.
+    let angle = if gx < 0.0 { 180.0 - within } else { within };
+    let angle = if angle >= 180.0 { 0.0 } else { angle };
+    let magnitude = long * (1.0 + fraction * fraction).sqrt();
+    (angle, magnitude)
 }
 
 /// Where the camera said it focused, in the frame the camera recorded it in.
@@ -554,6 +630,75 @@ mod tests {
                 "{turn} then {inverse} is {back:?}, not {at:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_angle_approximation_is_finer_than_the_bin_it_is_rounded_into() {
+        let steps = 100_000;
+        let mut worst = 0.0_f32;
+        for step in 0..=steps {
+            let fraction = step as f32 / steps as f32;
+            let truth = fraction.atan().to_degrees();
+            worst = worst.max((atan_degrees(fraction) - truth).abs());
+        }
+        assert!(
+            worst <= ATAN_ERROR_DEG,
+            "the polynomial is {worst}° off, past its own {ATAN_ERROR_DEG}° bound"
+        );
+        assert!(
+            worst < ROLL_BIN_DEG as f32 / 100.0,
+            "an error this large would blur the histogram: {worst}°"
+        );
+    }
+
+    #[test]
+    fn a_gradients_direction_is_its_orientation_modulo_half_a_turn() {
+        // Every axis, both diagonals, and a full sweep of awkward fractions, in
+        // all four quadrants: the fold into the upper half plane and the wrap at
+        // half a turn have to agree with `atan2` exactly, not approximately.
+        let steps = 720;
+        let mut cases: Vec<(f32, f32)> = (0..steps)
+            .map(|step| {
+                let turn = std::f32::consts::TAU * step as f32 / steps as f32;
+                (turn.cos(), turn.sin())
+            })
+            .collect();
+        cases.extend([
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+            (3.0, -0.25),
+            (-0.25, 3.0),
+        ]);
+
+        for (dx, dy) in cases {
+            let (angle, magnitude) = direction_of(dx, dy);
+            let truth = dy.atan2(dx).to_degrees().rem_euclid(180.0);
+            // A line and its reverse are one orientation, so the two are
+            // compared modulo half a turn: a truth of exactly 180° reads as 0°,
+            // and the distance between 179.9° and 0.1° is a fifth of a degree.
+            let difference = (angle - truth)
+                .abs()
+                .min((180.0 - (angle - truth).abs()).abs());
+            assert!(
+                difference <= ATAN_ERROR_DEG,
+                "({dx}, {dy}) sits at {truth}°, measured {angle}°"
+            );
+            assert!(
+                (magnitude - dx.hypot(dy)).abs() <= 1e-4 * dx.hypot(dy).max(1.0),
+                "({dx}, {dy}) has magnitude {}, measured {magnitude}",
+                dx.hypot(dy)
+            );
+        }
+        assert_eq!(
+            direction_of(0.0, 0.0),
+            (0.0, 0.0),
+            "a pixel with no gradient has no direction to average"
+        );
     }
 
     #[test]
