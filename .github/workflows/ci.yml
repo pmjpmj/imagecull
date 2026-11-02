@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Apple Silicon: the target platform (SPEC §2), and `raw-files` is a C
+    # dependency whose arm64 build is the one that ships.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: uname -m        # confirms the arm64 image; drop once verified
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@8103aff431aa12c1132e226b21f6a655ea749803 # v2.9.3
+      # One definition of the gate: the same script the hook runs, minus the
+      # staged-file walk.
+      - run: ./.githooks/pre-commit --check-only
+      - run: cargo test --workspace --locked
