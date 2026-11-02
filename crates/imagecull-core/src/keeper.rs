@@ -295,8 +295,7 @@ impl Choice {
 ///
 /// [`reading`]: crate::reading
 pub fn read(response: &Response, offered: usize) -> crate::Result<Choice> {
-    let answer = response
-        .document
+    let answer = crate::reading::answer_document(&response.document)
         .get("answers")
         .and_then(|answers| answers.get(QUESTION))
         .ok_or_else(|| bad("the comparative answer has no `keeper` answer"))?;

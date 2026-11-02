@@ -55,7 +55,7 @@ pub struct Answers {
 /// `answers: Err(bad_response)` with the document intact, so the caller can
 /// record the row and still write the raw JSON.
 pub fn read(rubric: &Rubric, response: Response) -> Reading {
-    let answers = extract(rubric, &response.document);
+    let answers = extract(rubric, answer_document(&response.document));
     Reading {
         answers,
         usage: usage(&response.document, response.client_latency_ms),
@@ -63,10 +63,37 @@ pub fn read(rubric: &Rubric, response: Response) -> Reading {
     }
 }
 
+/// The document the answers live in: the body itself, or the body's `result`
+/// object when a Workers AI-style envelope wraps it.
+///
+/// The rule is one substitution, never a search. A top-level `answers` wins;
+/// otherwise a `result` object that has `answers` is read instead; otherwise the
+/// body is what it is and the "no `answers` object" failure fires as it always
+/// has. So a document that has genuinely drifted still fails loudly rather than
+/// being found somewhere deeper by luck.
+///
+/// Fixture-driven: Clef's own envelope is still open (`cloudflare-clef` ticket
+/// 09), and the branch is what protects the next Workers AI model either way.
+///
+/// Shared with [`keeper::read`](crate::keeper::read), so a comparison and a
+/// rating can never disagree about which object answered them.
+pub(crate) fn answer_document(document: &Value) -> &Value {
+    if document.get("answers").is_some() {
+        return document;
+    }
+    match document.get("result") {
+        Some(result) if result.get("answers").is_some() => result,
+        _ => document,
+    }
+}
+
 /// The token and latency numbers. Both are advisory: a server that omits them
 /// still answered the question, and the request still took the time it took.
+///
+/// Read from wherever the answers were read, so a wrapper's own `usage` never
+/// shadows the one that belongs to the answer.
 fn usage(document: &Value, client_latency_ms: u64) -> Usage {
-    let usage = document.get("usage");
+    let usage = answer_document(document).get("usage");
     let read = |field: &str| {
         usage
             .and_then(|usage| usage.get(field))

@@ -247,6 +247,24 @@ fn the_answer_is_read_as_the_frame_it_names_with_its_confidence() {
 }
 
 #[test]
+fn an_answer_wrapped_the_way_a_workers_ai_host_wraps_it_is_read_the_same() {
+    let mut wrapped = answered("2", 0.71);
+    wrapped.document = json!({
+        "result": answered("2", 0.71).document,
+        "success": true,
+    });
+
+    assert_eq!(
+        keeper::read(&wrapped, 3).expect("a readable answer under `result`"),
+        Choice {
+            position: 2,
+            confidence: 0.71
+        },
+        "a comparison reads the same envelope rule as a rating"
+    );
+}
+
+#[test]
 fn an_answer_naming_a_frame_the_request_never_showed_is_refused() {
     let error = keeper::read(&answered("7", 0.9), 4).expect_err("a position out of range");
 
