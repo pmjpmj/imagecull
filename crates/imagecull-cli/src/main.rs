@@ -9,7 +9,6 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod cli;
-mod doctor;
 mod groups;
 mod models;
 mod printer;
@@ -32,7 +31,6 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let code = match cli.command {
         Command::Models(args) => models::run(&args),
-        Command::Doctor(args) => doctor::run(&args),
         Command::Score(args) => score::run(&args),
         Command::Groups(args) => groups::run(&args),
     };

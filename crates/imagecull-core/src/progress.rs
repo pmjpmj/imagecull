@@ -88,7 +88,7 @@ pub struct MeanMedian {
 /// What a run did, in the numbers a photographer judges it by.
 ///
 /// A summary is computed from a [`Run`], so it cannot disagree with the frames
-/// the CSV was written from, and it says how the run ended as well as how much
+/// the report was built from, and it says how the run ended as well as how much
 /// it did: a stopped run is not a finished one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
@@ -234,7 +234,7 @@ pub struct FrameEvent {
     pub index: usize,
     /// How many frames the run faces: the same total [`Started`] announced.
     pub total: usize,
-    /// The name the CSV will use for this frame.
+    /// The name the report will use for this frame.
     pub filename: String,
     /// The answer, or the classified reason there is none.
     pub judgement: Judgement,

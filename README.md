@@ -70,23 +70,9 @@ Ask oMLX what it is serving:
 imagecull models
 ```
 
-Decision models are flagged. Then run the self-test:
-
-```sh
-imagecull doctor
-imagecull doctor /path/to/shoot/DSC_0001.NEF
-```
-
-`doctor` checks that the server is reachable and new enough, that the model
-alias exists, that it is being served as a decision model rather than a plain
-vision model, and — when you pass a file — that the camera's embedded preview
-survives the pipeline. If something is wrong it prints one actionable sentence
-instead of letting a 400-file run fail 400 times.
-
-Both commands are oMLX's: they read its own endpoints, which another server does
-not have. Pointed at one, they say so and make no request — including
-`doctor <FILE>`'s preview self-test, which goes with them; `score --dry-run`
-writes the same previews and probes nothing. See [A server somewhere
+Decision models are flagged. `models` is oMLX's: it reads the server's own
+endpoints, which another server does not have. Pointed at one, it says so and
+makes no request. See [A server somewhere
 else](#a-server-somewhere-else).
 
 ## Quick start
@@ -208,10 +194,9 @@ imagecull groups --print-sidecars --limit 40 /path/to/shoot
 imagecull groups /path/to/shoot
 ```
 
-Every run also writes a measures CSV (`groups.csv` by default) with one row per
-frame: which group it fell in, and the frame's own sharpness, shake, roll and
-clipping numbers, plus the camera's focus report. Those are measurements for
-comparing frames within a group — not another score.
+The report prints one line per group — the frames it spans and who kept it —
+then a summary of the grouping and the cull. The per-frame measures are not
+written to a file; they are available on the progress lines while the pass runs.
 
 ### Grouping thresholds
 
@@ -352,9 +337,9 @@ Two models are served: `@cf/cloudflare/clef-flash`, the fast one in the recipe
 above, which is `model = "clef-flash"`, and `@cf/cloudflare/clef`, the bigger one
 — the same address ending in `{model}`, with `model = "clef"`.
 
-**`doctor` and `models` stay oMLX-only.** They read oMLX's own endpoints
-(`/health`, `/v1/models`, `/v1/models/status`), which no other server has, so
-against a Workers AI config they refuse by name and make no request — rather than
+**`models` stays oMLX-only.** It reads oMLX's own endpoints
+(`/v1/models`, `/v1/models/status`), which no other server has, so
+against a Workers AI config it refuses by name and makes no request — rather than
 reporting a 404 as "nothing loaded". There is no cheap "is this service alive"
 probe: the run's first real request is the test, and a refused credential (HTTP
 401 or 403) stops the run at that one request instead of paying for four hundred
@@ -375,12 +360,12 @@ hash.
 | `DSC_0001.xmp` | `score` | `xmp:Rating` and the provenance of the rating |
 | `DSC_0001.xmp` | `groups` | `xmp:Label` (green/red/yellow) and the provenance of the group verdict |
 | `DSC_0001.xmp.bak` | either | The previous sidecar, written only when one already existed |
-| `groups.csv` | `groups` | One row per frame: group, measures, status, error |
 | `previews/*.jpg` | `score --dry-run` | The exact previews a run would send |
 | the `--json-scores` file | `score` | Every raw model answer |
 
 The raws themselves are never written to, and the output paths are configurable
-where it makes sense (`--out` for the CSV, `--previews-dir` for previews).
+where it makes sense (`--previews-dir` for previews, `--json-scores` for the raw
+answers).
 
 ## Interrupting and re-running
 
@@ -400,16 +385,12 @@ no sidecar at all — no zero, no blank file.
 
 ## Troubleshooting
 
-- **`doctor` says the server is unreachable** — start oMLX and check
-  `--endpoint`. The default is `http://127.0.0.1:8000/v1/systemone`; an endpoint
-  with no path is posted to as written, which means `/`.
-- **`doctor` says the model is not a decision model** — the oMLX version is too
-  old, or the Clef checkpoint was loaded as a plain vision model. Upgrade to
-  oMLX 0.7.1.dev1 or newer and load a Clef decision model.
-- **`doctor` or `models` refuses the config instead of answering** — it says the
-  run posts to a server that is not oMLX. Those two commands read oMLX's own
-  probes and nothing else, so `doctor <FILE>` is refused too; `score` and
-  `groups` still work there. See
+- **The server is unreachable** — start oMLX and check `--endpoint`. The default
+  is `http://127.0.0.1:8000/v1/systemone`; an endpoint with no path is posted to
+  as written, which means `/`.
+- **`models` refuses the config instead of answering** — it says the run posts
+  to a server that is not oMLX. It reads oMLX's own probes and nothing else;
+  `score` and `groups` still work there. See
   [A server somewhere else](#a-server-somewhere-else).
 - **A run stops on `http_401` or `http_403`** — the server refused the
   credential, so every remaining frame would fail the same way. The row names
@@ -417,8 +398,7 @@ no sidecar at all — no zero, no blank file.
   check that the variable is exported in this shell and that its token has
   Workers AI permission.
 - **Scores look wrong for portrait frames** — run `score --dry-run` and inspect
-  `./previews`. Orientation is applied before the model sees the frame;
-  `doctor <FILE>` reports the same preview pipeline on one file.
+  `./previews`. Orientation is applied before the model sees the frame.
 - **A frame was skipped that you wanted re-rated** — its sidecar already has a
   rating. Use `--force`, or a different rubric plus `--force`.
 - **A sidecar was not written** — the run summary reports the status. Common

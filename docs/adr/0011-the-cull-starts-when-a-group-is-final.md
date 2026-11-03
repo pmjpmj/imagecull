@@ -1,6 +1,8 @@
 # 0011 — The cull starts when a group is final
 
 Status: accepted · 2026-11-28 · Feature `parallel-cull` ·
+amended by [ADR 0020](0020-the-cleanup-drops-doctor-and-the-measures-csv.md),
+which drops the preflight and the measures CSV ·
 supersedes `SPEC.md` §7.1's "the client sends one at a time" for the group cull ·
 amends `SPEC.md` §7.3 and §14's serial-workload claim
 

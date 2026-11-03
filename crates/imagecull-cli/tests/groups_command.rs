@@ -9,23 +9,19 @@
 //! would not ask.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 /// The binary under test, run over `dir`, with every config file refused so the
 /// machine's own `~/.config/imagecull.toml` cannot change what these tests see.
-fn groups(dir: &Path, extra: &[&str]) -> (Output, PathBuf) {
-    let csv = dir.join("groups.csv");
-    let output = Command::new(env!("CARGO_BIN_EXE_imagecull"))
+fn groups(dir: &Path, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_imagecull"))
         .arg("groups")
         .arg(dir)
         .arg("--no-config")
-        .arg("--out")
-        .arg(&csv)
         .args(extra)
         .output()
-        .expect("the binary runs");
-    (output, csv)
+        .expect("the binary runs")
 }
 
 #[test]
@@ -33,16 +29,12 @@ fn no_cull_runs_the_technical_pass_with_no_server_anywhere() {
     let shoot = tempfile::tempdir().expect("a temp dir");
     fs::write(shoot.path().join("DSC_0001.NEF"), b"not a NEF").expect("a broken frame");
 
-    let (output, csv) = groups(shoot.path(), &["--no-cull"]);
+    let output = groups(shoot.path(), &["--no-cull"]);
 
     assert_eq!(
         output.status.code(),
         Some(1),
         "a frame that cannot be read is a failed row, not a failed run: {output:?}"
-    );
-    assert!(
-        csv.exists(),
-        "the measures CSV is written whatever the cull does: {output:?}"
     );
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -66,14 +58,13 @@ fn a_folder_with_no_group_asks_no_server_for_a_question_it_cannot_ask() {
 
     // No `--no-cull`: the cull runs, and with no group to compare it must not
     // need a server — nothing is listening on the default endpoint here.
-    let (output, csv) = groups(shoot.path(), &[]);
+    let output = groups(shoot.path(), &[]);
 
     assert_eq!(
         output.status.code(),
         Some(0),
         "a folder with nothing to compare is a clean run with no server: {output:?}"
     );
-    assert!(csv.exists(), "{output:?}");
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
         report.contains("culling 0 groups") && report.contains("0 groups judged"),
@@ -95,13 +86,10 @@ fn a_shoot_configs_scan_section_reaches_the_groups_scan() {
 
     // `./imagecull.toml` is discovered in the working directory, so the shoot
     // folder is the working directory here.
-    let csv = shoot.path().join("groups.csv");
     let run = |extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_imagecull"))
             .arg("groups")
             .arg(shoot.path())
-            .arg("--out")
-            .arg(&csv)
             .arg("--no-cull")
             .args(extra)
             .current_dir(shoot.path())
@@ -114,18 +102,16 @@ fn a_shoot_configs_scan_section_reaches_the_groups_scan() {
         .into_owned();
 
     let output = run(&[]);
-    let measures = fs::read_to_string(&csv).expect("the CSV is written");
+    let report = String::from_utf8_lossy(&output.stdout);
     assert!(
-        measures.contains(&relative),
-        "the file's [scan] recursive has to reach the scan: {} {measures}",
-        String::from_utf8_lossy(&output.stdout)
+        report.contains(&relative),
+        "the file's [scan] recursive has to reach the scan: {report}"
     );
 
     let output = run(&["--no-config"]);
-    let measures = fs::read_to_string(&csv).expect("the CSV is written");
+    let report = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !measures.contains(&relative) && !measures.contains("DSC_0002.NEF"),
-        "--no-config leaves the folder alone, which is what proves the file did it: {}",
-        String::from_utf8_lossy(&output.stdout)
+        !report.contains(&relative) && !report.contains("DSC_0002.NEF"),
+        "--no-config leaves the folder alone, which is what proves the file did it: {report}"
     );
 }

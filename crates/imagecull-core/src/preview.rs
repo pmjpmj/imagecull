@@ -134,7 +134,7 @@ fn largest_by_area(previews: &[Preview]) -> Option<Preview> {
     })
 }
 
-/// The file's name alone, for messages that end up in a CSV cell.
+/// The file's name alone, for messages that end up on a report line.
 pub(crate) fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),

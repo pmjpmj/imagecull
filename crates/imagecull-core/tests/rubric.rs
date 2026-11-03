@@ -1,9 +1,9 @@
 //! The rubric is a file a photographer edits, so these tests treat it as one:
 //! which rubrics ship inside the binary, how one is selected, what the one
 //! question may say, and what the hash does when the text changes. The hash is
-//! the identity of a rubric — it decides whether two CSVs may be compared and
-//! whether a resume may reuse a cached answer — so its stability rules are
-//! asserted here rather than discovered later.
+//! the identity of a rubric — it decides whether two runs' answers may be
+//! compared — so its stability rules are asserted here rather than discovered
+//! later.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -244,7 +244,7 @@ fn every_rubric_asks_one_question_with_five_ordered_levels() {
                 .map(|(key, _)| key.as_str())
                 .collect::<Vec<_>>(),
             ["1", "2", "3", "4", "5"],
-            "the keys are what the CSV's integer column parses"
+            "the keys are what the rating property parses"
         );
         assert!(
             levels

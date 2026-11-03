@@ -58,10 +58,7 @@ pub fn run(args: &CommonArgs) -> u8 {
             ExitCode::Ok.code()
         }
         Err(error) => {
-            eprintln!(
-                "error: {} — run imagecull doctor for a diagnosis",
-                error.message()
-            );
+            eprintln!("error: {}", error.message());
             ExitCode::Fatal.code()
         }
     }
@@ -125,7 +122,7 @@ pub fn render(
         out.push_str(&format!(
             "\n! this server answered GET /v1/models/status with HTTP {http_status}, so what each \
              model is could not be read and none of the above could be marked — scoring may still \
-             work: try `imagecull doctor` or a one-file run\n"
+             work: try a one-file run\n"
         ));
     } else if !catalog.types_reported() {
         out.push_str(&format!(

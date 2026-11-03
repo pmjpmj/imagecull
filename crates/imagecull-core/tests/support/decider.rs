@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use imagecull_core::error::{Error, Result};
+use imagecull_core::error::Result;
 use imagecull_core::keeper::Comparison;
 use imagecull_core::preprocess::Encoded;
 use imagecull_core::scoring::{Cancel, Decider, Request, Response, State};
@@ -51,8 +51,6 @@ pub struct Scripted {
     seen_comparisons: RefCell<Vec<SeenComparison>>,
     in_flight: Cell<usize>,
     overlapped: Cell<bool>,
-    /// What the preflight answers, when a test gives it something to say.
-    preflight: RefCell<Option<Error>>,
     /// A cancel flag to pull, and after how many requests.
     cancel_after: Option<(usize, Arc<Cancel>)>,
     /// The latency this decider reports for every request, as if measured on
@@ -70,7 +68,6 @@ impl Scripted {
             seen_comparisons: RefCell::new(Vec::new()),
             in_flight: Cell::new(0),
             overlapped: Cell::new(false),
-            preflight: RefCell::new(None),
             cancel_after: None,
             latency_ms: 812,
         }
@@ -79,15 +76,6 @@ impl Scripted {
     /// A decider that answers every frame with the same readable document.
     pub fn always_reading(frames: usize) -> Scripted {
         Self::answering((0..frames).map(|_| Ok(document("4"))).collect())
-    }
-
-    /// Refuse the preflight with `error`, the way a real decider refuses a
-    /// server that is not answering or does not serve the alias. The refusal is
-    /// handed over once, because that is how often a run asks.
-    pub fn refusing_preflight(error: Error) -> Scripted {
-        let decider = Scripted::answering(Vec::new());
-        *decider.preflight.borrow_mut() = Some(error);
-        decider
     }
 
     /// Pull `cancel` after this many requests, from inside the decider: the
@@ -134,13 +122,6 @@ impl Scripted {
 }
 
 impl Decider for Scripted {
-    fn preflight(&self) -> Result<()> {
-        match self.preflight.borrow_mut().take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
         self.in_flight.set(self.in_flight.get() + 1);
         if self.in_flight.get() > 1 {
@@ -221,10 +202,6 @@ impl Decider for Guarded {
 
     fn compare(&self, comparison: &Comparison) -> Result<Response> {
         self.get().compare(comparison)
-    }
-
-    fn preflight(&self) -> Result<()> {
-        self.get().preflight()
     }
 }
 

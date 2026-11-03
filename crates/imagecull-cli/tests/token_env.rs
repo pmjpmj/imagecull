@@ -77,7 +77,7 @@ fn score(shoot: &Path, value: Option<&str>) -> Output {
     command.output().expect("the binary runs")
 }
 
-/// The rating requests the stub received: a run's preflight GETs are not them.
+/// The rating requests the stub received.
 fn ratings(stub: &Stub) -> Vec<Received> {
     stub.requests()
         .into_iter()

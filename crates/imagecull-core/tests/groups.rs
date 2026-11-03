@@ -302,17 +302,17 @@ fn renaming_the_files_changes_nothing_about_the_groups() {
 }
 
 #[test]
-fn two_runs_over_the_same_folder_agree_column_for_column() {
+fn two_runs_over_the_same_folder_agree_frame_for_frame() {
     let dir = shoot(vec![
         moment("DSC_0001.NEF", &scene(), 0, "00"),
         moment("DSC_0002.NEF", &scenes::blurred(&scene(), 1.0), 0, "10"),
         moment("DSC_0003.NEF", &scene(), 0, "20"),
     ]);
 
-    let first = group::render_csv(&plan(dir.path(), Thresholds::default()));
-    let second = group::render_csv(&plan(dir.path(), Thresholds::default()));
+    let first = plan(dir.path(), Thresholds::default());
+    let second = plan(dir.path(), Thresholds::default());
 
-    assert_eq!(first, second);
+    assert_eq!(first.frames, second.frames);
 }
 
 #[test]
@@ -499,35 +499,6 @@ fn a_frame_with_no_readable_preview_is_a_singleton_with_empty_measures_and_a_sta
         missing.failure.as_ref().map(|failure| failure.kind),
         Some(imagecull_core::ErrorKind::NoPreview)
     );
-    let csv = group::render_csv(&plan);
-    assert!(
-        csv.contains("DSC_0002.NEF,2,1,1,,,,,,,,,no_preview,"),
-        "{csv}"
-    );
-}
-
-#[test]
-fn the_csv_keeps_one_row_per_frame_and_names_its_columns() {
-    let image = scene();
-    let dir = shoot(vec![
-        moment("DSC_0001.NEF", &image, 0, "00"),
-        moment("DSC_0002.NEF", &image, 0, "10"),
-    ]);
-
-    let csv = group::render_csv(&plan(dir.path(), Thresholds::default()));
-    let lines: Vec<&str> = csv.lines().collect();
-
-    assert_eq!(
-        lines[0],
-        group::COLUMNS.join(","),
-        "the header is the columns, in order"
-    );
-    assert_eq!(lines.len(), 3, "a header and one row per frame");
-    assert!(
-        lines[1].starts_with("DSC_0001.NEF,1,1,2,"),
-        "the row carries the group and the place in it: {}",
-        lines[1]
-    );
 }
 
 #[test]
@@ -616,8 +587,8 @@ fn frames_that_share_a_timestamp_group_the_same_whatever_they_are_called() {
 #[test]
 fn reading_frames_at_a_time_changes_the_cost_and_nothing_else() {
     // A degree of parallelism is a scheduling decision: the same folder has to
-    // give the same bytes at one job and at many, which is what makes the plan,
-    // the CSV and the grouping hash comparable between machines.
+    // give the same plan at one job and at many, which is what makes the plan and
+    // the grouping hash comparable between machines.
     let image = scene();
     let other = scenes::tilted_scene(WIDTH, HEIGHT, 30.0);
     let dir = shoot(vec![
@@ -638,9 +609,8 @@ fn reading_frames_at_a_time_changes_the_cost_and_nothing_else() {
         let parallel = plan_at(dir.path(), jobs);
         assert_eq!(parallel.jobs, jobs.min(serial.frames.len()));
         assert_eq!(
-            group::render_csv(&parallel),
-            group::render_csv(&serial),
-            "{jobs} jobs wrote a different CSV"
+            parallel.frames, serial.frames,
+            "{jobs} jobs built a different plan"
         );
         assert_eq!(parallel.hash, serial.hash);
         assert_eq!(
@@ -672,7 +642,7 @@ impl group::Watcher for Told {
 #[test]
 fn the_pass_says_each_frame_as_it_reads_it_in_the_passes_own_order() {
     // Five frames and one that cannot be read, read eight at a time: the lines
-    // have to arrive in the scan's order, once each, with the status the CSV
+    // have to arrive in the scan's order, once each, with the status the plan
     // will carry.
     let image = scene();
     let dir = shoot(vec![

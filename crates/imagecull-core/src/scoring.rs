@@ -37,9 +37,9 @@ pub const TASK: &str = "photo_cull";
 /// What the model is asked about, besides the picture.
 ///
 /// Never the scores: the state is the setup, not the answer. `filename` is the
-/// name the photographer will see in the CSV, and `shoot_context` is their own
-/// framing of the shoot ("street at dusk, high ISO expected"), so a dim frame
-/// is judged as that and not as a failed studio frame.
+/// name the photographer will see in the report, and `shoot_context` is their
+/// own framing of the shoot ("street at dusk, high ISO expected"), so a dim
+/// frame is judged as that and not as a failed studio frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     /// The task framing, [`TASK`] for a cull.
@@ -90,8 +90,8 @@ pub struct Response {
 
 /// Token and latency numbers for one request (spec §9.1).
 ///
-/// Recorded in the ledger as they were read, so a resumed frame costs nothing to
-/// report and a duplicate row reports what its request actually cost.
+/// Recorded on the run's own account as they were read, so a frame reports what
+/// its request actually cost.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Prompt size, when the server reported it.
@@ -133,16 +133,6 @@ pub trait Decider {
     /// a time: the answer is a choice between the frames in [`Comparison`]'s own
     /// order. A group of one makes no call at all.
     fn compare(&self, comparison: &Comparison) -> Result<Response>;
-
-    /// Confirm, before the first frame, that this decider can answer at all.
-    ///
-    /// A run over 400 frames that would fail identically 400 times is worse
-    /// than a run that never started, so the preflight runs once, up front, and
-    /// its failure stops the run as a fatal error (spec §10). A decider with
-    /// nothing to check — every fake — is ready by default.
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// The photographer's stop button, as a flag the run reads between files.
@@ -361,13 +351,13 @@ pub enum Ending {
     Completed,
     /// The run stopped at a frame, because its failure is one a retry cannot
     /// fix: a rejected rubric, a malformed body, or a server that never
-    /// answered. The rows judged so far are still written.
+    /// answered. Every frame judged before the stop keeps its sidecar.
     Aborted {
         /// The failure that stopped it, as the photographer reads it.
         reason: String,
     },
-    /// The photographer cancelled, between files. The rows judged so far are
-    /// still written, so nothing scored is lost.
+    /// The photographer cancelled, between files. Nothing scored is lost, since
+    /// its sidecar was already written.
     Interrupted,
 }
 
@@ -467,22 +457,19 @@ impl Frame {
 }
 
 /// Score a shoot folder: scan it, take every accepted frame through the model,
-/// one request at a time, in ingest order, and write the report those frames
-/// add up to.
+/// one request at a time, in ingest order, and record what those frames add up
+/// to.
 ///
 /// A file that cannot be read or that carries no preview becomes a classified
 /// failure and the run continues: one odd file must not cost the photographer
 /// the other 399. The failures whose kind says a retry cannot help — a rejected
 /// rubric, a malformed body, a server that never answered — stop the run
-/// instead, and the rows judged so far are written either way. A cancellation
-/// stops the run between files, and its rows are written too.
+/// instead. A cancellation stops the run between files. Either way, every frame
+/// judged before the stop keeps the sidecar it was given.
 ///
-/// Every frame becomes a ledger record as it is produced, and its report row is
-/// rendered from that record and appended — so the CSV on disk is always the
-/// ledger's own account of itself up to the last judged frame, and a frame the
-/// ledger already holds is skipped rather than asked again (spec §9.2). An
-/// identical preview reuses the earlier frame's outcome and still gets its own
-/// row.
+/// The sidecar is the run's memory: a frame that already carries a rating is
+/// skipped rather than asked again (spec §9.2). An identical preview reuses the
+/// earlier frame's outcome and still gets its own sidecar.
 ///
 /// `reporter` hears about every one of those frames as it goes, in ingest order,
 /// and about the summary they add up to: this is the run's whole account of
@@ -499,16 +486,13 @@ pub fn run(
     let scan = ingest::scan(shoot, &config.scan)?;
     let rubric_hash = config.rubric_hash();
     // Before the first frame and before any request: the front end can say how
-    // much work there is while the preflight is still in flight.
+    // much work there is before the run starts.
     reporter.event(Event::Started(Started {
         total: scan.files.len(),
         builtin: config.rubric.builtin(),
         rubric_hash: rubric_hash.clone(),
         model: config.model.clone(),
     }));
-    // Before the first frame: a server that cannot answer must cost seconds,
-    // not a shoot.
-    decider.preflight()?;
     let total = scan.files.len();
     let mut account = Account::new(reporter, &rubric_hash, &config.model, total, began);
     // Dedupe's memory: one run's answers, keyed by the question that produced
@@ -1037,8 +1021,8 @@ pub(crate) fn prepare(source: &SourceFile, params: &Params) -> Result<Encoded> {
 }
 
 /// The name a frame is reported under: its path inside the shoot folder, so
-/// subfolder runs stay unambiguous and the CSV's `file` column is the same
-/// string the model was told.
+/// subfolder runs stay unambiguous and the report's name is the same string the
+/// model was told.
 pub(crate) fn display_name(source: &SourceFile) -> String {
     source.relative.to_string_lossy().into_owned()
 }

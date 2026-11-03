@@ -444,10 +444,9 @@ struct ServerSection {
 /// `[score]`: what a rating needs — the payload shape it sends, where its raw
 /// answers go, and how it judges.
 ///
-/// `score` reads all of it, and `doctor` reads the preview pair because its file
-/// check renders the preview a rating would send. A comparison has its own pair
-/// under [`GroupSection`], because a request carrying twenty frames of one moment
-/// is a different payload problem from a request carrying one; the one key
+/// `score` reads all of it. A comparison has its own pair under
+/// [`GroupSection`], because a request carrying twenty frames of one moment is a
+/// different payload problem from a request carrying one; the one key
 /// `groups` borrows from here is `shoot_context`, since a shoot's framing is a
 /// property of the shoot rather than of the pass (ADR 0016).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -740,13 +739,10 @@ pub struct Effective {
 
 impl Effective {
     /// Whether this run addresses oMLX's own decision path, the one whose probes
-    /// `doctor` and `models` read. An address with `{model}` in it is some other
-    /// server's addressing, and neither command can say anything about it.
+    /// `models` reads. An address with `{model}` in it is some other server's
+    /// addressing, and that command can say nothing about it.
     ///
-    /// The comparison itself is [`systemone::is_omlx`], which
-    /// [`systemone::Adapter::preflight`] also asks. So the two commands that
-    /// refuse a non-oMLX address and the preflight that skips oMLX's diagnosis
-    /// cannot come to different conclusions about the same config.
+    /// The comparison itself is [`systemone::is_omlx`].
     pub fn asks_omlx(&self) -> bool {
         systemone::is_omlx(&self.endpoint)
     }

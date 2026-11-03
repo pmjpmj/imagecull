@@ -88,7 +88,6 @@ imagecull/
       src/rubric.rs             # question schema, TOML load, rubric hash
       src/scoring.rs            # orchestration: one file → one Outcome
       src/sidecar.rs            # the XMP document, the writer port, raw answers
-      src/csv.rs                # RFC 4180 rows, for the measures report
       src/error.rs              # ErrorKind taxonomy
     imagecull-cli/              # bin: imagecull
       src/main.rs
@@ -165,7 +164,7 @@ separate.
 
 ## 7. The SystemOne wire — Clef over oMLX, and over any other host
 
-oMLX is the **reference server** this contract is written against, not the only one. Cloudflare hosts the same model family on Workers AI (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`) behind the same decision API: the request body and the answer are the same shape. Five facts about addressing and the payload differ, and each is a `[server]` or `[group]` key, so oMLX, Workers AI and any other SystemOne host (Vultr, DeepInfra) are one code path with different config — never a `provider` switch with a branch inside it (ADR 0018). The sixth row is why `doctor` and `models` stay oMLX-only.
+oMLX is the **reference server** this contract is written against, not the only one. Cloudflare hosts the same model family on Workers AI (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`) behind the same decision API: the request body and the answer are the same shape. Five facts about addressing and the payload differ, and each is a `[server]` or `[group]` key, so oMLX, Workers AI and any other SystemOne host (Vultr, DeepInfra) are one code path with different config — never a `provider` switch with a branch inside it (ADR 0018). The sixth row is why `models` stays oMLX-only.
 
 | | local oMLX | Cloudflare Workers AI |
 |---|---|---|
@@ -176,7 +175,7 @@ oMLX is the **reference server** this contract is written against, not the only 
 | images per request | the measured budget of 20 | `maxItems: 4` |
 | `/health`, `/v1/models`, `/v1/models/status` | oMLX's own probes | absent |
 
-**Requires oMLX ≥ 0.7.1.dev1** (decision models merged in `jundot/omlx#4315`). Before that, Clef checkpoints loaded as plain VLMs and returned meaningless text; `POST /v1/chat/completions` on a decision model returns **400** pointing at `/v1/systemone`. `imagecull doctor` must detect and explain exactly this — against oMLX, which is the only server whose probes it reads.
+**Requires oMLX ≥ 0.7.1.dev1** (decision models merged in `jundot/omlx#4315`). Before that, Clef checkpoints loaded as plain VLMs and returned meaningless text; `POST /v1/chat/completions` on a decision model returns **400** pointing at `/v1/systemone`. `imagecull models` shows which aliases the server serves and flags the decision models.
 
 ### 7.1 Request
 
@@ -489,7 +488,6 @@ imagecull score <DIR> [OPTIONS]
         --no-config             ignore any config file; built-in defaults only
 
 imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef, mark the reds
-        --out <FILE>            the measures CSV, default ./groups.csv
         --group-gap <SECS>      default 2.0
         --group-similarity <COSINE>   default 0.90
         --group-exposure-stops <STOPS>  default 2.0; 0 asks for one exposure exactly
@@ -506,7 +504,6 @@ imagecull groups <DIR> [OPTIONS]   # group by moment, cull each group with clef,
         --endpoint / --model / --timeout / --config / --no-config   as `score`
 
 imagecull models               # GET /v1/models, flag decision models
-imagecull doctor [FILE.nef]    # server reachability + preview extraction self-test
 imagecull calibrate <DIR>      # (M4, optional) compare scores vs existing xmp:Rating
 ```
 
@@ -559,19 +556,17 @@ most previews one comparative request carries — `[scan] recursive`, and
 `[score] shoot_context`: a shoot's framing is a
 property of the shoot, so the comparison is framed the way the rating was.
 Everything else under `[score]` is a rating's alone — a rating's preview size and
-a comparison's are different payloads, and one key cannot be both. `doctor`
-reads `[server]` and `[score] max_edge` / `jpeg_quality`, the pair its file check
-renders; `models` reads `[server]`. Key names are always accepted; a key another
-command reads is simply not consulted by this one.
+a comparison's are different payloads, and one key cannot be both. `models` reads
+`[server]`. Key names are always accepted; a key another command reads is simply
+not consulted by this one.
 
-**`doctor` and `models` are oMLX-only.** They read oMLX's own probes — `/health`,
-`/v1/models`, `/v1/models/status` — which no other SystemOne host serves, so both
-refuse a config whose `[server] endpoint` does not end in `/v1/systemone` (or
-carries `{model}`, which no oMLX install does), naming the address they would
-have read, and make no request. `score` and `groups` work against any host, and
-their preflight is skipped rather than faked when the address is not oMLX's
-(ADR 0018). An address with no path is legal and means `/`, but it is not oMLX's
-decision path either.
+**`models` is oMLX-only.** It reads oMLX's own probes — `/v1/models`,
+`/v1/models/status` — which no other SystemOne host serves, so it refuses a
+config whose `[server] endpoint` does not end in `/v1/systemone` (or carries
+`{model}`, which no oMLX install does), naming the address it would have read,
+and makes no request. `score` and `groups` work against any host (ADR 0018). An
+address with no path is legal and means `/`, but it is not oMLX's decision path
+either.
 
 **Retired sections.** `[preview]`, `[outputs]` and `[run]` are gone. A file that
 still sets a key under one is fatal and names its new home — `preview.max_edge
@@ -597,13 +592,13 @@ the shoot, not one invocation, so they are the file's alone (`--endpoint` and
 `--model` keep theirs).
 
 **What a file cannot set.** The shoot folder, `--dry-run`, `--force`,
-`--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`, `--quiet`,
+`--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--quiet`,
 `--verbose` — those describe the invocation, not the shoot. `--recursive`, the
 three `--group-*` thresholds, `--max-edge` and `--jpeg-quality` do have keys,
 and the `--recursive` flag takes an explicit `true`/`false` so a file that turned
 recursion on can be turned off for one run. `--max-edge` and `--jpeg-quality`
 name the preview of the command that was typed: `[score]` for `score` and
-`doctor`, `[group]` for `groups`. `--cull-jobs` has a key too — `[group]
+`[group]` for `groups`. `--cull-jobs` has a key too — `[group]
 cull_jobs` — because how many of a shoot's groups may be compared at once is a
 property of the shoot and the machine it goes home with, not of one invocation;
 `--jobs` stays a flag, because it is this machine's read degree. There is
@@ -621,8 +616,8 @@ code 2 (`§10`), never a warning-and-continue.
 A built-in's name is not a path and is not anchored: `rubric = "holiday"` means
 the built-in wherever the file sits, and `rubric = "./holiday"` means a file.
 
-**Provenance.** The file is read by `score`, `groups`, `doctor` and `models`,
-so a preflight certifies the pipeline the run will actually use. When a file was
+**Provenance.** The file is read by `score`, `groups` and `models`, so a run and
+its tools agree about the server and the preview they use. When a file was
 loaded, the run summary's provenance line prints it beside the rubric hash and
 the model alias:
 `rubric general/69139540 · model clef-flash-oQ4e · config /Volumes/Shoot/imagecull.toml`
@@ -658,7 +653,7 @@ Published per-request latencies on an M5 Max (text, 1k tokens): **clef-flash 9B 
 | 100 NEFs | ~1–2 min | ~4–7 min |
 | 400 NEFs | ~5–10 min | ~15–25 min |
 
-Memory/VRAM is the server's problem, not the client's: Flash needs ~16 GB RAM minimum, 27B ~32 GB. `doctor` reports which is actually installed rather than assuming.
+Memory/VRAM is the server's problem, not the client's: Flash needs ~16 GB RAM minimum, 27B ~32 GB. `models` reports which is actually installed rather than assuming.
 
 Bottleneck reality: **the server serialises requests**. A rating run is therefore sequential and client-side optimism buys little; the cull's `--cull-jobs` overlaps only the local extraction, downscale and encode with the previous group's server wait. The real lever is `--no-dedupe` off (burst dedupe) and rubric length, both handled above.
 
@@ -701,7 +696,7 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 
 ### 16.2 Layers
 
-- **Unit:** orientation application (all 8 tags), largest-preview selection by area, downscale never upscales, base64 round-trip, CSV escaping for the measures report (filenames with commas/quotes/unicode), the sidecar merge (byte-preservation of foreign XML, in-place rewrite, idempotency, refusal), rubric canonicalisation/hash stability.
+- **Unit:** orientation application (all 8 tags), largest-preview selection by area, downscale never upscales, base64 round-trip, the sidecar merge (byte-preservation of foreign XML, in-place rewrite, idempotency, refusal), rubric canonicalisation/hash stability.
 - **Contract:** `httpmock` serves recorded `/v1/systemone` bodies — including adversarial ones (`probabilities` as array *and* as object, `choice` as string, a key off the legend) — and asserts our deserialisation. No network in CI.
 - **Golden:** the summary block and the frame lines for the fixture set against the mock server, plus the exact sidecar document a fixture frame produces.
 - **Live (ignored by default, `--ignored`):** one real NEF against a real oMLX; asserts `status=ok` and that the rating lands in `1..=5`.
@@ -718,12 +713,12 @@ Committed: none by default (NEFs are large). A `fetch-fixtures.sh` + `README` de
 
 | # | risk | mitigation |
 |---|---|---|
-| R1 | **Which Clef checkpoint?** 27B scores higher; Flash is 4× faster and runs in 16 GB. Unknown which is installed. | `doctor`/`models` report the alias and size; rubric hash includes the model so results never silently mix. Ask before M4. |
+| R1 | **Which Clef checkpoint?** 27B scores higher; Flash is 4× faster and runs in 16 GB. Unknown which is installed. | `models` reports the alias and size; rubric hash includes the model so results never silently mix. Ask before M4. |
 | R2 | **Is Clef actually good at an absolute keeper rating?** One 5-way choice is a *new* use of a model trained on typed decisions. | M4 calibration against `xmp:Rating` the user already applied to past shoots (§11 `calibrate`). No tuning before evidence. |
 | R3 | The rating may saturate (everything 3–4). | Watch the histogram in the run summary; if the spread is flat, the rubric's instructions and level glosses need work, not the thresholds — there are no thresholds. |
-| R4 | `/v1/systemone` is new surface that may drift. | Defensive parsing, raw answers preserved, contract tests, version check in `doctor`. |
+| R4 | `/v1/systemone` is new surface that may drift. | Defensive parsing, raw answers preserved, contract tests. |
 | R5 | Embedded preview ≠ the edit the user would make. | Deliberate: the preview is the camera's rendering and the thing a cull actually judges. Full RAW demosaic stays a non-goal. |
-| R6 | Long runs on battery / sleep kills the server. | The skip rule finishes the shoot for the price of what is left; `doctor` preflight; `caffeinate -i` suggested in docs. |
+| R6 | Long runs on battery / sleep kills the server. | The skip rule finishes the shoot for the price of what is left; `caffeinate -i` suggested in docs. |
 | R7 | Sidecar writes are destructive if wrong. | §9.2 merge, §9.3 atomic write and backups, §9.6 preview, `xmp_foreign` detection, skip-by-default. |
 | R8 | Rubric is the product; wording churn invalidates ratings. | Rubric in TOML, hashed into every sidecar, and `--force` is explicit — but expect several re-runs during M4. Budget for it. |
 
@@ -739,7 +734,7 @@ Open questions for the user:
 
 | M | scope | done when |
 |---|---|---|
-| **M0** | workspace scaffold, `--version`, `doctor`, error taxonomy | `imagecull doctor` explains a missing/old oMLX clearly |
+| **M0** | workspace scaffold, `--version`, `models`, error taxonomy | `imagecull models` lists the server's aliases and flags decision models |
 | **M1** | ingest + preview extraction + orientation + downscale + `--dry-run` | portrait fixture exports upright at 1568 px |
 | **M2** | systemone client + rubric + single-file score | one NEF prints its rating; contract tests green |
 | **M3** | sidecar writes, skip rule, progress, summary | acceptance tests 1–5 pass |

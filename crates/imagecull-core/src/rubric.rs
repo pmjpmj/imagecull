@@ -25,8 +25,8 @@ pub const RATING_ID: &str = "stars";
 
 /// The ids a rubric must ask, in the canonical order they are reported in.
 ///
-/// A rubric that renames or drops one is rejected at load: the CSV, the ledger
-/// and (v2) the XMP sidecar all have a column for this one.
+/// A rubric that renames or drops one is rejected at load: the XMP sidecar has a
+/// property for this one.
 pub const REQUIRED_IDS: [&str; 1] = [RATING_ID];
 
 /// The rating keys, in order. They are also what the integer column parses.
@@ -299,8 +299,8 @@ fn built_in_hint(path: &Path) -> String {
 /// A digest as this crate spells it: 64 lowercase hex characters.
 ///
 /// The rubric hash, the SHA-256 of the bytes that were sent and the dedupe key
-/// are all SHA-256 digests that end up in a CSV cell or a ledger line, so they
-/// are spelled here, once.
+/// are all SHA-256 digests that end up in a sidecar property or a report line,
+/// so they are spelled here, once.
 pub(crate) fn hex(bytes: impl IntoIterator<Item = u8>) -> String {
     use fmt::Write as _;
     let mut out = String::new();
@@ -320,8 +320,8 @@ impl RubricHash {
         &self.0
     }
 
-    /// The first eight characters: what a CSV row carries, so a reader can see
-    /// two rows came from the same rubric without a 64-character column.
+    /// The first eight characters: what a report line carries, so a reader can
+    /// see two rows came from the same rubric without a 64-character column.
     pub fn short(&self) -> &str {
         &self.0[..8]
     }
@@ -529,7 +529,7 @@ impl QuestionFile {
         }
 
         // The one id a cull reports, and the exact legend it must offer: the
-        // CSV, the ledger and the v2 sidecar all depend on this shape.
+        // v2 sidecar depends on this shape.
         if id != RATING_ID {
             return Err(Error::fatal(format!(
                 "rubric question `{id}` is not one a cull reports; a rubric asks: {}",

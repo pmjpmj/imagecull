@@ -55,7 +55,6 @@ use image::RgbImage;
 use raw_files::{DateTime, Metadata};
 use sha2::{Digest, Sha256};
 
-use crate::csv;
 use crate::error::{Error, Result};
 use crate::ingest::{self, ScanCounts, ScanOptions, SourceFile};
 use crate::measure::{self, AfPoint, Measures};
@@ -643,8 +642,8 @@ pub struct Options {
     ///
     /// A scheduling decision, not a semantic one. A reading is a pure function
     /// of one path, so the degree changes how long the pass takes and nothing it
-    /// says — the same frames under the same thresholds give the same plan, the
-    /// same CSV and the same [`grouping_hash`] at any degree.
+    /// says — the same frames under the same thresholds give the same plan and
+    /// the same [`grouping_hash`] at any degree.
     pub jobs: Option<usize>,
 }
 
@@ -669,16 +668,9 @@ pub struct Planned {
     pub failure: Option<Failure>,
 }
 
-impl Planned {
-    /// The `status` cell: `ok`, or the kind that cost the frame its measures.
-    pub fn status(&self) -> &'static str {
-        status_of(self.failure.as_ref())
-    }
-}
-
 /// The `status` cell a failure produces: `ok` when there is none. One function
-/// because the progress line and the CSV row must never spell a frame's outcome
-/// two ways.
+/// because the progress line and the plan must never spell a frame's outcome two
+/// ways.
 fn status_of(failure: Option<&Failure>) -> &'static str {
     failure.map_or(sidecar::OK, |failure| failure.kind.as_str())
 }
@@ -817,9 +809,9 @@ pub struct Started {
 ///
 /// It comes in the pass's own order — the scan's, which is the folder's names —
 /// rather than the plan's capture order, because a photographer reads the folder
-/// as they named it; the CSV is where capture order lives. A cull's verdict lines
-/// may arrive before some of these when a group is finished ahead of an earlier
-/// scan index, but the report at the end is in group order.
+/// as they named it; the report is where capture order lives. A cull's verdict
+/// lines may arrive before some of these when a group is finished ahead of an
+/// earlier scan index, but the report at the end is in group order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameEvent {
     /// The frame's position in the pass, counting from 1, so a line reads
@@ -827,7 +819,7 @@ pub struct FrameEvent {
     pub index: usize,
     /// How many frames the pass faces: the total [`Started`] announced.
     pub total: usize,
-    /// The name the CSV will use for this frame.
+    /// The name the report will use for this frame.
     pub filename: String,
     /// The `status` cell its row will carry: `ok`, or the kind that cost it its
     /// measures.
@@ -838,7 +830,7 @@ pub struct FrameEvent {
 
 impl FrameEvent {
     /// The event one finished reading is: the same status and the same failure
-    /// the row carries, so a line and a CSV cell cannot disagree.
+    /// the plan carries, so a line and the plan cannot disagree.
     fn of(index: usize, total: usize, source: &SourceFile, reading: &Reading) -> FrameEvent {
         FrameEvent {
             index: index + 1,
@@ -1161,7 +1153,7 @@ fn read_metadata(
 /// the next scan index from a cursor; the pass's own thread buffers whatever
 /// arrived out of order, says each frame exactly once in index order, and then
 /// consumes every position of `order` that has become available. So the plan,
-/// the CSV, the hash and the log are the same at any degree, and a group can be
+/// the hash and the log are the same at any degree, and a group can be
 /// finished before the folder has been fully read.
 fn read_previews(
     sources: &[SourceFile],
@@ -1345,71 +1337,6 @@ fn af_point(focus: Option<&raw_files::Focus>) -> Option<AfPoint> {
         size: focus.size().map(|size| (size.width, size.height)),
         in_focus: focus.in_focus(),
     })
-}
-
-/// The columns of the measures CSV, in the order a photographer reads them:
-/// which frame and which group first, then the numbers, then what happened.
-pub const COLUMNS: [&str; 14] = [
-    "file",
-    "group",
-    "group_index",
-    "group_size",
-    "acutance",
-    "shake",
-    "roll_deg",
-    "roll_strength",
-    "clip_hi",
-    "clip_lo",
-    "af_in_focus",
-    "af_off_subject",
-    "status",
-    "error",
-];
-
-/// The whole plan as the CSV `imagecull groups` writes: a header and one row per
-/// frame, values at the precision they were measured at.
-///
-/// Pure, so the columns can be asserted on without a file; the command writes
-/// exactly these bytes. A failed frame keeps its row and leaves its measure cells
-/// empty: "no answer" and "a measure of zero" are different facts.
-pub fn render_csv(plan: &Plan) -> String {
-    let mut out = String::new();
-    csv::push_record(&mut out, &COLUMNS);
-    for frame in &plan.frames {
-        let measures = frame.measures;
-        let cells = [
-            frame.source.relative.to_string_lossy().into_owned(),
-            frame.group.to_string(),
-            frame.group_index.to_string(),
-            frame.group_size.to_string(),
-            measure_cell(measures.acutance),
-            measure_cell(measures.shake),
-            measure_cell(measures.roll_deg),
-            measure_cell(measures.roll_strength),
-            measure_cell(measures.clip_hi),
-            measure_cell(measures.clip_lo),
-            flag(measures.af_in_focus),
-            flag(measures.af_off_subject),
-            frame.status().to_string(),
-            frame
-                .failure
-                .as_ref()
-                .map_or_else(String::new, |failure| failure.message.clone()),
-        ];
-        csv::push_record(&mut out, &cells);
-    }
-    out
-}
-
-/// A measure as the CSV spells it: the shortest text that round-trips, or
-/// nothing at all when the measure could not be taken.
-fn measure_cell(value: Option<f64>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_default()
-}
-
-/// A three-state flag: `true`, `false`, or empty when the camera did not say.
-fn flag(value: Option<bool>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]

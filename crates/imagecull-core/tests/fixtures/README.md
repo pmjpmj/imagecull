@@ -54,5 +54,5 @@ if !path.is_file() {
 }
 ```
 
-Before a long run on a new camera, `imagecull doctor <FILE>` does the same check
-by hand on one of these files.
+Before a long run on a new camera, `imagecull score --dry-run` renders the same
+previews by hand for one of these files.

@@ -18,8 +18,6 @@
 //! Rendering is all this module does — the grouping and the numbers are
 //! `imagecull_core::group`, and the verdict is `imagecull_core::cull`.
 
-use std::path::Path;
-
 use imagecull_core::cull::{self, Culled};
 use imagecull_core::group::{self, Plan};
 use imagecull_core::keeper;
@@ -50,41 +48,22 @@ pub fn run(args: &GroupsArgs) -> u8 {
             return ExitCode::Fatal.code();
         }
     };
-    // The plan is whole whether or not the cull was: a fatal preflight still
-    // leaves the measures worth reading, and the CSV is what ticket 01 shipped.
-    let csv = group::render_csv(&outcome.plan);
-    if let Err(error) = std::fs::write(&args.out, csv.as_bytes()) {
-        eprintln!("error: cannot write {}: {error}", args.out.display());
-        return ExitCode::Fatal.code();
-    }
-    if let Some(message) = outcome.fatal {
-        eprintln!("error: {message}");
-        return ExitCode::Fatal.code();
-    }
+    // The plan is whole whether or not every group was decided: the cull's own
+    // failures are counted in its report.
     // Through the same write as the progress lines: a reader that stopped at
     // `head` is not a failed run.
     write(
         Stream::Out,
-        &report(
-            &outcome.plan,
-            outcome.culled.as_ref(),
-            &args.out,
-            args.quiet,
-        ),
+        &report(&outcome.plan, outcome.culled.as_ref(), args.quiet),
     );
     exit_code(&outcome.plan, outcome.culled.as_ref())
 }
 
-/// What a run leaves to render: the plan both passes produced, the cull when
-/// there was one, and the error that stopped a cull after its plan was built.
-///
-/// A fatal preflight is why `fatal` is separate from the plan: grouping still
-/// finished, so the CSV is written first, but no verdict was written and the run
-/// exits fatal rather than printing a report that would read complete.
+/// What a run leaves to render: the plan both passes produced, and the cull when
+/// there was one.
 struct Outcome {
     plan: Plan,
     culled: Option<Culled>,
-    fatal: Option<String>,
 }
 
 /// Drive the passes: one for `--no-cull`, both — overlapped — otherwise.
@@ -97,11 +76,7 @@ fn drive(
     if args.no_cull {
         let plan =
             group::run_with(&args.dir, options, console).map_err(|error| error.to_string())?;
-        return Ok(Outcome {
-            plan,
-            culled: None,
-            fatal: None,
-        });
+        return Ok(Outcome { plan, culled: None });
     }
     // The hash is a pure function of the thresholds, so it is known before the
     // groups are: a verdict can be written while the plan is still being built.
@@ -110,7 +85,6 @@ fn drive(
     Ok(Outcome {
         plan: streamed.plan,
         culled: Some(streamed.culled),
-        fatal: streamed.fatal.map(|error| error.to_string()),
     })
 }
 
@@ -321,11 +295,11 @@ fn frame_text(frame: &group::FrameEvent) -> String {
 
 /// What a run leaves on stdout when it is over: every group, then the summary —
 /// or, with `--quiet`, the summary alone, which is what a script wants to read.
-fn report(plan: &Plan, culled: Option<&Culled>, written: &Path, quiet: bool) -> String {
+fn report(plan: &Plan, culled: Option<&Culled>, quiet: bool) -> String {
     if quiet {
-        summary(plan, culled, written)
+        summary(plan, culled)
     } else {
-        render(plan, culled, written)
+        render(plan, culled)
     }
 }
 
@@ -347,7 +321,7 @@ pub fn exit_code(plan: &Plan, culled: Option<&Culled>) -> u8 {
 
 /// The report: one line per group, then the summary. Pure, so it can be asserted
 /// on without a terminal.
-pub fn render(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
+pub fn render(plan: &Plan, culled: Option<&Culled>) -> String {
     let mut out = String::new();
     for row in plan.grouped() {
         let verdict = culled.and_then(|culled| {
@@ -362,7 +336,7 @@ pub fn render(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
     if !plan.frames.is_empty() {
         out.push('\n');
     }
-    out.push_str(&summary(plan, culled, written));
+    out.push_str(&summary(plan, culled));
     out
 }
 
@@ -370,7 +344,7 @@ pub fn render(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
 /// was judged — who kept it and which colour the rest wear.
 ///
 /// The span rather than every name: a photographer reading a 34-frame group
-/// wants to know where it starts and ends, and the CSV has the rest.
+/// wants to know where it starts and ends, and the frame lines have the rest.
 fn group_line(row: &group::GroupRow<'_>, verdict: Option<&Verdict>) -> String {
     let size = row.frames.len();
     let first = row.frames[0].source.relative.display();
@@ -418,9 +392,8 @@ fn group_line(row: &group::GroupRow<'_>, verdict: Option<&Verdict>) -> String {
 }
 
 /// The one-line summary: how the shoot grouped, what both passes cost, what the
-/// cull decided, the hash a later run would be compared against, and where the
-/// CSV went.
-fn summary(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
+/// cull decided, and the hash a later run would be compared against.
+fn summary(plan: &Plan, culled: Option<&Culled>) -> String {
     let frames = plan.frames.len();
     let largest = plan
         .grouped()
@@ -520,7 +493,6 @@ fn summary(plan: &Plan, culled: Option<&Culled>, written: &Path) -> String {
         parts.push(format!("{} frames at a time", plan.jobs));
     }
     parts.push(format!("grouping hash {}", short_hash(&plan.hash)));
-    parts.push(format!("wrote {}", written.display()));
     parts.extend(left_out(&plan.counts));
     format!("groups: {}\n", parts.join(" · "))
 }
@@ -639,7 +611,7 @@ mod tests {
             2,
         );
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(
             rendered.starts_with("group   1    2 frames  DSC_0001.NEF … DSC_0002.NEF\n"),
@@ -671,7 +643,7 @@ mod tests {
             },
         ]);
 
-        let rendered = render(&plan, Some(&culled), Path::new("groups.csv"));
+        let rendered = render(&plan, Some(&culled));
 
         assert!(
             rendered.contains(
@@ -689,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_names_the_cost_the_cull_the_hash_and_the_file() {
+    fn the_summary_names_the_cost_the_cull_and_the_hash() {
         let plan = plan(
             vec![
                 measured("DSC_0001.NEF", 1, 1, 1),
@@ -699,13 +671,13 @@ mod tests {
         );
         let culled = culled(vec![verdict(1, "DSC_0001.NEF", 2, "DSC_0001.NEF", 1)]);
 
-        let rendered = render(&plan, Some(&culled), Path::new("out/groups.csv"));
+        let rendered = render(&plan, Some(&culled));
 
         assert!(
             rendered.contains(
                 "groups: 1 group in 2 frames (mean 2.0, largest 2) · 1 group judged · \
                  1 non-keeper · 1 red · 1 green · 1 comparative request · 2s measured, 1000 ms/frame · \
-                 grouping hash 01234567 · wrote out/groups.csv\n"
+                 grouping hash 01234567\n"
             ),
             "{rendered}"
         );
@@ -727,7 +699,7 @@ mod tests {
             ..verdict(1, "DSC_0001.NEF", 2, "-", 0)
         }]);
 
-        let rendered = summary(&plan, Some(&culled), Path::new("groups.csv"));
+        let rendered = summary(&plan, Some(&culled));
 
         assert!(rendered.contains("1 undecided"), "{rendered}");
         assert_eq!(exit_code(&plan, Some(&culled)), ExitCode::FailedRows.code());
@@ -737,7 +709,7 @@ mod tests {
     fn a_pass_that_left_the_cull_out_says_nothing_about_one() {
         let plan = plan(vec![measured("DSC_0001.NEF", 1, 1, 1)], 1);
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(!rendered.contains("judged"), "{rendered}");
         assert!(!rendered.contains("non-keeper"), "{rendered}");
@@ -750,7 +722,7 @@ mod tests {
         let mut plan = plan(vec![measured("DSC_0001.NEF", 1, 1, 1)], 1);
         plan.jobs = 8;
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(
             rendered.contains("8 frames at a time"),
@@ -816,7 +788,7 @@ mod tests {
         );
         let culled = culled(vec![verdict(1, "DSC_0001.NEF", 2, "DSC_0001.NEF", 1)]);
 
-        let quiet = report(&plan, Some(&culled), Path::new("groups.csv"), true);
+        let quiet = report(&plan, Some(&culled), true);
 
         assert!(quiet.starts_with("groups: 1 group in 2 frames"), "{quiet}");
         assert!(
@@ -859,7 +831,7 @@ mod tests {
             1,
         );
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(
             rendered.contains("(1 without measures)"),
@@ -873,7 +845,7 @@ mod tests {
     fn an_empty_folder_still_says_what_it_did() {
         let plan = plan(Vec::new(), 0);
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(
             rendered.starts_with("groups: 0 groups in 0 frames"),
@@ -891,7 +863,7 @@ mod tests {
             hidden_directories: 1,
         };
 
-        let rendered = render(&plan, None, Path::new("groups.csv"));
+        let rendered = render(&plan, None);
 
         assert!(rendered.contains("3 skipped (not RAW)"), "{rendered}");
         assert!(rendered.contains("2 ignored (Finder noise)"), "{rendered}");

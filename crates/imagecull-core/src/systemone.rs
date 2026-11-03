@@ -15,7 +15,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 
-use crate::doctor;
 use crate::error::{Error, ErrorKind, Result};
 use crate::keeper::{self, Comparison};
 use crate::omlx::{self, Client, MODEL_PLACEHOLDER};
@@ -24,27 +23,25 @@ use crate::scoring::{Decider, Request, Response, State};
 /// The path a decision model is served on by default (spec §7.1).
 ///
 /// It is oMLX's, which is why it is what [`DEFAULT_ENDPOINT`] ends with and what
-/// `config.rs` settles to. The two places that ask the question ask [`is_omlx`],
-/// so a run and its preflight cannot disagree about which server they are
-/// addressing.
+/// `config.rs` settles to. [`is_omlx`] is the one place that decides whether an
+/// address names this server.
 pub const PATH: &str = "/v1/systemone";
 
 /// The address a run addresses when nothing says otherwise: oMLX on the port it
 /// listens on, and nothing else — a config with no `[server]` key posts here.
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1/systemone";
 
-/// Whether an address is oMLX's own decision path, the one whose probes `doctor`
-/// and `models` read.
+/// Whether an address is oMLX's own decision path, the one whose probes `models`
+/// reads.
 ///
 /// An address with `{model}` in it is some other server's addressing: the model
-/// name is part of its path, which no oMLX install does, and neither command can
-/// say anything about it. Anything else has to *end* with the decision path, so
-/// an oMLX behind a prefix (`https://box.local/omlx/v1/systemone`) is still oMLX
-/// to these two commands — its probes hang off the same prefix.
+/// name is part of its path, which no oMLX install does, and `models` can say
+/// nothing about it. Anything else has to *end* with the decision path, so an
+/// oMLX behind a prefix (`https://box.local/omlx/v1/systemone`) is still oMLX to
+/// that command — its probes hang off the same prefix.
 ///
-/// Asked by [`crate::config::Effective::asks_omlx`], which decides whether those
-/// commands run at all, and by [`Adapter::preflight`], which skips oMLX's
-/// diagnosis when the answer is no.
+/// Asked by [`crate::config::Effective::asks_omlx`], which decides whether the
+/// command runs at all.
 pub fn is_omlx(endpoint: &str) -> bool {
     !endpoint.contains(MODEL_PLACEHOLDER) && omlx::path_of(endpoint).ends_with(PATH)
 }
@@ -91,9 +88,8 @@ pub struct Adapter {
 
 impl Adapter {
     /// Wrap a client and a [`Wire`] for one model. The client's timeouts are the
-    /// request's timeouts, the model is what the preflight looks for on an oMLX
-    /// server and what the body carries, and the wire is where each request goes
-    /// and whether it carries `truncate`.
+    /// request's timeouts, the model is what the body carries, and the wire is
+    /// where each request goes and whether it carries `truncate`.
     ///
     /// An address that needs a model, with no model to fill it, is fatal here
     /// rather than at the first request: a config can be legal and still describe
@@ -134,34 +130,6 @@ impl Adapter {
 }
 
 impl Decider for Adapter {
-    /// Ask `doctor`'s question before the first frame: is something answering,
-    /// and is the alias served as a decision model? Both failures arrive here
-    /// as one actionable sentence, so a broken server costs seconds instead of
-    /// 400 frames of the same 400 (spec §10).
-    ///
-    /// The run is the lenient reader of that diagnosis: it refuses only what the
-    /// server has said is unfit, never what the server did not say at all
-    /// ([`crate::doctor::Report::can_score`] has the list). `imagecull doctor`
-    /// stays strict, so the strictness is available where it is useful —
-    /// explaining a server — and does not stop a working one from scoring.
-    ///
-    /// An address that is not oMLX's is not asked at all: Workers AI has no
-    /// `/health` and no model listing suitable for a one-shot check, and
-    /// spending a decision request per run to prove the token works is worse
-    /// than the 401 rule, which costs one request and names the variable to
-    /// check. So the preflight is skipped, not faked.
-    fn preflight(&self) -> Result<()> {
-        if !is_omlx(&self.endpoint) {
-            return Ok(());
-        }
-        let report = doctor::diagnose(&self.client, &self.model);
-        if report.can_score() {
-            Ok(())
-        } else {
-            Err(Error::fatal(report.message()))
-        }
-    }
-
     fn decide(&self, request: &Request<'_>) -> Result<Response> {
         self.ask(self.body(request), Asked::Frame)
     }

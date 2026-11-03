@@ -5,8 +5,8 @@
 //! file's largest embedded preview, orient it, downscale it, encode it, and
 //! write it into a previews directory so the photographer can eyeball
 //! orientation, crop and detail loss before committing an hour to a real run
-//! (spec §"What the model sees"). No HTTP, no ledger, no CSV, and nothing
-//! written inside the shoot folder.
+//! (spec §"What the model sees"). No HTTP and no sidecar, and nothing written
+//! inside the shoot folder.
 
 use std::fs;
 use std::path::{Path, PathBuf};

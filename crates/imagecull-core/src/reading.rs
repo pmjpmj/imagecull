@@ -38,8 +38,8 @@ impl Reading {
 /// never a threshold over anything else — and `confidence` is the top-option
 /// probability of that choice.
 ///
-/// Serialised as-is into a ledger record, so a resumed frame's answer is the one
-/// the model gave and not a re-reading of it.
+/// Serialised as-is into the frame's record, so a stored answer is the one the
+/// model gave and not a re-reading of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Answers {
     /// The rating, 1–5, straight from the `choice` key.

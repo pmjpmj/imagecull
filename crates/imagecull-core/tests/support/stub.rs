@@ -1,11 +1,11 @@
 //! A hand-rolled HTTP stub for the tests that drive the real `ureq` client.
 //!
-//! Two tests need a socket — `doctor`'s three GETs and a `/v1/systemone` POST —
-//! and both need the same things: a real `TcpListener` on loopback, a request
-//! read off the wire, a canned answer written back, and no mocking crate. This
-//! is that stub, once: routers answer by path like an old server, scripts answer
-//! in order like a model, and every request is recorded so a test can assert on
-//! what the client actually sent.
+//! Some tests need a socket — a `/v1/systemone` POST, and the probes `models`
+//! reads — and all need the same things: a real `TcpListener` on loopback, a
+//! request read off the wire, a canned answer written back, and no mocking crate.
+//! This is that stub, once: routers answer by path like an old server, scripts
+//! answer in order like a model, and every request is recorded so a test can
+//! assert on what the client actually sent.
 
 #![allow(dead_code)]
 
@@ -78,9 +78,8 @@ impl Stub {
         Stub::start(Vec::new(), script)
     }
 
-    /// A server that passes a run's preflight — `GET /health` ready and every
-    /// alias in `aliases` served as a decision model — and then answers the
-    /// decision requests in turn from `script`.
+    /// A server that serves every alias in `aliases` as a decision model, and
+    /// then answers the decision requests in turn from `script`.
     pub fn serving(script: Vec<(u16, String)>, aliases: &[&str]) -> Stub {
         let listed: Vec<Value> = aliases.iter().map(|alias| json!({"id": alias})).collect();
         let typed: Vec<Value> = aliases

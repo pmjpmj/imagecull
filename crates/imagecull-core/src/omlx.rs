@@ -9,8 +9,8 @@
 //! `/v1/models/status` only exists from oMLX `0.7.1.dev1`, so its absence is
 //! itself the "too old" signal.
 //!
-//! Everything here is typed and synchronous: no retries, no preflight policy,
-//! no printing. Callers decide what a failure means.
+//! Everything here is typed and synchronous: no retries, no printing. Callers
+//! decide what a failure means.
 
 use std::fmt;
 use std::time::Duration;
@@ -408,7 +408,7 @@ impl Client {
         // endpoint is decoration on top: a server that guards it (401), never
         // had it (404) or dropped the connection still lists what it serves, and
         // refusing the whole catalog over the decoration is how a working server
-        // gets called broken. Why it was unavailable is kept, so `doctor` can
+        // gets called broken. Why it was unavailable is kept, so a caller can
         // tell "too old to say" from "will not say" (spec §11, ticket 01).
         let mut unavailable = None;
         let statuses = match self.get("/v1/models/status") {
@@ -416,7 +416,7 @@ impl Client {
                 Some(parse_json::<StatusEnvelope>("/v1/models/status", &fetched.body)?.models)
             }
             // Guarded: the endpoint exists and we are not allowed to read it.
-            // That is `doctor`'s "will not say", not its "too old to say".
+            // That is "will not say", not "too old to say".
             Ok(fetched) if matches!(fetched.http_status, 401 | 403) => {
                 unavailable = Some(fetched.http_status);
                 None

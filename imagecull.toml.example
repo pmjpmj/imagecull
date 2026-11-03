@@ -22,7 +22,7 @@
 #
 # What a config file cannot set, because it describes this invocation rather
 # than this shoot: the shoot folder itself, `--dry-run`, `--force`,
-# `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`, `--out`,
+# `--allow-foreign`, `--print-sidecars`, `--limit`, `--jobs`,
 # `--quiet`/`--verbose`.
 
 [server]
@@ -34,8 +34,8 @@
 # Default: http://127.0.0.1:8000/v1/systemone
 endpoint = "http://127.0.0.1:8000/v1/systemone"
 # Model name to ask: the request body's `model`, and the value `{model}` takes in
-# the address. `score` defaults to the rubric's own alias; `groups`, `doctor` and
-# `models` default to clef-flash-oQ4e when neither this nor `--model` is given.
+# the address. `score` defaults to the rubric's own alias; `groups` and `models`
+# default to clef-flash-oQ4e when neither this nor `--model` is given.
 # Changing the name changes the rubric hash, and two runs with different hashes
 # are not comparable.
 # model = "clef-flash-oQ4e"
@@ -61,9 +61,8 @@ endpoint = "http://127.0.0.1:8000/v1/systemone"
 
 [score]
 # What one rating needs: how much picture to send, where the raw answers go, and
-# how the frame is judged. `score` reads all of it; `doctor <FILE>` reads the
-# preview pair too, because its file check renders the preview a rating would
-# send. `groups` borrows `shoot_context` and nothing else.
+# how the frame is judged. `score` reads all of it. `groups` borrows
+# `shoot_context` and nothing else.
 #
 # Cap on the longest edge of the preview sent for one frame's rating, in pixels.
 # Smaller is faster and cheaper in context; below ~1000 px fine detail stops
@@ -73,8 +72,7 @@ endpoint = "http://127.0.0.1:8000/v1/systemone"
 # jpeg_quality = 88
 #
 # Every raw model answer, as JSON, so a surprising score loses nothing. It is
-# `score`'s record, not `groups`, which writes its measures to `--out`.
-# Default: not written
+# `score`'s record, and `groups` never writes one. Default: not written
 # json_scores = "scores.json"
 #
 # The rubric to judge by: a built-in's name, or a path to a rubric file.
@@ -168,7 +166,7 @@ endpoint = "http://127.0.0.1:8000/v1/systemone"
 # max_images = 4       # Workers AI's per-request cap; a bigger burst is split
 # recipe ends
 #
-# `score` and `groups` work against it as they do against oMLX. `doctor` and
-# `models` do not: they read oMLX's own probes, and refuse this config by name
-# rather than inventing a diagnosis they have no endpoint for.
+# `score` and `groups` work against it as they do against oMLX. `models` does
+# not: it reads oMLX's own probes, and refuses this config by name rather than
+# inventing a diagnosis it has no endpoint for.
 # ---------------------------------------------------------------------------
