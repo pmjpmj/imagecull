@@ -234,10 +234,8 @@ impl Culled {
 
 /// Judge every group in `plan` and write what it decided.
 ///
-/// The preflight runs first, so a server that cannot answer a comparative
-/// request costs seconds rather than a whole shoot's requests: nothing is marked
-/// until the first group is answered. A group nothing could decide marks
-/// nothing; the rest of the folder is judged regardless.
+/// A group nothing could decide marks nothing; the rest of the folder is judged
+/// regardless.
 pub fn run(
     plan: &Plan,
     config: &Config<'_>,
@@ -250,12 +248,6 @@ pub fn run(
     watcher.event(&Event::Started {
         groups: Some(groups),
     });
-    // A folder with no group asks no comparative question, so it needs no
-    // server: the preflight is about the requests the pass will make, and a
-    // shoot of singletons makes none.
-    if groups > 0 {
-        decider.preflight()?;
-    }
     let mut culled = Culled::default();
     for row in &rows {
         culled.merge(judge(row, config, decider, writer, watcher));
@@ -266,9 +258,7 @@ pub fn run(
 /// Judge one group and write what it decided.
 ///
 /// A group of one asks no comparative question and is retired instead; a group
-/// of two or more is compared and marked. The caller owns the preflight, so a
-/// pass that judges groups in parallel can ask the server once rather than once
-/// per worker.
+/// of two or more is compared and marked.
 pub fn judge(
     row: &GroupRow<'_>,
     config: &Config<'_>,
@@ -298,12 +288,6 @@ pub struct Streamed {
     pub plan: Plan,
     /// What the groups that could be judged decided.
     pub culled: Culled,
-    /// The error that stopped the cull, when one did.
-    ///
-    /// A fatal preflight is the case this exists for: the grouping pass still
-    /// finishes, so the caller has a plan and can write the measures CSV, but no
-    /// verdict was written and the run's exit is fatal.
-    pub fatal: Option<Error>,
 }
 
 /// Judge groups as a grouping pass finds them, `jobs` at a time, and wait for
@@ -311,11 +295,7 @@ pub struct Streamed {
 ///
 /// `grouping` is the pass that finds the groups — [`group::stream_with`] in
 /// production, a script in a test — and it runs on this thread while the workers
-/// judge what it hands over. The first group of two or more triggers the one
-/// preflight, before any worker is given a group: a server that cannot answer
-/// costs seconds, and nothing is marked first. A preflight that fails does not
-/// stop the grouping pass, so the caller still gets a plan to write; it stops
-/// the cull, and comes back in [`Streamed::fatal`].
+/// judge what it hands over.
 ///
 /// The requests of different groups may be in flight at once. Groups share no
 /// frame, so their sidecar writes never meet; the watcher is `Sync`, and the
@@ -355,12 +335,11 @@ where
             }));
         }
 
-        let mut pool = Pool::new(sender, decider, watcher);
+        let mut pool = Pool::new(sender, watcher);
         let plan = grouping(&mut pool);
         if plan.is_ok() {
             pool.finish();
         }
-        let fatal = pool.fatal.take();
         // Dropping the sender is what ends the workers once the queue is dry.
         drop(pool);
         for handle in handles {
@@ -375,51 +354,26 @@ where
         // groups by number, and this is what makes a second run's report byte for
         // byte the same.
         culled.verdicts.sort_by_key(|verdict| verdict.number);
-        plan.map(|plan| Streamed {
-            plan,
-            culled,
-            fatal,
-        })
+        plan.map(|plan| Streamed { plan, culled })
     })
 }
 
-/// The sink a streamed cull gives the grouping pass: it starts the one preflight,
-/// hands every group to a worker, and holds the first groups back until the
-/// folder has shown it has a group worth asking the model about.
-///
-/// The hold-back is the preflight's ordering rule. A folder of singletons needs no
-/// server, and a folder with one group of two needs the server before its frames'
-/// sidecars are touched — including the singletons' retirements, which is why they
-/// wait for the first multi-frame group rather than being judged as they arrive.
+/// The sink a streamed cull gives the grouping pass: it announces the pass once
+/// and hands every group to a worker.
 struct Pool<'a> {
     sender: mpsc::Sender<group::Found>,
-    decider: &'a (dyn Decider + Sync),
     watcher: &'a (dyn Watcher + Sync),
     /// Whether the pass has announced itself: the start line says a count only
     /// when the folder is already fully grouped, which streaming cannot know.
     announced: bool,
-    /// Whether the preflight passed and groups may be dispatched.
-    started: bool,
-    /// Singletons seen before the first group of two or more.
-    deferred: Vec<group::Found>,
-    /// The error that stopped the cull.
-    fatal: Option<Error>,
 }
 
 impl<'a> Pool<'a> {
-    fn new(
-        sender: mpsc::Sender<group::Found>,
-        decider: &'a (dyn Decider + Sync),
-        watcher: &'a (dyn Watcher + Sync),
-    ) -> Pool<'a> {
+    fn new(sender: mpsc::Sender<group::Found>, watcher: &'a (dyn Watcher + Sync)) -> Pool<'a> {
         Pool {
             sender,
-            decider,
             watcher,
             announced: false,
-            started: false,
-            deferred: Vec::new(),
-            fatal: None,
         }
     }
 
@@ -430,47 +384,21 @@ impl<'a> Pool<'a> {
         let _ = self.sender.send(found);
     }
 
-    /// The grouping pass is over: release what waited for the preflight, or say
-    /// that there was no group to judge at all.
+    /// The grouping pass is over: say that there was no group to judge at all.
     fn finish(&mut self) {
-        if self.fatal.is_some() {
-            return;
-        }
         if !self.announced {
             self.watcher.event(&Event::Started { groups: Some(0) });
-        }
-        for found in std::mem::take(&mut self.deferred) {
-            self.dispatch(found);
         }
     }
 }
 
 impl group::Sink for Pool<'_> {
     fn group(&mut self, found: group::Found) -> Result<()> {
-        if self.fatal.is_some() {
-            // The cull cannot be finished, but the grouping pass still has a plan
-            // to build and a CSV to write.
-            return Ok(());
-        }
-        if self.started {
-            self.dispatch(found);
-            return Ok(());
-        }
-        if found.size() > 1 {
+        if !self.announced {
             self.announced = true;
             self.watcher.event(&Event::Started { groups: None });
-            if let Err(error) = self.decider.preflight() {
-                self.fatal = Some(error);
-                return Ok(());
-            }
-            self.started = true;
-            for deferred in std::mem::take(&mut self.deferred) {
-                self.dispatch(deferred);
-            }
-            self.dispatch(found);
-        } else {
-            self.deferred.push(found);
         }
+        self.dispatch(found);
         Ok(())
     }
 }
@@ -865,13 +793,6 @@ mod tests {
         fn compare(&self, _comparison: &Comparison) -> Result<Response> {
             panic!("a folder with no group makes no comparative request");
         }
-
-        fn preflight(&self) -> Result<()> {
-            Err(Error::new(
-                ErrorKind::ServerUnreachable,
-                "nothing is listening on 127.0.0.1:8000",
-            ))
-        }
     }
 
     fn planned(name: &str, place: usize, size: usize) -> Planned {
@@ -961,9 +882,8 @@ mod tests {
                 })
             },
         )
-        .expect("a folder of singletons needs no server, streamed or not");
+        .expect("a folder of singletons asks no server, streamed or not");
 
-        assert!(streamed.fatal.is_none());
         assert_eq!(streamed.culled.groups, 0, "nothing was judged");
     }
 

@@ -1,6 +1,8 @@
 # 0019 — The endpoint is the whole address, and `model` is the only name
 
 Status: accepted · 2026-12-01 · Feature `cloudflare-clef` ·
+amended by [ADR 0020](0020-the-cleanup-drops-doctor-and-the-measures-csv.md),
+which removes the `doctor` half ·
 amends [ADR 0018](0018-the-server-section-describes-the-wire-not-the-vendor.md)'s
 `[server]` key list (`path` and `selector` retire; `endpoint` absorbs one and
 `model` the other) · amends

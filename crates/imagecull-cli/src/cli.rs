@@ -22,9 +22,6 @@ use imagecull_core::systemone::{Adapter, Wire};
 /// Where `--dry-run` writes its previews, relative to the working directory.
 pub const DEFAULT_PREVIEWS_DIR: &str = "previews";
 
-/// Where `groups` writes its measures, relative to the working directory.
-pub const DEFAULT_GROUPS_CSV: &str = "groups.csv";
-
 #[derive(Parser, Debug)]
 #[command(
     name = "imagecull",
@@ -42,9 +39,6 @@ pub struct Cli {
 pub enum Command {
     /// List what the local oMLX serves, flagging decision models
     Models(CommonArgs),
-    /// Check that the local oMLX can score photos, and that a file's preview
-    /// survives the pipeline
-    Doctor(DoctorArgs),
     /// Score a shoot folder
     Score(ScoreArgs),
     /// Group a shoot folder by moment and cull each group with clef
@@ -62,8 +56,8 @@ pub struct CommonArgs {
     pub endpoint: Option<String>,
 
     /// Model name to ask: the body's `model`, and the value `{model}` takes in
-    /// the endpoint. score defaults to the rubric's alias, doctor, groups and
-    /// models to clef-flash-oQ4e
+    /// the endpoint. score defaults to the rubric's alias, groups and models to
+    /// clef-flash-oQ4e
     #[arg(short = 'm', long, value_name = "NAME")]
     pub model: Option<String>,
 
@@ -142,8 +136,8 @@ impl CommonArgs {
         Adapter::new(client, model, self.wire(effective)).map_err(|error| error.to_string())
     }
 
-    /// The alias `doctor` and `models` work with: the configured one, or the
-    /// reference server's default. A run prefers the rubric's alias instead.
+    /// The alias `models` works with: the configured one, or the reference
+    /// server's default. A run prefers the rubric's alias instead.
     pub fn alias<'a>(&self, effective: &'a Effective) -> &'a str {
         effective.model.as_deref().unwrap_or(omlx::DEFAULT_MODEL)
     }
@@ -168,23 +162,21 @@ impl CommonArgs {
     }
 }
 
-/// Refuse a config that addresses some other server, for the two commands that
-/// read oMLX's own endpoints: prints what the command would have read, the
-/// address this run actually posts to, and the two commands that do work there,
-/// and says which exit code the command owes when it does. `None` is "this run
-/// addresses oMLX, carry on".
+/// Refuse a config that addresses some other server, for the command that reads
+/// oMLX's own endpoints: prints what the command would have read, the address
+/// this run actually posts to, and the two commands that do work there, and says
+/// which exit code the command owes when it does. `None` is "this run addresses
+/// oMLX, carry on".
 ///
 /// The address is the configured one, never the interpolated one: filling
-/// `{model}` needs a model these commands were not given, and a message about a
-/// URL the config does not contain would send the photographer looking for a key
+/// `{model}` needs a model this command was not given, and a message about a URL
+/// the config does not contain would send the photographer looking for a key
 /// that is not there.
 ///
 /// `reads` is the probe list the command depends on, said in its own words —
-/// `doctor` reads three endpoints, `models` joins two listings — because that
-/// difference is the whole diagnosis.
+/// `models` joins two listings — because that difference is the whole diagnosis.
 ///
-/// The question is [`Effective::asks_omlx`], never a second comparison here: a
-/// run's preflight asks it too, and the two must not disagree.
+/// The question is [`Effective::asks_omlx`], never a second comparison here.
 pub fn refuse_other_server(effective: &Effective, command: &str, reads: &str) -> Option<u8> {
     if effective.asks_omlx() {
         return None;
@@ -192,40 +184,10 @@ pub fn refuse_other_server(effective: &Effective, command: &str, reads: &str) ->
     eprintln!(
         "error: {command} reads {reads}, and this run posts to {} instead — there is nothing for \
          it to check. imagecull score and imagecull groups work against any SystemOne server; only \
-         doctor and models are oMLX-only.",
+         models is oMLX-only.",
         effective.endpoint.trim_end_matches('/'),
     );
     Some(ExitCode::Fatal.code())
-}
-
-#[derive(Args, Debug)]
-pub struct DoctorArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-
-    /// A RAW file to run the preview pipeline on, as a self-test
-    #[arg(value_name = "FILE")]
-    pub file: Option<PathBuf>,
-
-    /// Cap on the longest edge of the sent preview, in pixels (default 1568)
-    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..))]
-    pub max_edge: Option<u32>,
-
-    /// JPEG quality of the sent preview, 1-100 (default 88)
-    #[arg(long, value_name = "QUALITY", value_parser = clap::value_parser!(u8).range(1..=100))]
-    pub jpeg_quality: Option<u8>,
-}
-
-impl DoctorArgs {
-    /// What this command's own flags said. The self-test proves the pipeline the
-    /// photographer is about to use, so it takes the same knobs a run would.
-    pub fn overrides(&self) -> Resolved {
-        Resolved {
-            score_max_edge: self.max_edge,
-            score_jpeg_quality: self.jpeg_quality,
-            ..self.common.overrides()
-        }
-    }
 }
 
 #[derive(Args, Debug)]
@@ -329,10 +291,6 @@ pub struct GroupsArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// Where to write the measures CSV
-    #[arg(long, value_name = "FILE", default_value = DEFAULT_GROUPS_CSV)]
-    pub out: PathBuf,
-
     /// Also scan subdirectories; hidden directories are never scanned. Takes an
     /// optional true/false, as `score` does
     #[arg(
@@ -416,11 +374,11 @@ impl GroupsArgs {
     /// a shoot config that turns recursion on can still be turned off for one
     /// run. `--max-edge` and `--jpeg-quality` are the comparison's own pair, and
     /// land on the `group_` keys: `score`'s `--max-edge` does not reach a cull,
-    /// `--limit`, `--out` and the cull/console flags describe the invocation
-    /// and stay out; `--jobs` does too, because it is this machine's read degree
-    /// rather than the shoot's. `--cull-jobs` is the one degree a shoot may carry
-    /// in its file: it says how many of its groups a comparison may overlap, and
-    /// the flag still beats the file for a run that wants to be gentler on the
+    /// `--limit` and the cull/console flags describe the invocation and stay out;
+    /// `--jobs` does too, because it is this machine's read degree rather than
+    /// the shoot's. `--cull-jobs` is the one degree a shoot may carry in its
+    /// file: it says how many of its groups a comparison may overlap, and the
+    /// flag still beats the file for a run that wants to be gentler on the
     /// server.
     pub fn overrides(&self) -> Resolved {
         Resolved {
@@ -487,7 +445,7 @@ fn exposure_stops(text: &str) -> Result<f64, String> {
 /// The `--version` line: the version, and the rubric a run uses by default.
 ///
 /// The hash is what makes the line worth printing: two builds with different
-/// default rubrics are not the same tool, and a photographer comparing CSVs
+/// default rubrics are not the same tool, and a photographer comparing sidecars
 /// needs the identity of the rubric that made them (spec §8.3, §11).
 pub fn version_line() -> String {
     match Builtin::DEFAULT.rubric() {
@@ -905,7 +863,7 @@ mod tests {
 
     #[test]
     fn every_command_takes_a_config_file_and_can_refuse_one() {
-        for command in ["score shoot", "groups shoot", "doctor", "models"] {
+        for command in ["score shoot", "groups shoot", "models"] {
             let arguments: Vec<&str> = command
                 .split(' ')
                 .chain(["--config", "mine.toml"])
@@ -913,7 +871,6 @@ mod tests {
             let parsed = parse(&arguments);
             let common = match &parsed {
                 Command::Score(args) => &args.common,
-                Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
                 Command::Groups(args) => &args.common,
             };
@@ -923,7 +880,6 @@ mod tests {
             let parsed = parse(&arguments);
             let common = match &parsed {
                 Command::Score(args) => &args.common,
-                Command::Doctor(args) => &args.common,
                 Command::Models(args) => args,
                 Command::Groups(args) => &args.common,
             };
@@ -940,72 +896,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_takes_an_optional_file_and_the_server_flags() {
-        let Command::Doctor(args) = parse(&["doctor"]) else {
-            panic!("not a doctor command");
-        };
-        assert_eq!(args.file, None);
-        assert_eq!(args.common.endpoint, None);
-        let effective = args.overrides().settle(None);
-        assert_eq!(
-            effective.endpoint,
-            imagecull_core::systemone::DEFAULT_ENDPOINT
-        );
-        assert_eq!(args.common.alias(&effective), omlx::DEFAULT_MODEL);
-        assert_eq!(effective.score_params.max_edge, Params::DEFAULT_MAX_EDGE);
-
-        let Command::Doctor(args) = parse(&[
-            "doctor",
-            "DSC_0001.NEF",
-            "--endpoint",
-            "http://127.0.0.1:9000",
-            "--model",
-            "clef-27b",
-        ]) else {
-            panic!("not a doctor command");
-        };
-        assert_eq!(args.file, Some(PathBuf::from("DSC_0001.NEF")));
-        let effective = args.overrides().settle(None);
-        assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
-        assert_eq!(args.common.alias(&effective), "clef-27b");
-    }
-
-    #[test]
-    fn doctor_takes_the_same_render_flags_as_a_run() {
-        let Command::Doctor(args) = parse(&["doctor", "DSC_0001.NEF", "--max-edge", "1024"]) else {
-            panic!("not a doctor command");
-        };
-        let effective = args.overrides().settle(None);
-        assert_eq!(effective.score_params.max_edge, 1024);
-        assert_eq!(
-            effective.score_params.jpeg_quality,
-            Params::DEFAULT_JPEG_QUALITY
-        );
-    }
-
-    #[test]
-    fn doctor_reads_the_ratings_preview_pair_from_the_config_file() {
-        let file = config::ConfigFile::from_toml("[score]\nmax_edge = 800\njpeg_quality = 65\n")
-            .expect("a valid config");
-        let Command::Doctor(args) = parse(&["doctor"]) else {
-            panic!("not a doctor command");
-        };
-
-        let effective = file
-            .resolve(None)
-            .override_with(args.overrides())
-            .settle(None);
-        assert_eq!(
-            effective.score_params,
-            Params {
-                max_edge: 800,
-                jpeg_quality: 65,
-            },
-            "the file check renders the preview a rating would send"
-        );
-    }
-
-    #[test]
     fn score_needs_a_directory() {
         assert!(parse_result(&["score"]).is_err());
     }
@@ -1018,7 +908,6 @@ mod tests {
             panic!("not a groups command");
         };
         assert_eq!(args.dir, PathBuf::from("shoot"));
-        assert_eq!(args.out, PathBuf::from(DEFAULT_GROUPS_CSV));
         assert_eq!(args.recursive, None);
         assert_eq!(args.limit, None);
         assert_eq!(args.group_gap, None);
@@ -1119,8 +1008,6 @@ mod tests {
         let Command::Groups(args) = parse(&[
             "groups",
             "shoot",
-            "--out",
-            "march-groups.csv",
             "--recursive",
             "--limit",
             "40",
@@ -1149,7 +1036,6 @@ mod tests {
         assert_eq!(options.scan.limit, Some(40));
         assert_eq!(options.jobs, Some(4), "the degree is the flag's");
         assert_eq!(args.cull_jobs, Some(2), "the cull has its own degree");
-        assert_eq!(args.out, PathBuf::from("march-groups.csv"));
     }
 
     #[test]

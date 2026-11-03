@@ -78,14 +78,12 @@ fn groups(shoot: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_imagecull"))
         .arg("groups")
         .arg(shoot)
-        .arg("--out")
-        .arg(shoot.join("groups.csv"))
         .current_dir(shoot)
         .output()
         .expect("the binary runs")
 }
 
-/// The decision requests a stub received: its preflight GETs are not them.
+/// The decision requests a stub received.
 fn comparisons(stub: &Stub) -> Vec<Received> {
     stub.requests()
         .into_iter()

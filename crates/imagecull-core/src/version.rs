@@ -4,8 +4,8 @@
 //!
 //! This is not a full PEP 440 implementation. It parses numeric dot segments
 //! plus one trailing pre-release tag, which covers what oMLX publishes, and it
-//! says "I cannot read this" instead of guessing, so `doctor` can fall back to
-//! probing capabilities.
+//! says "I cannot read this" instead of guessing, so callers report what they
+//! can confirm rather than inventing a version.
 
 use std::cmp::Ordering;
 use std::fmt;

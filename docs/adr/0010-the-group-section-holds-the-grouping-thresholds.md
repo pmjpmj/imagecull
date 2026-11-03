@@ -1,6 +1,8 @@
 # 0010 — The `[group]` section holds the grouping thresholds
 
 Status: accepted · 2026-11-27 · Feature `groups-config` ·
+amended by [ADR 0020](0020-the-cleanup-drops-doctor-and-the-measures-csv.md),
+which drops `--out` and the measures CSV ·
 amends [ADR 0003](0003-toml-config-file-one-source-at-a-time.md)'s "five
 sections" · supersedes [ADR 0009](0009-the-settings-gate-tolerates-exposure-drift.md)'s
 "`--group-exposure-stops` is a command-line flag and not a config key" ·

@@ -996,39 +996,6 @@ fn a_verdict_that_cannot_be_written_is_counted_and_named() {
     );
 }
 
-#[test]
-fn a_server_that_fails_the_preflight_marks_nothing() {
-    let shoot = two_frames();
-    let decider = Scripted::refusing_preflight(Error::new(
-        ErrorKind::Http400,
-        "POST /v1/systemone returned 400: this model is not a decision model",
-    ));
-    let recorded = quiet();
-
-    let error = cull::run(
-        &plan(shoot.path()),
-        &cull::Config {
-            model: "clef-flash-oQ4e",
-            shoot_context: None,
-            budget: keeper::Budget::default(),
-            preview: Params::default(),
-            grouping_hash: "hash",
-            allow_foreign: false,
-            retry: RetryPolicy::without_waiting(),
-        },
-        &decider,
-        &sidecar::Filesystem,
-        &recorded,
-    )
-    .expect_err("a decider that cannot answer stops the pass");
-
-    assert_eq!(error.kind(), Some(ErrorKind::Http400));
-    assert!(
-        !shoot.path().join("DSC_0001.xmp").exists(),
-        "nothing is marked before the server has shown it can answer"
-    );
-}
-
 /// A cull config for a grouping hash, with the measured budget and no waiting.
 fn stream_config(hash: &str) -> cull::Config<'_> {
     cull::Config {
@@ -1077,7 +1044,6 @@ fn a_streamed_cull_judges_every_group_and_writes_its_verdicts() {
     )
     .expect("a streamed cull");
 
-    assert!(streamed.fatal.is_none());
     assert_eq!(streamed.plan.groups, 2);
     assert_eq!(streamed.culled.groups, 2, "both groups were judged");
     assert_eq!(streamed.culled.red, 2, "one non-keeper per group");
@@ -1102,52 +1068,11 @@ fn a_streamed_cull_judges_every_group_and_writes_its_verdicts() {
     );
 }
 
-#[test]
-fn a_streamed_preflight_failure_leaves_the_plan_and_writes_nothing() {
-    let shoot = two_frames();
-    let decider = Guarded::new(Scripted::refusing_preflight(Error::new(
-        ErrorKind::Http400,
-        "POST /v1/systemone returned 400: this model is not a decision model",
-    )));
-    let recorded = quiet();
-    let hash = group::grouping_hash(&group::Thresholds::default());
-    let config = stream_config(&hash);
-
-    let streamed = cull::run_streaming(
-        &config,
-        &decider,
-        &sidecar::Filesystem,
-        &recorded,
-        2,
-        |sink| {
-            group::stream_with(
-                shoot.path(),
-                &group::Options::default(),
-                &imagecull_core::progress::Silent,
-                sink,
-            )
-        },
-    )
-    .expect("a failed cull is not a failed grouping pass");
-
-    assert_eq!(
-        streamed.fatal.as_ref().map(Error::kind),
-        Some(Some(ErrorKind::Http400))
-    );
-    assert_eq!(streamed.plan.groups, 1, "the plan is whole");
-    assert_eq!(streamed.culled.groups, 0, "nothing was judged");
-    assert!(
-        !shoot.path().join("DSC_0001.xmp").exists(),
-        "nothing is marked before the server has shown it can answer"
-    );
-}
-
 /// A decider that answers every group with the same choice, slowly enough that
 /// two requests can be in flight together, and counts how many were.
 struct Slow {
     in_flight: AtomicUsize,
     most: AtomicUsize,
-    preflights: AtomicUsize,
 }
 
 impl Slow {
@@ -1155,7 +1080,6 @@ impl Slow {
         Slow {
             in_flight: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
-            preflights: AtomicUsize::new(0),
         }
     }
 }
@@ -1177,11 +1101,6 @@ impl Decider for Slow {
             document: keeper("1", 0.9),
             client_latency_ms: 0,
         })
-    }
-
-    fn preflight(&self) -> imagecull_core::Result<()> {
-        self.preflights.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 }
 
@@ -1228,11 +1147,6 @@ fn a_streamed_cull_has_several_groups_in_flight_and_waits_for_every_one() {
         "two groups' comparisons were in flight at once, not one after another"
     );
     assert_eq!(
-        decider.preflights.load(Ordering::SeqCst),
-        1,
-        "four workers share one preflight"
-    );
-    assert_eq!(
         decider.in_flight.load(Ordering::SeqCst),
         0,
         "the pass returned only after every comparison finished"
@@ -1240,7 +1154,7 @@ fn a_streamed_cull_has_several_groups_in_flight_and_waits_for_every_one() {
 }
 
 #[test]
-fn a_streamed_cull_retires_a_singletons_red_after_the_preflight() {
+fn a_streamed_cull_retires_a_singletons_red_when_it_is_regrouped() {
     // A first run decides the pair in `shoot` and leaves a red on its first frame.
     let shoot = two_frames();
     let first = Scripted::answering(Vec::new()).comparing(vec![Ok(keeper("2", 0.62))]);
@@ -1252,7 +1166,7 @@ fn a_streamed_cull_retires_a_singletons_red_after_the_preflight() {
 
     // The folder is regrouped: DSC_0001 is now alone, and DSC_0002 and DSC_0003
     // are one moment. The lone frame is emitted before the group, so its
-    // retirement waits for the preflight the group triggers.
+    // retirement is judged alongside it.
     let regrouped = shoot_of(&[
         frame("DSC_0001.NEF", 0.0, 0, "10"),
         frame("DSC_0002.NEF", 0.0, 10, "10"),
@@ -1289,7 +1203,6 @@ fn a_streamed_cull_retires_a_singletons_red_after_the_preflight() {
     )
     .expect("a streamed cull");
 
-    assert!(streamed.fatal.is_none());
     assert_eq!(streamed.culled.groups, 1, "only the pair was judged");
     assert_eq!(streamed.culled.retired, 1, "the lone frame lost our red");
     let text = sidecar_of(regrouped.path(), "DSC_0001.NEF");

@@ -112,7 +112,7 @@ fn verbosity(args: &ScoreArgs) -> Verbosity {
 
 /// The CLI's half of cooperative cancellation: Ctrl-C asks the run to stop
 /// between files rather than killing the process mid-request, so nothing already
-/// scored is lost and the run still writes its CSV and exits `3` (spec §10).
+/// scored is lost and the run still records what it rated and exits `3` (spec §10).
 fn install_cancel_handler(cancel: &Arc<Cancel>) {
     let cancel = Arc::clone(cancel);
     if let Err(error) = ctrlc::set_handler(move || cancel.cancel()) {

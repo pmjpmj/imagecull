@@ -1,6 +1,8 @@
 # 0018 — The `[server]` section describes the wire, not the vendor
 
 Status: accepted · 2026-11-28 · Feature `cloudflare-clef` ·
+amended by [ADR 0020](0020-the-cleanup-drops-doctor-and-the-measures-csv.md),
+which removes `doctor` and the preflight ·
 amended by [ADR 0019](0019-the-endpoint-is-the-whole-address.md), which retires
 `path` and `selector` and makes `endpoint` the whole address ·
 amends [ADR 0003](0003-toml-config-file-one-source-at-a-time.md)'s section map

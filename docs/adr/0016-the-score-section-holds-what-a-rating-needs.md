@@ -1,6 +1,8 @@
 # 0016 — The `[score]` section holds what a rating needs
 
 Status: accepted · 2026-11-02 · Feature `score-section` ·
+amended by [ADR 0020](0020-the-cleanup-drops-doctor-and-the-measures-csv.md),
+which removes the `doctor` reader ·
 supersedes [ADR 0014](0014-the-comparison-has-its-own-preview-config.md)'s
 considered-but-rejected "moving both pairs under a per-command subsection" ·
 amends [ADR 0003](0003-toml-config-file-one-source-at-a-time.md)'s section map

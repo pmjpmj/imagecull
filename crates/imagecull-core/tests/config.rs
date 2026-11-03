@@ -316,7 +316,7 @@ fn a_jpeg_quality_outside_one_to_one_hundred_states_the_range() {
 fn an_address_with_no_path_is_a_config_like_any_other() {
     // The address is posted to as written: `http://127.0.0.1:9000` means `/`, and
     // a file is not refused for lacking a path. It is simply not an oMLX decision
-    // path, so `doctor` and `models` will not read it.
+    // path, so `models` will not read it.
     let effective = resolved("[server]\nendpoint = \"http://127.0.0.1:9000\"\n").settle(None);
     assert_eq!(effective.endpoint, "http://127.0.0.1:9000");
     assert!(
@@ -784,11 +784,11 @@ fn a_server_nobody_named_still_posts_where_it_always_did() {
 }
 
 #[test]
-fn only_the_omlx_path_is_the_one_doctor_and_models_can_read() {
-    // `doctor` and `models` read oMLX's own probes, and no other server has
-    // them. The question is asked of the address, so a server that keeps oMLX's
-    // fixed path is oMLX to these two commands and a server that puts its model
-    // in the path is not.
+fn only_the_omlx_path_is_the_one_models_can_read() {
+    // `models` reads oMLX's own probes, and no other server has them. The
+    // question is asked of the address, so a server that keeps oMLX's fixed path
+    // is oMLX to that command and a server that puts its model in the path is
+    // not.
     assert!(
         Resolved::default().settle(None).asks_omlx(),
         "a file that names no address posts to oMLX's"

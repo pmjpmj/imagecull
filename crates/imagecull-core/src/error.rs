@@ -1,9 +1,10 @@
 //! The failure taxonomy from the spec (§10), as types.
 //!
 //! A run over a shoot produces one [`Error`] per row at most, and that error's
-//! [`ErrorKind`] is the `status` column of the CSV. Run-level failures — bad
-//! arguments, a missing directory, an unreachable server, a rejected rubric —
-//! are [`Error`]s with no kind; they stop the run instead of being recorded.
+//! [`ErrorKind`] is the `status` a frame's report line carries. Run-level
+//! failures — bad arguments, a missing directory, an unreachable server, a
+//! rejected rubric — are [`Error`]s with no kind; they stop the run instead of
+//! being recorded.
 //!
 //! Nothing here formats for a terminal, asks whether stdout is a TTY, or exits
 //! the process. Those belong to the CLI front end, so the same core can be
@@ -14,9 +15,9 @@ use std::fmt;
 
 /// Every way one file can fail once a run is going.
 ///
-/// The string form ([`ErrorKind::as_str`]) is the `status` value written to the
-/// CSV and the ledger, so it is part of the output contract: do not rename a
-/// variant's string without treating it as a format change.
+/// The string form ([`ErrorKind::as_str`]) is the `status` a frame's report line
+/// carries, so it is part of the output contract: do not rename a variant's
+/// string without treating it as a format change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ErrorKind {
     /// The file could not be opened or parsed.
@@ -296,7 +297,7 @@ pub enum ExitCode {
     FailedRows,
     /// Nothing could be done: bad arguments, no server, rejected rubric.
     Fatal,
-    /// SIGINT; the ledger is intact and `--resume` picks it up.
+    /// SIGINT; every frame judged already has its sidecar.
     Interrupted,
 }
 

@@ -129,7 +129,7 @@ fn every_frame_is_reported_in_ingest_order_with_its_answers_and_latency() {
     assert_eq!(
         names,
         ["DSC_0001.NEF", "DSC_0002.NEF", "DSC_0003.NEF"],
-        "the frame line follows ingest order, like the CSV"
+        "the frame line follows ingest order, like the report"
     );
     let positions: Vec<(usize, usize)> = frames
         .iter()
@@ -223,7 +223,7 @@ fn a_frame_event_can_be_kept_and_compared_after_the_run_is_gone() {
     assert_eq!(kept[0].filename, "DSC_0001.NEF");
 }
 
-/// The failure type is the one the CSV uses, so a frame line and a row can
+/// The failure type is the one the report uses, so a frame line and a row can
 /// never disagree about what went wrong.
 #[test]
 fn the_reported_failure_is_the_rows_own_failure() {

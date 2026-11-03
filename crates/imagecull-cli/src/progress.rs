@@ -332,7 +332,7 @@ fn summary_block(summary: &Summary) -> String {
 }
 
 /// `--quiet`'s single line: the outcome, without the statistics. A script reads
-/// this and the exit code; a photographer reads the CSV.
+/// this and the exit code; a photographer reads the sidecars.
 fn outcome_line(summary: &Summary) -> String {
     let mut parts = vec![format!(
         "scored {} of {} in {}",
@@ -366,8 +366,8 @@ fn ending_line(ending: &Ending) -> Option<String> {
         Ending::Completed => None,
         Ending::Aborted { reason } => Some(format!("stopped: {reason}\n")),
         Ending::Interrupted => Some(
-            "interrupted: the run was stopped between frames; the rows judged so far are in the \
-             CSV, and --resume picks up where it stopped\n"
+            "interrupted: the run was stopped between frames; the frames judged so far already \
+             have their sidecars, and a re-run skips them\n"
                 .to_string(),
         ),
     }

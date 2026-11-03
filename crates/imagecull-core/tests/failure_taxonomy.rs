@@ -3,9 +3,10 @@
 //! run instead, and the code the process exits with.
 //!
 //! Everything enters through the scoring entry point with a scripted [`Decider`]
-//! and is asserted on what the run left behind: the CSV it wrote, the frames it
-//! judged, and the number of requests each frame cost — which is the attempt
-//! count, observed at the seam rather than through a counter inside the loop.
+//! and is asserted on what the run left behind: the frames it judged, the
+//! sidecars it wrote, and the number of requests each frame cost — which is the
+//! attempt count, observed at the seam rather than through a counter inside the
+//! loop.
 
 mod support;
 
@@ -26,8 +27,8 @@ use imagecull_core::sidecar::Outputs;
 use serde_json::json;
 use support::decider::{Scripted, document};
 
-/// A run over `csv`'s folder, with the spec's retry schedule shortened to
-/// nothing: the attempt count is what these tests assert, not the waiting.
+/// A run with the spec's retry schedule shortened to nothing: the attempt count
+/// is what these tests assert, not the waiting.
 fn config(_unused: PathBuf) -> Config {
     let mut config = Config::new(
         Builtin::General
@@ -617,40 +618,6 @@ fn every_status_a_file_can_carry_reaches_the_csv() {
             assert!(error.len() > 10 && error.len() < 200, "{file}: {error}");
         }
     }
-}
-
-#[test]
-fn a_preflight_failure_stops_the_run_before_the_first_frame() {
-    let shoot = shoot(3);
-    let csv = shoot.path().join("scores.csv");
-    let decider = Scripted::refusing_preflight(Error::fatal(
-        "cannot reach http://127.0.0.1:8000: Connection refused — start oMLX (omlx serve)",
-    ));
-
-    let error = scoring::run(
-        shoot.path(),
-        &config(csv.clone()),
-        &decider,
-        &imagecull_core::sidecar::Filesystem,
-        &Silent,
-        &Cancel::new(),
-    )
-    .expect_err("a broken server costs seconds, not 400 frames");
-
-    assert!(error.is_fatal());
-    assert!(
-        error.message().contains("start oMLX"),
-        "the message says what to do: {}",
-        error.message()
-    );
-    assert!(
-        decider.seen().is_empty(),
-        "the run stops before it judges anything"
-    );
-    assert!(
-        !csv.exists(),
-        "no report is written for a run that never started"
-    );
 }
 
 #[test]
